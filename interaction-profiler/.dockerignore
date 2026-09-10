@@ -1,0 +1,16 @@
+.git
+.venv
+.venv-ip
+.venv-*
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+*.egg-info
+# Large validation artifacts / result dumps; not needed in the image.
+examples/*.result.json
+examples/set*.json
+examples/validation*_result.json
+examples/*_readable.txt
+tests/data/*_prepared*.pdb
+node_modules

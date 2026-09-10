@@ -1,0 +1,77 @@
+# Drug Discovery MCP Server -- Process Configuration (Singularity / Apptainer)
+#
+# Identical to ../../reinvent4_mcp_config.yaml EXCEPT the external service URLs
+# point at localhost:<mapped-port>. Under Apptainer we use host networking (no
+# bridge DNS like http://boltz:8080), so every service is reachable on the host
+# loopback at the port run.sh maps it to. Select this file with:
+#   REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.singularity.yaml
+# (the dd-agent image already defaults to this path).
+
+reinvent:
+  device: "cuda:0"          # HIP presents as torch.cuda on ROCm, so unchanged.
+  batch_size: 16
+  sigma: 128
+  learning_rate: 0.0001
+  unique_sequences: true
+  randomize_smiles: true
+  default_model: ".reinvent"
+  diversity_filter:
+    type: "IdenticalMurckoScaffold"
+    bucket_size: 25
+    minscore: 0.4
+
+scoring:
+  aggregation: "geometric_mean"
+  pre_scoring:
+    enabled: true
+    components:
+      qed: true
+      molecular_weight: true
+      hbond_donors: true
+      hbond_acceptors: true
+      slogp: true
+      num_rot_bond: true
+  boltz:
+    enabled: true
+    service_url: "http://localhost:8091/score"
+    recycling_steps: 3
+    diffusion_samples: 1
+    sampling_steps_affinity: 200
+    affinity_mode: "pred_value"
+    cache_dir: "/data/boltz/cache"
+    use_msa_server: false
+    msa_server_url: "https://api.colabfold.com"
+  posebusters:
+    enabled: true
+    service_url: "http://localhost:8082/score"
+    mode: "dock"
+  admet:
+    enabled: true
+    service_url: "http://localhost:8084/score"
+  retrodmta:
+    enabled: true
+    service_url: "http://localhost:8085/score"
+    method: "ensemble"
+    window: "latest"
+  interaction_profiler:
+    enabled: true
+    service_url: "http://localhost:8083/score"
+    interaction_type: "all"    # default family counted by /score (hbond, ionic, ... , all)
+    radius: 8.0
+    ph: 7.4
+
+jobs:
+  working_dir: "/data/reinvent4_mcp/jobs"
+  max_concurrent_jobs: 2
+  checkpoint_on_stop: true
+
+# Absolute (not ~-relative): under Apptainer the container runs as the invoking
+# host user with the host $HOME auto-mounted, so "~" would resolve to the host
+# home and bypass the data/ttps bind below. Mirror jobs/logs/tb_logs instead.
+ttp:
+  storage_dir: "/data/reinvent4_mcp/ttps"
+
+logging:
+  level: "info"
+  tb_logdir: "/data/reinvent4_mcp/tb_logs"
+  log_dir: "/data/reinvent4_mcp/logs"

@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Test / coverage
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+.cache
+coverage.xml
+*.cover
+htmlcov/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+.python-version
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated artifacts (keep the repo light)
+# Prepared receptors written next to a structure when IP_CACHE_DIR is unset.
+*_prepared*.pdb
+# Profiling / benchmark / stress outputs.
+*.profile.json
+stress_report.json
+service_benchmark*.json
+
+# Build/package
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+
+# Stray CLI output files (from --out)
+r.json
+result.json
+*.result.json

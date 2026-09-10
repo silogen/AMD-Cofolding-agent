@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "interaction-profiler"
+version = "0.3.0"
+description = "Per-complex composition + tripartite (fragment, residue, interaction) mapping for biomolecular complexes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Pierre Llompart" }]
+keywords = [
+    "cheminformatics",
+    "structural-biology",
+    "interaction-fingerprint",
+    "functional-groups",
+    "drug-discovery",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "rdkit>=2023.03",
+    "MDAnalysis>=2.6",
+    "accfg>=0.0.9",
+    "dimorphite-dl>=2.0",
+    "pydantic>=2.0",
+    "typer>=0.9",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "openmm>=8.0",
+    "pdbfixer>=1.9",
+]
+
+[project.optional-dependencies]
+# Optional GPU acceleration of pairwise distance matrices (torch.cdist).
+# Not required: the numpy path is used when torch is unavailable.
+gpu = [
+    "torch>=2.0",
+]
+# HTTP service (REST). Lets scoring code / pipelines call the profiler
+# over the network instead of importing it. See interaction_profiler.service.
+service = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.5",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+interaction-profile = "interaction_profiler.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/interaction_profiler"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a real PDB on disk; skipped if data missing",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "TID"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's idiomatic Option/Argument defaults are function calls.
+"src/interaction_profiler/cli.py" = ["B008"]

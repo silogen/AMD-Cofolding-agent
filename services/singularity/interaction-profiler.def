@@ -1,0 +1,51 @@
+# interaction-profiler — Apptainer/Singularity definition.
+#
+# CPU service, HTTP server. Vendor-neutral. Mirrors services/interaction-profiler/Dockerfile.
+# The scientific stack (RDKit/OpenMM/MDAnalysis) ships conda-forge binaries, so
+# we base on micromamba. The listen port is env-driven (PORT, default 8083) so
+# host networking can remap the internal :8080.
+#
+# Build from the dd_agentic/ root (see services/singularity/build.sh).
+
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.8
+
+%files
+    # Build context is the dd_agentic/ root (apptainer build is invoked there).
+    interaction-profiler /app/interaction-profiler
+    services/interaction-profiler/app.py /app/app.py
+
+%post
+    set -eux
+    export MAMBA_ROOT_PREFIX=/opt/conda
+
+    apt-get update && apt-get install -y --no-install-recommends curl \
+        && rm -rf /var/lib/apt/lists/*
+
+    micromamba install -y -n base -c conda-forge \
+        python=3.11 rdkit openmm pdbfixer mdanalysis numpy scipy pandas
+    micromamba clean --all --yes
+
+    /opt/conda/bin/python -m pip install --no-cache-dir \
+        "accfg>=0.0.9" "dimorphite-dl>=2.0" "typer>=0.9" \
+        "fastapi>=0.110" "uvicorn[standard]>=0.29"
+    /opt/conda/bin/python -m pip install --no-cache-dir --no-deps /app/interaction-profiler
+
+%environment
+    # Activate the micromamba base env (python/uvicorn live in /opt/conda/bin).
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export PATH=/opt/conda/bin:${PATH}
+    export IP_SHARED_DIR=/shared
+    export IP_CACHE_DIR=/tmp/interaction_profiler_receptors
+    export PORT=${PORT:-8083}
+
+%startscript
+    cd /app
+    exec /opt/conda/bin/uvicorn app:app --host 0.0.0.0 --port "${PORT:-8083}"
+
+%runscript
+    cd /app
+    exec /opt/conda/bin/uvicorn app:app --host 0.0.0.0 --port "${PORT:-8083}"
+
+%labels
+    org.dd_agentic.service interaction-profiler

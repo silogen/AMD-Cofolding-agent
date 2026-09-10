@@ -1,0 +1,62 @@
+# admet-predictor — Apptainer/Singularity definition.
+#
+# CPU service, HTTP server. Mirrors services/admet-predictor/Dockerfile. The base
+# image is vendor-neutral (python:3.12-slim) and it runs on CPU (as under Docker
+# Compose today), so both vendors install the CPU torch wheel with PRED_DEVICE=cpu.
+# TORCH_INDEX_URL / PRED_DEVICE are still build-args so a GPU wheel can be swapped
+# in later if desired. The listen port is env-driven (PORT, default 8084).
+#
+# Build from the dd_agentic/ root (see services/singularity/build.sh):
+#   apptainer build --fakeroot \
+#     --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu \
+#     --build-arg PRED_DEVICE=cpu \
+#     services/singularity/admet-predictor-amd.sif services/singularity/admet-predictor.def
+
+Bootstrap: docker
+From: {{ BASE_IMAGE }}
+
+%arguments
+    # Vendor-neutral base; overridden only if a vendor needs a different one.
+    BASE_IMAGE=python:3.12-slim
+    # torch wheel index, supplied per-vendor by build.sh (default: CPU wheel).
+    TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+    # GNN forward device (default cpu; admet runs on CPU under Apptainer).
+    PRED_DEVICE=cpu
+
+%files
+    # Build context is the dd_agentic/ root (apptainer build is invoked there).
+    admet-predictor /app/admet-predictor
+    services/admet-predictor/app.py /app/app.py
+    models/admet /app/models
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        libxrender1 libxext6 libgomp1 curl && rm -rf /var/lib/apt/lists/*
+
+    cd /app
+    # torch wheel from the vendor index (CPU/ROCm/CUDA depending on TORCH_INDEX_URL).
+    pip install --no-cache-dir torch==2.7.1 --index-url {{ TORCH_INDEX_URL }}
+    pip install --no-cache-dir /app/admet-predictor
+
+    # self-test (fails the build if models/deps are broken)
+    MODELS_DIR=/app/models python -c "from admet_predictor import core as P; d=P.predict(['CC(=O)Oc1ccccc1C(=O)O']); assert d[0]['predictions']['logp']['mean'] is not None"
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONHASHSEED=0
+    export MODELS_DIR=/app/models
+    export PRED_DEVICE={{ PRED_DEVICE }}
+    export PORT=${PORT:-8084}
+
+%startscript
+    cd /app
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8084}"
+
+%runscript
+    cd /app
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8084}"
+
+%labels
+    org.dd_agentic.service admet-predictor

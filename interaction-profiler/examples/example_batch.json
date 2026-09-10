@@ -1,0 +1,30 @@
+{
+  "batch_id": "example",
+  "molecules": [
+    {
+      "name": "1OIU_run1",
+      "structure": "1OIU_boltz.pdb",
+      "ligand_resname": "LIG",
+      "smiles": "c1cc(cc(c1)S(=O)(=O)N)Nc2nc3c(c(n2)OCC4CCCCC4)nc[nH]3",
+      "source": "cofold"
+    },
+    {
+      "name": "1OIU_run2",
+      "structure": "1OIU_boltz.pdb",
+      "ligand_resname": "LIG",
+      "smiles": "c1cc(cc(c1)S(=O)(=O)N)Nc2nc3c(c(n2)OCC4CCCCC4)nc[nH]3",
+      "source": "cofold"
+    },
+    {
+      "name": "1OIU_run3",
+      "structure": "1OIU_boltz.pdb",
+      "ligand_resname": "LIG",
+      "smiles": "c1cc(cc(c1)S(=O)(=O)N)Nc2nc3c(c(n2)OCC4CCCCC4)nc[nH]3",
+      "source": "cofold"
+    },
+    {
+      "name": "aspirin",
+      "smiles": "CC(=O)Oc1ccccc1C(=O)O"
+    }
+  ]
+}
