@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "admet-predictor"
+version = "1.0.0"
+description = "Consensus ADMET prediction (XGBoost + Chemprop-MTL + CheMeleon-MTL) with double applicability domain, over 7 physchem/ADME endpoints."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Pierre Llompart" }]
+dependencies = [
+    "numpy==1.26.4",
+    "rdkit==2024.3.1",
+    "xgboost==3.3.0",
+    "pandas>=2.0,<2.3",
+    "chemprop==2.2.4",
+    "dimorphite-dl==2.0.2",
+    "fastapi==0.115.6",
+    "uvicorn==0.34.0",
+    "python-multipart==0.0.20",
+]
+
+[project.scripts]
+admet-predict = "admet_predictor.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/admet_predictor"]
+
+# Model weights live centrally in dd_agentic/models/ (gitignored) and are baked into the
+# image by the Dockerfile; they are not part of this package/wheel.

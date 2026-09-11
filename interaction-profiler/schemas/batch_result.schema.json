@@ -1,0 +1,957 @@
+{
+  "$defs": {
+    "BatchProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "default": "interaction-profiler",
+          "title": "Tool",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "fragment_method": {
+          "default": "accfg+smarts",
+          "title": "Fragment Method",
+          "type": "string"
+        },
+        "interaction_method": {
+          "default": "geometric",
+          "title": "Interaction Method",
+          "type": "string"
+        },
+        "interaction_radius": {
+          "default": 8.0,
+          "title": "Interaction Radius",
+          "type": "number"
+        },
+        "max_interactions": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Interaction cap per input; None = adaptive (~1.2x heavy atoms).",
+          "title": "Max Interactions"
+        },
+        "drop_uncertain": {
+          "default": true,
+          "description": "If true (default), uncertain interactions are removed AFTER the cap.",
+          "title": "Drop Uncertain",
+          "type": "boolean"
+        },
+        "gpu": {
+          "default": false,
+          "title": "Gpu",
+          "type": "boolean"
+        },
+        "tool_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Tool Versions",
+          "type": "object"
+        }
+      },
+      "title": "BatchProvenance",
+      "type": "object"
+    },
+    "Composition": {
+      "additionalProperties": false,
+      "description": "Hierarchical medchem taxonomy for one molecule.",
+      "properties": {
+        "fragments": {
+          "items": {
+            "$ref": "#/$defs/Fragment"
+          },
+          "title": "Fragments",
+          "type": "array"
+        },
+        "coverage": {
+          "default": 0.0,
+          "description": "Fraction of heavy atoms covered by >=1 fragment.",
+          "title": "Coverage",
+          "type": "number"
+        },
+        "n_heavy_atoms": {
+          "default": 0,
+          "title": "N Heavy Atoms",
+          "type": "integer"
+        }
+      },
+      "title": "Composition",
+      "type": "object"
+    },
+    "Fragment": {
+      "additionalProperties": false,
+      "description": "A named substructure of the ligand.\n\n``atom_indices`` are 0-based indices into the prepared ligand RDKit\nMol (heavy-atom indexing is stable because the join happens before\nHs are stripped for reporting). ``level`` places the fragment in the\nmedchem hierarchy.",
+      "properties": {
+        "name": {
+          "description": "Tool-native fragment label.",
+          "title": "Name",
+          "type": "string"
+        },
+        "canonical_name": {
+          "description": "Normalised label.",
+          "title": "Canonical Name",
+          "type": "string"
+        },
+        "level": {
+          "description": "Hierarchy level: functional_group | ring_system | scaffold | atom_group.",
+          "title": "Level",
+          "type": "string"
+        },
+        "atom_indices": {
+          "description": "0-based ligand atom indices in this fragment.",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Atom Indices",
+          "type": "array"
+        },
+        "smarts": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "SMARTS pattern matched, if any.",
+          "title": "Smarts"
+        },
+        "smiles": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "SMILES of the isolated fragment, if computed.",
+          "title": "Smiles"
+        }
+      },
+      "required": [
+        "name",
+        "canonical_name",
+        "level",
+        "atom_indices"
+      ],
+      "title": "Fragment",
+      "type": "object"
+    },
+    "Interaction": {
+      "additionalProperties": false,
+      "description": "One non-covalent (or covalent / metal / water-bridge) contact.\n\nAll partner metadata is spelled out so a table row is self-describing.",
+      "properties": {
+        "interaction_type": {
+          "description": "Canonical family: hbond | hydrophobic | pi_stacking | pi_cation | cation_pi | ionic | halogen_bond | metal | water_bridge | vdw_contact | covalent.",
+          "title": "Interaction Type",
+          "type": "string"
+        },
+        "subtype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "e.g. hbond_donor/hbond_acceptor, pi_face/pi_edge, ionic_pos/ionic_neg.",
+          "title": "Subtype"
+        },
+        "ligand_atom_idx": {
+          "description": "0-based ligand atom index (-1 if not attributable / group centroid).",
+          "title": "Ligand Atom Idx",
+          "type": "integer"
+        },
+        "ligand_atom_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Atom Name"
+        },
+        "ligand_element": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Element"
+        },
+        "receptor_chain": {
+          "default": "",
+          "title": "Receptor Chain",
+          "type": "string"
+        },
+        "receptor_resname": {
+          "default": "",
+          "title": "Receptor Resname",
+          "type": "string"
+        },
+        "receptor_resnum": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Receptor Resnum"
+        },
+        "receptor_reskind": {
+          "default": "protein",
+          "description": "protein | nucleic | ion | water | other.",
+          "title": "Receptor Reskind",
+          "type": "string"
+        },
+        "receptor_atom_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Receptor Atom Name"
+        },
+        "receptor_moiety": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "sidechain | backbone | ion | water | None.",
+          "title": "Receptor Moiety"
+        },
+        "distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Angstrom.",
+          "title": "Distance"
+        },
+        "angle": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Degrees (D-H..A for H-bonds, C-X..A for halogen, ring angle for pi).",
+          "title": "Angle"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ligand_donor | ligand_acceptor | None.",
+          "title": "Direction"
+        },
+        "ligand_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Role of the ligand side: cation | pi | water | None.",
+          "title": "Ligand Role"
+        },
+        "fragment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Canonical fragment the ligand atom belongs to, if any.",
+          "title": "Fragment"
+        },
+        "confidence": {
+          "default": "confident",
+          "description": "confident | uncertain.",
+          "title": "Confidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "interaction_type",
+        "ligand_atom_idx"
+      ],
+      "title": "Interaction",
+      "type": "object"
+    },
+    "MoleculeMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "input_mode": {
+          "default": "unknown",
+          "description": "smiles_only | structure_only | structure+smiles.",
+          "title": "Input Mode",
+          "type": "string"
+        },
+        "ligand_smiles": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Smiles"
+        },
+        "ligand_com": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "[x, y, z] center of mass (heavy atoms).",
+          "title": "Ligand Com"
+        },
+        "receptor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Summary receptor type: protein | rna | dna | protein+dna | ... | none.",
+          "title": "Receptor"
+        },
+        "chains": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Chains",
+          "type": "array"
+        },
+        "chain_types": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Per-chain type: chain id -> protein | rna | dna | other.",
+          "title": "Chain Types",
+          "type": "object"
+        },
+        "ph": {
+          "default": 7.4,
+          "title": "Ph",
+          "type": "number"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "has_structure": {
+          "default": false,
+          "title": "Has Structure",
+          "type": "boolean"
+        },
+        "n_interactions": {
+          "default": 0,
+          "title": "N Interactions",
+          "type": "integer"
+        },
+        "n_interactions_detected": {
+          "default": 0,
+          "title": "N Interactions Detected",
+          "type": "integer"
+        },
+        "n_dropped": {
+          "default": 0,
+          "title": "N Dropped",
+          "type": "integer"
+        },
+        "interaction_cap": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interaction Cap"
+        },
+        "n_triples": {
+          "default": 0,
+          "title": "N Triples",
+          "type": "integer"
+        },
+        "n_confident": {
+          "default": 0,
+          "title": "N Confident",
+          "type": "integer"
+        },
+        "n_uncertain": {
+          "default": 0,
+          "title": "N Uncertain",
+          "type": "integer"
+        },
+        "timing_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timing Seconds"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "MoleculeMetadata",
+      "type": "object"
+    },
+    "MoleculeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/MoleculeMetadata"
+        },
+        "composition": {
+          "$ref": "#/$defs/Composition"
+        },
+        "interactions": {
+          "items": {
+            "$ref": "#/$defs/Interaction"
+          },
+          "title": "Interactions",
+          "type": "array"
+        },
+        "triples": {
+          "items": {
+            "$ref": "#/$defs/Triple"
+          },
+          "title": "Triples",
+          "type": "array"
+        },
+        "preparation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreparationReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "metadata"
+      ],
+      "title": "MoleculeResult",
+      "type": "object"
+    },
+    "PreparationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "ligand_prepared": {
+          "default": false,
+          "title": "Ligand Prepared",
+          "type": "boolean"
+        },
+        "ligand_protonation_ph": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Protonation Ph"
+        },
+        "ligand_smiles_input": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Smiles Input"
+        },
+        "ligand_smiles_protonated": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Smiles Protonated"
+        },
+        "ligand_smiles_prepared": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ligand Smiles Prepared"
+        },
+        "ligand_n_hydrogens": {
+          "default": 0,
+          "title": "Ligand N Hydrogens",
+          "type": "integer"
+        },
+        "bond_assignment": {
+          "default": "none",
+          "title": "Bond Assignment",
+          "type": "string"
+        },
+        "template_inchikey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "InChIKey of the input SMILES template, if any.",
+          "title": "Template Inchikey"
+        },
+        "ligand_inchikey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "InChIKey of the prepared ligand.",
+          "title": "Ligand Inchikey"
+        },
+        "inchikey_match": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether the prepared ligand matches the SMILES template by InChIKey skeleton (first block; ignores stereo/protonation). None when no template.",
+          "title": "Inchikey Match"
+        },
+        "inchikey_exact_match": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether the full InChIKeys are identical (stereo + charge sensitive). A True skeleton match with False here means connectivity agrees but stereochemistry/protonation differs. None when no template.",
+          "title": "Inchikey Exact Match"
+        },
+        "receptor_prepared": {
+          "default": false,
+          "title": "Receptor Prepared",
+          "type": "boolean"
+        },
+        "receptor_ph": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Receptor Ph"
+        },
+        "receptor_atoms_added": {
+          "default": 0,
+          "title": "Receptor Atoms Added",
+          "type": "integer"
+        },
+        "receptor_hydrogens_added": {
+          "default": false,
+          "title": "Receptor Hydrogens Added",
+          "type": "boolean"
+        },
+        "prepared_ligand_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prepared Ligand Path"
+        },
+        "prepared_receptor_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prepared Receptor Path"
+        },
+        "stereo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StereoInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "title": "PreparationReport",
+      "type": "object"
+    },
+    "StereoInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "n_stereocenters": {
+          "default": 0,
+          "title": "N Stereocenters",
+          "type": "integer"
+        },
+        "n_defined": {
+          "default": 0,
+          "title": "N Defined",
+          "type": "integer"
+        },
+        "n_undefined": {
+          "default": 0,
+          "title": "N Undefined",
+          "type": "integer"
+        },
+        "undefined_atom_indices": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Undefined Atom Indices",
+          "type": "array"
+        },
+        "n_double_bond_stereo": {
+          "default": 0,
+          "title": "N Double Bond Stereo",
+          "type": "integer"
+        },
+        "n_double_bond_unspecified": {
+          "default": 0,
+          "title": "N Double Bond Unspecified",
+          "type": "integer"
+        },
+        "matches_input_smiles": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Matches Input Smiles"
+        }
+      },
+      "title": "StereoInfo",
+      "type": "object"
+    },
+    "Triple": {
+      "additionalProperties": false,
+      "description": "Grouped ``fragment x residue x interaction`` row.\n\nRepeated equivalent contacts (same fragment, residue, moiety,\ninteraction subtype, direction) are collapsed into one row with a\n``count`` and distance / angle ranges -- matching the human summary\nstyle ``HBondDonor x2  d=3.0-3.3A  theta=141-165``.",
+      "properties": {
+        "fragment": {
+          "title": "Fragment",
+          "type": "string"
+        },
+        "residue_label": {
+          "description": "e.g. 'ILE50.A'.",
+          "title": "Residue Label",
+          "type": "string"
+        },
+        "residue_name": {
+          "title": "Residue Name",
+          "type": "string"
+        },
+        "residue_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residue Number"
+        },
+        "chain": {
+          "default": "",
+          "title": "Chain",
+          "type": "string"
+        },
+        "moiety": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Moiety"
+        },
+        "interaction_type": {
+          "title": "Interaction Type",
+          "type": "string"
+        },
+        "subtype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtype"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction"
+        },
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "distance_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distance Min"
+        },
+        "distance_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distance Max"
+        },
+        "angle_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Angle Min"
+        },
+        "angle_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Angle Max"
+        },
+        "n_confident": {
+          "default": 0,
+          "title": "N Confident",
+          "type": "integer"
+        },
+        "n_uncertain": {
+          "default": 0,
+          "title": "N Uncertain",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fragment",
+        "residue_label",
+        "residue_name",
+        "interaction_type"
+      ],
+      "title": "Triple",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "batch_id": {
+      "default": "batch",
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "n_molecules": {
+      "default": 0,
+      "title": "N Molecules",
+      "type": "integer"
+    },
+    "provenance": {
+      "$ref": "#/$defs/BatchProvenance"
+    },
+    "molecules": {
+      "items": {
+        "$ref": "#/$defs/MoleculeResult"
+      },
+      "title": "Molecules",
+      "type": "array"
+    }
+  },
+  "title": "BatchResult",
+  "type": "object"
+}

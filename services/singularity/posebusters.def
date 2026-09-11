@@ -1,0 +1,33 @@
+# posebusters — Apptainer/Singularity definition.
+#
+# CPU service, HTTP server. Vendor-neutral. Mirrors services/posebusters/Dockerfile.
+# The listen port is env-driven (PORT, default 8082) so host networking can remap
+# the internal :8080.
+#
+# Build from the dd_agentic/ root (see services/singularity/build.sh).
+
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    # Build context is the dd_agentic/ root (apptainer build is invoked there).
+    services/posebusters/requirements.txt /app/requirements.txt
+    services/posebusters/app.py /app/app.py
+
+%post
+    set -eux
+    pip install --no-cache-dir -r /app/requirements.txt
+
+%environment
+    export PORT=${PORT:-8082}
+
+%startscript
+    cd /app
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8082}"
+
+%runscript
+    cd /app
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8082}"
+
+%labels
+    org.dd_agentic.service posebusters

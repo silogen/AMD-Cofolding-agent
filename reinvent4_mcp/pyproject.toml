@@ -1,0 +1,32 @@
+[project]
+name = "dd-mcp"
+version = "0.1.0"
+description = "MCP server for Drug Discovery de novo drug design"
+requires-python = ">=3.10"
+dependencies = [
+    # <2: mcp 2.0 renamed mcp.server.fastmcp.FastMCP to
+    # mcp.server.mcpserver.MCPServer, which server.py does not use yet.
+    "mcp[cli]>=1.9,<2",
+    "pydantic>=2,<3",
+    "PyYAML>=6.0",
+    "numpy>=1.21,<3",
+    "pandas>=1.5",
+    "requests>=2.28",
+]
+
+[project.scripts]
+dd-mcp = "reinvent4_mcp.server:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["reinvent4_mcp*"]
+
+# Ship the custom REINVENT4 plugins, which live under a PEP 420 namespace layout
+# (_plugins/reinvent_plugins/components/) and therefore are NOT auto-discovered as
+# packages. Installing them keeps custom_plugins_path() valid in site-packages.
+[tool.setuptools.package-data]
+reinvent4_mcp = ["_plugins/reinvent_plugins/components/*.py"]

@@ -1,0 +1,48 @@
+# boltz — Apptainer/Singularity definition.
+#
+# GPU service, HTTP server. Mirrors services/boltz2/Dockerfile. Vendor is
+# selected at build time via the BASE_IMAGE build-arg (ROCm or CUDA pytorch
+# base); torch comes from that base. The listen port is env-driven (PORT) so
+# host networking can remap the internal :8080 (default here: 8091).
+#
+# Build from the dd_agentic/ root (see services/singularity/build.sh).
+# Started as an instance by run.sh; %startscript honours ${PORT}.
+
+Bootstrap: docker
+From: {{ BASE_IMAGE }}
+
+%arguments
+    # Overridden per-vendor by build.sh / vendors.sh. Default = AMD ROCm base.
+    BASE_IMAGE=rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
+
+%files
+    # Build context is the dd_agentic/ root (apptainer build is invoked there).
+    boltz2 /app/boltz
+    services/boltz2/app.py /app/wrapper/app.py
+    services/boltz2/requirements.txt /app/wrapper/requirements.txt
+
+%post
+    set -eux
+    apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
+    # --- Install Boltz2 from source (torch comes from the base image) ---
+    pip install --no-cache-dir DockQ
+    cd /app/boltz
+    pip install --no-cache-dir -e .
+
+    # --- Install FastAPI wrapper ---
+    pip install --no-cache-dir -r /app/wrapper/requirements.txt
+
+%environment
+    export PORT=${PORT:-8091}
+
+%startscript
+    cd /app/wrapper
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8091}"
+
+%runscript
+    cd /app/wrapper
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8091}"
+
+%labels
+    org.dd_agentic.service boltz

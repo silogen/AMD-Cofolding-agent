@@ -1,0 +1,26 @@
+[project]
+name = "dd-agent"
+version = "0.1.0"
+description = "Interactive CLI agent for Drug Discovery using LLM + MCP"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.50",
+    "openai>=1.77",
+    "httpx",
+    # Kept in lockstep with dd-mcp, which cannot run on mcp 2.x yet.
+    "mcp[cli]>=1.9,<2",
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+]
+
+[project.scripts]
+dd-agent = "reinvent4_agent.cli:main"
+dd-coscientist = "reinvent4_agent.cli:coscientist_main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["reinvent4_agent*"]

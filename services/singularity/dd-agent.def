@@ -1,0 +1,118 @@
+# dd-agent (reinvent4-mcp) — Apptainer/Singularity definition.
+#
+# GPU service. Mirrors services/dd-agent/Dockerfile. No server port; this image
+# runs the agent CLI (apptainer run). Vendor is selected at build time via the
+# BASE_IMAGE build-arg (ROCm or CUDA pytorch base); torch comes from that base.
+#
+# Build from the dd_agentic/ root (see services/singularity/build.sh):
+#   apptainer build --fakeroot \
+#     --build-arg BASE_IMAGE=rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0 \
+#     services/singularity/dd-agent-amd.sif services/singularity/dd-agent.def
+#
+# Run on a GPU node (host networking; localhost service URLs):
+#   apptainer run --rocm|--nv --bind ./data/shared:/shared dd-agent-<vendor>.sif
+
+Bootstrap: docker
+From: {{ BASE_IMAGE }}
+
+%arguments
+    # Overridden per-vendor by build.sh / vendors.sh. Default = AMD ROCm base.
+    BASE_IMAGE=rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
+
+%files
+    # Build context is the dd_agentic/ root (apptainer build is invoked there).
+    REINVENT4 /app/REINVENT4
+    reinvent4_mcp /app/reinvent4_mcp
+    reinvent4_agent /app/reinvent4_agent
+    reinvent4_mcp_config.yaml /app/reinvent4_mcp_config.yaml
+    services/singularity/reinvent4_mcp_config.singularity.yaml /app/reinvent4_mcp_config.singularity.yaml
+    services/dd-agent/entrypoint.sh /usr/local/bin/dd-agent-entrypoint.sh
+
+%post
+    set -eux
+
+    # RDKit's drawing module (rdkit.Chem.Draw.rdMolDraw2D), pulled in by
+    # REINVENT4's tensorboard reporting, needs these X/GL system libs at runtime;
+    # the pytorch base image doesn't ship them -> libXrender.so.1 ImportError.
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        libxrender1 libxext6 libsm6 libgomp1 && rm -rf /var/lib/apt/lists/*
+
+    # Entrypoint wrapper timestamps captured logs (redirected file / run.sh .out)
+    # while leaving interactive TTY sessions untouched.
+    chmod +x /usr/local/bin/dd-agent-entrypoint.sh
+
+    # %environment isn't sourced during %post, so export the REINVENT4 root here
+    # too — the verification below calls ensure_reinvent4_importable(), which
+    # can't fall back to the ../REINVENT4 layout once the package is in site-packages.
+    export REINVENT4_ROOT=/app/REINVENT4
+
+    # --- Install REINVENT4 (torch comes from the base image; strip the pins) ---
+    cd /app/REINVENT4
+    sed -i.bak '/torch==/d' pyproject.toml
+    sed -i.bak '/torchvision/d' pyproject.toml
+    # `-d none` = core deps only (rdkit, xxhash, numpy, pandas, pydantic, ...),
+    # skipping openeye (needs license/index) and isim (git). Import check turns
+    # any silent install failure into a hard build failure.
+    python install.py cpu -d none
+    pip install --no-cache-dir --upgrade "numpy>=2,<3" "scipy>=1.13"
+    python -c "import numpy, scipy; from scipy.stats import gaussian_kde; import rdkit, xxhash, tomllib, pandas, pydantic; print('REINVENT4 deps OK; numpy', numpy.__version__, 'scipy', scipy.__version__)"
+
+    # --- Download prior models from Zenodo (verify MD5s: catch truncation/HTML errors) ---
+    # Base PyTorch images don't ship wget/curl, so download via Python's urllib
+    # (guaranteed present) with retries.
+    mkdir -p /app/REINVENT4/priors
+    python - <<'PY'
+import time, urllib.request
+files = [
+    ("https://zenodo.org/records/15641297/files/reinvent.prior?download=1",
+     "/app/REINVENT4/priors/reinvent.prior"),
+    ("https://zenodo.org/records/15641297/files/mol2mol_medium_similarity.prior?download=1",
+     "/app/REINVENT4/priors/mol2mol_medium_similarity.prior"),
+]
+for url, dest in files:
+    for attempt in range(1, 4):
+        try:
+            urllib.request.urlretrieve(url, dest)
+            break
+        except Exception as e:
+            print(f"attempt {attempt} failed for {url}: {e}")
+            if attempt == 3:
+                raise
+            time.sleep(2 * attempt)
+PY
+    echo "f268eb072f4fca69ca9434768d3cd461  /app/REINVENT4/priors/reinvent.prior" | md5sum -c -
+    echo "78b75e478bfd7dcccee8ece010bc0b07  /app/REINVENT4/priors/mol2mol_medium_similarity.prior" | md5sum -c -
+
+    # --- Install MCP server + agent, pinning numpy/scipy LAST so a transitive
+    # dep can't clobber them. Verify the exact import REINVENT4 needs at RL start. ---
+    pip install --no-cache-dir /app/reinvent4_mcp /app/reinvent4_agent
+    pip install --no-cache-dir --upgrade "numpy>=2,<3" "scipy>=1.13"
+    python -c "import numpy, scipy; from scipy.stats import gaussian_kde; import reinvent; \
+import reinvent4_mcp.utils as u; u.ensure_reinvent4_importable(); \
+from reinvent.scoring.importer import get_registry; r = get_registry(); \
+assert 'externalrestscorer' in r, sorted(r); \
+print('FINAL env OK; externalrestscorer registered; numpy', numpy.__version__, 'scipy', scipy.__version__)"
+
+%environment
+    export REINVENT4_ROOT=/app/REINVENT4
+    # Default to the Singularity (localhost) config; run.sh may override via --env.
+    export REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.singularity.yaml
+    # Custom REINVENT4 plugins on the path (server + RL worker subprocess).
+    export PYTHONPATH=/app/reinvent4_mcp/_plugins:${PYTHONPATH}
+    # AMD gateway defaults. Guarded with :- so host env (e.g. from env.local.sh,
+    # which Apptainer forwards by default) or run.sh --env values win — e.g. a
+    # tunnelled REINVENT4_AGENT_BASE_URL with a :PORT is NOT clobbered.
+    export REINVENT4_AGENT_BACKEND="${REINVENT4_AGENT_BACKEND:-anthropic}"
+    export REINVENT4_AGENT_MODEL="${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}"
+    export REINVENT4_AGENT_BASE_URL="${REINVENT4_AGENT_BASE_URL:-https://llm-api.amd.com/Anthropic}"
+    export REINVENT4_AGENT_NO_VERIFY_SSL="${REINVENT4_AGENT_NO_VERIFY_SSL:-true}"
+    export REINVENT4_AGENT_THINKING_BUDGET="${REINVENT4_AGENT_THINKING_BUDGET:-1024}"
+    export REINVENT4_AGENT_LOG_DIR="${REINVENT4_AGENT_LOG_DIR:-/logs}"
+    # LLM_GATEWAY_KEY must be provided at runtime via --env
+
+%runscript
+    exec /usr/local/bin/dd-agent-entrypoint.sh dd-agent "$@"
+
+%labels
+    org.dd_agentic.service dd-agent

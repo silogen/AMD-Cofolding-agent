@@ -1,0 +1,51 @@
+# Secrets -- never commit
+env.local.sh
+*.local.sh
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+*.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.cursor/
+
+# Model weights -- large binaries, NOT committed. Restore dd_agentic/models/ from the
+# SharePoint zip (see admet-predictor / retrodmta-predictor READMEs). Docker bakes them in
+# at build time from this central dir; .dockerignore keeps them IN the build context.
+/models/
+
+/paper/
+
+# External sources
+REINVENT4/
+/boltz2/
+reinvent4_amd_helpers/
+/posebusters/
+*.zip
+PHASE3A_API_REQUIREMENTS.md
+/job_data*/
+SLIDES.md
+data/
+
+# Container images -- large build artifacts, NOT committed.
+# enroot squashfs images + cached base images (services/enroot/).
+*.sqsh
+services/enroot/.base-cache/
+# Apptainer/Singularity images (services/singularity/).
+*.sif
+
+.DS_Store

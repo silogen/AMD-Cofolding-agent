@@ -1,0 +1,45 @@
+# retrodmta-predictor — Apptainer/Singularity definition.
+#
+# CPU service, HTTP server. Vendor-neutral. Mirrors services/retrodmta-predictor/Dockerfile.
+# The listen port is env-driven (PORT, default 8085).
+#
+# Build from the dd_agentic/ root (see services/singularity/build.sh).
+
+Bootstrap: docker
+From: python:3.12-slim
+
+%files
+    # Build context is the dd_agentic/ root (apptainer build is invoked there).
+    retrodmta-predictor /app/retrodmta-predictor
+    services/retrodmta-predictor/app.py /app/app.py
+    models/retrodmta /app/models
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        libxrender1 libxext6 libgomp1 curl && rm -rf /var/lib/apt/lists/*
+
+    cd /app
+    pip install --no-cache-dir torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+    pip install --no-cache-dir /app/retrodmta-predictor
+
+    # self-test: load a target/window + predict
+    MODELS_DIR=/app/models python -c "from retrodmta_predictor import core as P; d=P.predict('FXA', ['CC(=O)Oc1ccccc1C(=O)O'], window='latest', method='ensemble'); assert d[0]['predictions']['FXA_pKi']['mean'] is not None"
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONHASHSEED=0
+    export MODELS_DIR=/app/models
+    export PORT=${PORT:-8085}
+
+%startscript
+    cd /app
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8085}"
+
+%runscript
+    cd /app
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8085}"
+
+%labels
+    org.dd_agentic.service retrodmta-predictor
