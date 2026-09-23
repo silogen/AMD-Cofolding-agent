@@ -424,17 +424,21 @@ class TestMSAResolution:
     def _params(self, **overrides) -> ScoreParams:
         return ScoreParams(protein_sequence="MVLSPADKTN", **overrides)
 
-    def test_explicit_msa_path_wins(self):
-        msa_path, use_server = boltz_app._resolve_msa(
-            self._params(msa_path="/shared/brd4_bd1.a3m", use_msa_server=True)
+    def test_explicit_msa_path_wins(self, tmp_path):
+        msa_file = tmp_path / "brd4_bd1.a3m"
+        msa_file.write_text(">query\nMVLSPADKTN\n")
+        msa_path, use_server, error = boltz_app._resolve_msa(
+            self._params(msa_path=str(msa_file), use_msa_server=True)
         )
-        assert msa_path == "/shared/brd4_bd1.a3m"
+        assert msa_path == str(msa_file)
         assert use_server is False
+        assert error is None
 
     def test_no_source_returns_none(self):
-        msa_path, use_server = boltz_app._resolve_msa(self._params())
+        msa_path, use_server, error = boltz_app._resolve_msa(self._params())
         assert msa_path is None
         assert use_server is False
+        assert error is None
 
     def test_server_path_uses_cache(self, tmp_path):
         with patch.object(boltz_app, "MSA_CACHE_DIR", tmp_path):
@@ -442,22 +446,25 @@ class TestMSAResolution:
                 boltz_app, "_ensure_cached_msa",
                 return_value=str(tmp_path / "abc.a3m"),
             ) as mock_cache:
-                msa_path, use_server = boltz_app._resolve_msa(
+                msa_path, use_server, error = boltz_app._resolve_msa(
                     self._params(use_msa_server=True)
                 )
         assert msa_path == str(tmp_path / "abc.a3m")
         assert use_server is False
+        assert error is None
         mock_cache.assert_called_once()
 
-    def test_server_failure_falls_back_to_live_server(self):
+    def test_server_failure_returns_actionable_error(self):
         with patch.object(
             boltz_app, "_ensure_cached_msa", side_effect=RuntimeError("server down")
         ):
-            msa_path, use_server = boltz_app._resolve_msa(
+            msa_path, use_server, error = boltz_app._resolve_msa(
                 self._params(use_msa_server=True)
             )
         assert msa_path is None
-        assert use_server is True
+        assert use_server is False
+        assert error is not None
+        assert "server down" in error
 
     def test_cache_hit_skips_server(self, tmp_path):
         seq = "MVLSPADKTN"
@@ -519,7 +526,7 @@ class TestScoreEndpoint:
 
     @patch("boltz2_app._run_predict")
     @patch("boltz2_app._write_batch_yamls")
-    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False))
+    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False, None))
     def test_subprocess_failure_returns_500(self, mock_resolve, mock_write, mock_predict):
         mock_write.return_value = []
         mock_predict.return_value = subprocess.CompletedProcess(
@@ -542,7 +549,7 @@ class TestScoreEndpoint:
     @patch("boltz2_app._find_results_dir")
     @patch("boltz2_app._assemble_response")
     @patch("boltz2_app._write_batch_yamls")
-    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False))
+    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False, None))
     def test_successful_scoring(
         self, mock_resolve, mock_write, mock_assemble, mock_find, mock_predict
     ):
@@ -572,7 +579,7 @@ class TestScoreEndpoint:
 
     @patch("boltz2_app._run_predict")
     @patch("boltz2_app._write_batch_yamls")
-    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False))
+    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False, None))
     def test_timeout_returns_500(self, mock_resolve, mock_write, mock_predict):
         mock_write.return_value = []
         mock_predict.side_effect = subprocess.TimeoutExpired(
@@ -592,7 +599,7 @@ class TestScoreEndpoint:
     @patch("boltz2_app._run_predict")
     @patch("boltz2_app._find_results_dir")
     @patch("boltz2_app._write_batch_yamls")
-    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False))
+    @patch("boltz2_app._resolve_msa", return_value=("/fake/msa.a3m", False, None))
     def test_missing_results_dir_returns_500(
         self, mock_resolve, mock_write, mock_find, mock_predict
     ):

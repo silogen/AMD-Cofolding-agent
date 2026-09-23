@@ -45,6 +45,7 @@ from interaction_profiler.io.batch_input import MoleculeInput
 from interaction_profiler.schemas import (
     BatchProvenance,
     BatchResult,
+    ComplexResult,
     MoleculeResult,
     detect_tool_versions,
 )
@@ -313,7 +314,10 @@ def create_app():
 
     @app.get("/schema")
     def schema() -> dict[str, Any]:
-        return BatchResult.model_json_schema()
+        return {
+            "v1_batch_result": BatchResult.model_json_schema(),
+            "v2_complex_result": ComplexResult.model_json_schema(),
+        }
 
     @app.post("/analyze")
     def analyze(req: AnalyzeRequest) -> JSONResponse:
@@ -388,9 +392,289 @@ def create_app():
     return app
 
 
+# ---------------------------------------------------------------------------
+# v2 request / response models for POST /profile_complex
+# ---------------------------------------------------------------------------
+
+class ComplexPotency(BaseModel):
+    """Optional potency input for LE / LLE / BEI calculation."""
+
+    model_config = ConfigDict(extra="allow")  # sub-dicts: experimental, boltz, model, docking
+
+    experimental: dict | None = Field(
+        default=None,
+        description="Experimental potency: {value, unit, type, relation, source, uncertainty}.",
+    )
+    boltz: dict | None = Field(
+        default=None,
+        description="Boltz affinity: {affinity_pred_value, confidence_score, ligand_iptm, posebusters_all_pass}.",
+    )
+    model: dict | None = Field(
+        default=None,
+        description="Model-predicted potency: {value, unit, type, model_name, target, window}.",
+    )
+    docking: dict | None = Field(
+        default=None,
+        description="Docking score: {score, unit, docking_engine, conversion_record}.",
+    )
+
+
+class ComplexRequest(BaseModel):
+    """Request model for POST /profile_complex (v2 endpoint)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    structure: str | None = Field(
+        default=None,
+        description="Shared-volume path to PDB or mmCIF file.",
+    )
+    smiles: str | None = Field(
+        default=None,
+        description="Ligand SMILES (required for ligand_only; optional for ligand_target).",
+    )
+    mode: str = Field(
+        default="ligand_target",
+        description="ligand_only | ligand_target | binder_target | hotspot_ensemble.",
+    )
+    binder_chains: list[str] | None = Field(
+        default=None,
+        description="Chain IDs of the binder entity. None = auto-detect (may warn if ambiguous).",
+    )
+    target_chains: list[str] | None = Field(
+        default=None,
+        description="Chain IDs of the target entity. None = auto-detect.",
+    )
+    binder_role: str | None = Field(
+        default=None,
+        description=(
+            "Explicit role for the binder entity: protein | peptide | nanobody | antibody | dna | rna. "
+            "When None: 2+ binder chains → antibody (Fv/Fab heuristic), 1 chain → protein. "
+            "Providing this suppresses all length-based heuristics and ambiguity warnings."
+        ),
+    )
+    ligand_comp_id: str | None = Field(
+        default=None,
+        description="Three-letter residue name of the small-molecule ligand.",
+    )
+    ligand_resname: str | None = Field(default=None)
+    ligand_chain: str | None = Field(default=None)
+    annotation_accessions: dict | None = Field(
+        default=None,
+        description=(
+            "Optional annotations: {uniprot: 'P24941', interpro: true, "
+            "annotation_cache_dir: '/shared/annotations', "
+            "structure_paths: ['/path1', '/path2']  # for hotspot_ensemble}."
+        ),
+    )
+    potency: ComplexPotency | None = Field(
+        default=None,
+        description="Potency values for LE/LLE/BEI computation.",
+    )
+    ph: float = Field(default=7.4, ge=0.0, le=14.0)
+    radius: float = Field(default=8.0, ge=1.0, le=25.0)
+    compute_strain: bool = Field(default=True, description="Compute MMFF94 conformational strain.")
+    compute_efficiency: bool = Field(default=True, description="Compute LE/LLE/BEI.")
+    compute_interface: bool = Field(default=True, description="Compute BSA and shape complementarity.")
+    fail_on_ambiguity: bool = Field(
+        default=True,
+        description=(
+            "When True (default), raise HTTP 422 in binder_target mode if "
+            "binder_chains or target_chains are not explicitly specified. "
+            "Set False to allow automatic inference (with warning). "
+            "Has no effect in ligand_only mode."
+        ),
+    )
+    coordinate_source: str = Field(
+        default="crystal",
+        description="crystal | boltz | gnina | generated — provenance of 3D coordinates.",
+    )
+    use_gpu: bool = Field(default=False)
+    max_interactions: int | None = Field(default=None)
+    drop_uncertain: bool = Field(default=True)
+    # ── Extension block 06.v3 — new optional fields (all default None/backward-compat) ──
+    ligand_sdf: str | None = Field(
+        default=None,
+        description=(
+            "Shared-volume path to a pre-extracted 3D SDF file for the ligand. "
+            "When provided, enables MMFF94 conformational strain calculation. "
+            "Use extract_ligand_sdf() in the MCP to produce this from a prepared PDB."
+        ),
+    )
+    analysis_profile: str | None = Field(
+        default=None,
+        description=(
+            "Preset compute profile. "
+            "protein_only mode: structure | pocket | annotated | full. "
+            "Other modes: fast | standard | enriched | full. "
+            "None = use individual compute flags (current behavior)."
+        ),
+    )
+    site_profile_id: str | None = Field(
+        default=None,
+        description=(
+            "SHA-256 cache key of a previously computed SiteProfile "
+            "(from POST /characterize_site) to inject pocket context. "
+            "When supplied the service reads from /shared/site_cache/{id}.json."
+        ),
+    )
+    ensemble_profile: str | None = Field(
+        default=None,
+        description=(
+            "Ensemble analysis preset (hotspot_ensemble mode only): "
+            "hotspots | families | full. "
+            "None = existing hotspot occupancy only."
+        ),
+    )
+
+
+def _add_profile_complex_route(app_instance) -> None:
+    """Register POST /profile_complex on an existing FastAPI app instance."""
+    from fastapi import HTTPException
+
+    @app_instance.post("/profile_complex", summary="Rich complex profiling (v2)")
+    async def profile_complex_endpoint(req: ComplexRequest):
+        """Profile a molecular complex with the v2 generalised entity model.
+
+        Returns a :class:`ComplexResult` with:
+        - Typed entities (binder / target / context)
+        - Enriched interactions annotated with secondary structure, UniProt
+          features, and InterPro domain context
+        - Generalised ``binder_feature × target_feature × interaction_type`` triples
+        - Conformational strain (MMFF94, Lai 2026 method)
+        - Ligand efficiency metrics (LE / LLE / BEI)
+        - Interface geometry (BSA + shape complementarity)
+        - Hotspot occupancy across structure ensembles
+
+        Existing endpoints (``/analyze``, ``/profile``, ``/score``) are
+        **not affected** and remain unchanged.
+        """
+        structure_path = None
+        if req.structure:
+            p = _resolve_shared_path(req.structure)
+            if p is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"structure path {req.structure!r} is outside the shared directory",
+                )
+            structure_path = str(p)
+
+        try:
+            from interaction_profiler.core_complex import profile_complex
+            result = profile_complex(
+                structure_path=structure_path,
+                smiles=req.smiles,
+                mode=req.mode,
+                binder_chains=req.binder_chains,
+                target_chains=req.target_chains,
+                binder_role=req.binder_role,
+                ligand_comp_id=req.ligand_comp_id,
+                ligand_resname=req.ligand_resname,
+                ligand_chain=req.ligand_chain,
+                annotation_accessions=req.annotation_accessions,
+                potency=req.potency.model_dump() if req.potency else None,
+                ph=req.ph,
+                radius=req.radius,
+                compute_strain=req.compute_strain,
+                compute_efficiency=req.compute_efficiency,
+                compute_interface=req.compute_interface,
+                coordinate_source=req.coordinate_source,
+                use_gpu=req.use_gpu,
+                max_interactions=req.max_interactions,
+                drop_uncertain=req.drop_uncertain,
+                fail_on_ambiguity=req.fail_on_ambiguity,
+                analysis_profile=req.analysis_profile,
+                site_profile_id=req.site_profile_id,
+                ensemble_profile=req.ensemble_profile,
+            )
+            # If ligand_sdf was provided, always (re)compute strain from the SDF.
+            # This overrides the "prepared_ligand_path not available" error set by core_complex.
+            if req.ligand_sdf:
+                try:
+                    from interaction_profiler.metrics.strain import compute_strain_from_sdf
+                    sdf_abs = req.ligand_sdf if req.ligand_sdf.startswith("/") else f"{_shared_dir()}/{req.ligand_sdf}"
+                    result.strain = compute_strain_from_sdf(sdf_abs, coordinate_source=req.coordinate_source)
+                    logger.info("Strain computed from SDF %s: %.3f kcal/mol", sdf_abs, result.strain.strain_kcal_mol or 0)
+                except Exception as strain_exc:
+                    logger.warning("Strain from SDF failed: %s", strain_exc)
+
+            return result.model_dump(exclude_none=False)
+        except Exception as exc:
+            logger.exception("POST /profile_complex failed")
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    # ── POST /characterize_site ────────────────────────────────────────────
+
+    @app_instance.post("/characterize_site", summary="Protein-only site characterization")
+    async def characterize_site_endpoint(req: ComplexRequest):
+        """Characterize a protein binding site without a ligand.
+
+        Runs fpocket pocket detection, secondary structure assignment, and
+        optional UniProt/InterPro annotation overlay.  Returns a SiteProfile
+        embedded in a ComplexResult (``result.site_profile``).
+
+        The result is also written to ``/shared/site_cache/{sha256}.json``
+        so subsequent ``/profile_complex`` calls can pass ``site_profile_id``
+        to reuse it without recomputing.
+
+        Equivalent to ``POST /profile_complex`` with ``mode='protein_only'``.
+        """
+        structure_path = None
+        if req.structure:
+            p = _resolve_shared_path(req.structure)
+            if p is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"structure path {req.structure!r} is outside the shared directory",
+                )
+            structure_path = str(p)
+
+        try:
+            from interaction_profiler.core_complex import profile_complex  # noqa: PLC0415
+            result = profile_complex(
+                structure_path=structure_path,
+                mode="protein_only",
+                target_chains=req.target_chains,
+                annotation_accessions=req.annotation_accessions,
+                analysis_profile=req.analysis_profile or "pocket",
+                site_profile_id=req.site_profile_id,
+            )
+
+            # Cache SiteProfile to /shared/site_cache/ if available
+            if result.site_profile is not None:
+                try:
+                    import json  # noqa: PLC0415
+                    cache_dir = _shared_dir() / "site_cache"
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    cache_key = result.site_profile.structure_sha256
+                    cache_path = cache_dir / f"{cache_key}.json"
+                    cache_path.write_text(
+                        json.dumps(result.site_profile.model_dump(), indent=2)
+                    )
+                    logger.info("SiteProfile cached to %s", cache_path)
+                except Exception as cache_exc:
+                    logger.warning("Could not cache SiteProfile: %s", cache_exc)
+
+            return result.model_dump(exclude_none=False)
+        except Exception as exc:
+            logger.exception("POST /characterize_site failed")
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+
+def _resolve_shared_path(path_str: str) -> Path | None:
+    """Resolve path under shared dir, returning None if outside."""
+    shared = _shared_dir()
+    p = (shared / path_str).resolve()
+    try:
+        p.relative_to(shared.resolve())
+        return p
+    except ValueError:
+        return None
+
+
 # Module-level app so ``uvicorn app:app`` works.
 try:  # pragma: no cover - only when fastapi is installed
     app = create_app()
+    _add_profile_complex_route(app)
 except Exception:  # pragma: no cover
     app = None
 
