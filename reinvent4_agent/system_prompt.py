@@ -313,6 +313,37 @@ to get the real SMILES. NEVER recall or guess a SMILES from memory - \
 hallucinated SMILES are frequently invalid (RDKit cannot parse or 3D-embed \
 them) and silently break cofolding. If `fetch_compound` fails, ask the user to \
 paste the SMILES rather than inventing one.
+- **Structure preparation**: call `validate_structure` then `prepare_structure` to \
+clean and standardise a raw PDB/CIF before cofolding, docking, or profiling. \
+Always call `validate_structure` first — it is fast (< 5 s) and returns the \
+inventory + profile_preview without modifying any file. Review the profile_preview \
+to resolve ambiguous chain roles and ligand/additive classifications. Then \
+call `prepare_structure` with a targeted profile. Poll with \
+`get_preparation_status` until status='completed'.
+
+  Artefact routing:
+  - `artifacts.complex` (with H atoms, HID/HIE/HIP residue names) → \
+    `profile_interactions` structure_paths
+  - `artifacts.receptor_noh` (no H atoms, HID/HIE/HIP names preserved) → \
+    GNINA docking receptor (block 05)
+  - `artifacts.ligands.{RESNAME}.sdf` (3D SDF) → GNINA ligand input; PoseBusters
+  - `artifacts.sequences_fasta` → read to get protein_sequence for Boltz TTP target
+
+  Profile defaults (safe for X-ray drug-target):
+  - `stage3_curation.ligand_policy`: 'all' (or 'listed' + `ligand_comp_ids` for one ligand)
+  - `stage3_curation.keep_waters`: 'pocket' with radius 4.0 Å keeps bridging waters
+  - `stage3_curation.keep_metals`: 'structural' (metals within 3 Å of protein)
+  - `stage4_altlocs.altloc_policy`: 'highest_occupancy'
+  - `stage5_missing.missing_policy`: 'model_atoms' (add missing atoms; don't model loops)
+  - `stage6_protonation.protonation_method`: 'pdb2pqr_propka' at pH 7.4
+  - `stage7_termini.cap_termini`: 'none' (correct for docking and cofolding)
+  - `stage8_ligand.ligand_ff`: 'openff_2.1' with NAGL charges
+  - `stage9_minimization.minimize`: 'none' (only enable for simulation workflows)
+  - `output.emit_fasta`: true (always; needed for Boltz)
+
+  NEVER use a raw RCSB download or Boltz output directly as a docking receptor — \
+always prepare it first. Never guess an artefact path; read it from the \
+`get_preparation_status` response or `list_shared_assets`.
 
 """ + MEDCHEM_KNOWLEDGE + """
 
@@ -551,6 +582,11 @@ You have a restricted, read-only toolset. Use it to gather evidence before \
 judging — never trust the Driver's summary at face value:
 - ``read_results`` / ``get_top_candidates`` — pull the actual scored rows.
 - ``get_ttp`` — check the candidates against the stated objective.
+- ``validate_structure`` — independently verify the Driver's structure selection \
+  and preparation choices: inventory shows chains, HETATMs, altlocs, and \
+  missing residues; profile_preview shows proposed roles and detected additives. \
+  Re-run to confirm that a reported structure contains the expected ligand and \
+  that additives were correctly classified.
 You cannot create, update, delete, run, or stop anything. If you find yourself \
 wanting to modify state, instead express it as a *requested change* for the \
 Driver.

@@ -1,0 +1,53 @@
+{
+  "query_id": "f8a9b0c1-0018-4f70-9012-345678901234",
+  "result_type": "entry",
+  "total_count": 14823,
+  "result_list": [
+    {"identifier": "3PXY", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP68871F1", "score": 1.0, "services": null},
+    {"identifier": "1HCK", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP02768F1", "score": 1.0, "services": null},
+    {"identifier": "4HHB", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0001", "score": 1.0, "services": null},
+    {"identifier": "2R3I", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ9Y2X3F1", "score": 1.0, "services": null},
+    {"identifier": "1FIN", "score": 1.0, "services": null},
+    {"identifier": "AF_AFO95905F1", "score": 1.0, "services": null},
+    {"identifier": "5HQ0", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP15923F1", "score": 1.0, "services": null},
+    {"identifier": "3QTI", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0002", "score": 1.0, "services": null},
+    {"identifier": "2A0C", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP21802F1", "score": 1.0, "services": null},
+    {"identifier": "1IEP", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ13131F1", "score": 1.0, "services": null},
+    {"identifier": "1BNA", "score": 1.0, "services": null},
+    {"identifier": "AF_AFO14929F1", "score": 1.0, "services": null},
+    {"identifier": "7NHM", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP62979F1", "score": 1.0, "services": null},
+    {"identifier": "6M17", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0003", "score": 1.0, "services": null},
+    {"identifier": "1RZS", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "ContentType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Experimental", "count": 12667},
+        {"key": "Computational", "count": 2156}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 8912},
+        {"key": "ELECTRON MICROSCOPY", "count": 2847},
+        {"key": "SOLUTION NMR", "count": 908},
+        {"key": "ALPHAFOLD AI", "count": 1934},
+        {"key": "OTHER AI", "count": 222}
+      ]
+    }
+  ]
+}

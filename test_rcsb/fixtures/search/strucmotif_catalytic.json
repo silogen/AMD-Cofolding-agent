@@ -1,0 +1,53 @@
+{
+  "query_id": "d6e7f8a9-0016-4d6e-7890-123456789012",
+  "result_type": "entry",
+  "total_count": 456,
+  "result_list": [
+    {"identifier": "1ACB", "score": 1.0, "services": null},
+    {"identifier": "1PPH", "score": 1.0, "services": null},
+    {"identifier": "3TGI", "score": 1.0, "services": null},
+    {"identifier": "1SGT", "score": 1.0, "services": null},
+    {"identifier": "4CHA", "score": 1.0, "services": null},
+    {"identifier": "1CSE", "score": 1.0, "services": null},
+    {"identifier": "2TGT", "score": 1.0, "services": null},
+    {"identifier": "4HFZ", "score": 1.0, "services": null},
+    {"identifier": "3EST", "score": 1.0, "services": null},
+    {"identifier": "1EUL", "score": 1.0, "services": null},
+    {"identifier": "5I32", "score": 1.0, "services": null},
+    {"identifier": "2PTC", "score": 1.0, "services": null},
+    {"identifier": "4LOU", "score": 1.0, "services": null},
+    {"identifier": "1P2C", "score": 1.0, "services": null},
+    {"identifier": "3GCK", "score": 1.0, "services": null},
+    {"identifier": "1BTP", "score": 1.0, "services": null},
+    {"identifier": "4I7Y", "score": 1.0, "services": null},
+    {"identifier": "2FU5", "score": 1.0, "services": null},
+    {"identifier": "3OWN", "score": 1.0, "services": null},
+    {"identifier": "1LDT", "score": 1.0, "services": null},
+    {"identifier": "5I08", "score": 1.0, "services": null},
+    {"identifier": "2QXP", "score": 1.0, "services": null},
+    {"identifier": "4GUX", "score": 1.0, "services": null},
+    {"identifier": "1YOW", "score": 1.0, "services": null},
+    {"identifier": "3HGN", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 412},
+        {"key": "ELECTRON MICROSCOPY", "count": 34},
+        {"key": "SOLUTION NMR", "count": 10}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 218},
+        {"key": "Bos taurus", "count": 87},
+        {"key": "Sus scrofa", "count": 62},
+        {"key": "Mus musculus", "count": 54}
+      ]
+    }
+  ]
+}

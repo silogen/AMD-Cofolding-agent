@@ -1,0 +1,50 @@
+{
+  "query_id": "a7b8c9d0-0007-4465-ef01-234567890123",
+  "result_type": "entry",
+  "total_count": 892,
+  "result_list": [
+    {"identifier": "1BNA", "score": 1.0, "services": null},
+    {"identifier": "4OCB", "score": 1.0, "services": null},
+    {"identifier": "196D",  "score": 1.0, "services": null},
+    {"identifier": "1D23", "score": 1.0, "services": null},
+    {"identifier": "2HVS", "score": 1.0, "services": null},
+    {"identifier": "3BSE", "score": 1.0, "services": null},
+    {"identifier": "1ZF2", "score": 1.0, "services": null},
+    {"identifier": "4AJN", "score": 1.0, "services": null},
+    {"identifier": "2L5B", "score": 1.0, "services": null},
+    {"identifier": "3LPV", "score": 1.0, "services": null},
+    {"identifier": "1D65", "score": 1.0, "services": null},
+    {"identifier": "5EM4", "score": 1.0, "services": null},
+    {"identifier": "2NNA", "score": 1.0, "services": null},
+    {"identifier": "4E7K", "score": 1.0, "services": null},
+    {"identifier": "1JRV", "score": 1.0, "services": null},
+    {"identifier": "3WKR", "score": 1.0, "services": null},
+    {"identifier": "1ZF7", "score": 1.0, "services": null},
+    {"identifier": "2LIP", "score": 1.0, "services": null},
+    {"identifier": "4AJO", "score": 1.0, "services": null},
+    {"identifier": "1SGX", "score": 1.0, "services": null},
+    {"identifier": "3ODG", "score": 1.0, "services": null},
+    {"identifier": "2K0W", "score": 1.0, "services": null},
+    {"identifier": "4E1A", "score": 1.0, "services": null},
+    {"identifier": "1DP7", "score": 1.0, "services": null},
+    {"identifier": "5KWV", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "PolymerType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "DNA", "count": 892}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 742},
+        {"key": "SOLUTION NMR", "count": 136},
+        {"key": "ELECTRON MICROSCOPY", "count": 14}
+      ]
+    }
+  ]
+}

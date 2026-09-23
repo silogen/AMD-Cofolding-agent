@@ -1,0 +1,31 @@
+{
+  "query_id": "e5f6a7b8-0005-4263-cdef-012345678901",
+  "result_type": "entry",
+  "total_count": 23,
+  "result_list": [
+    {"identifier": "1R9O", "score": 1.0, "services": null},
+    {"identifier": "4PH9", "score": 0.99, "services": null},
+    {"identifier": "1BU2", "score": 0.98, "services": null},
+    {"identifier": "3Q7D", "score": 0.97, "services": null},
+    {"identifier": "2XE2", "score": 0.96, "services": null},
+    {"identifier": "1IVY", "score": 0.95, "services": null},
+    {"identifier": "4MV1", "score": 0.94, "services": null},
+    {"identifier": "3K4H", "score": 0.93, "services": null},
+    {"identifier": "1NFB", "score": 0.92, "services": null},
+    {"identifier": "2WIB", "score": 0.91, "services": null},
+    {"identifier": "4X0V", "score": 0.90, "services": null},
+    {"identifier": "3PGF", "score": 0.89, "services": null},
+    {"identifier": "1QO0", "score": 0.88, "services": null},
+    {"identifier": "2YOF", "score": 0.87, "services": null},
+    {"identifier": "5BRR", "score": 0.86, "services": null},
+    {"identifier": "3CQS", "score": 0.85, "services": null},
+    {"identifier": "1PGA", "score": 0.84, "services": null},
+    {"identifier": "4IIB", "score": 0.83, "services": null},
+    {"identifier": "2MBL", "score": 0.82, "services": null},
+    {"identifier": "3EL7", "score": 0.81, "services": null},
+    {"identifier": "5X4F", "score": 0.80, "services": null},
+    {"identifier": "1WQN", "score": 0.79, "services": null},
+    {"identifier": "4OYF", "score": 0.78, "services": null}
+  ],
+  "facets": []
+}

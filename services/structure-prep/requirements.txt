@@ -1,0 +1,9 @@
+# pip packages for structure-prep service
+# (conda-forge packages listed in Dockerfile)
+pdb2pqr==3.6.1
+propka==3.5.0
+openff-nagl==0.4.1
+openff-forcefields==2024.07.0
+fastapi==0.114.0
+uvicorn[standard]==0.30.6
+pydantic>=2.9,<3

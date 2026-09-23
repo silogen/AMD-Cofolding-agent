@@ -1,0 +1,60 @@
+{
+  "query_id": "a9b0c1d2-0019-4071-0123-456789012345",
+  "result_type": "entry",
+  "total_count": 1243,
+  "result_list": [
+    {"identifier": "1EJG", "score": 1.0, "services": null},
+    {"identifier": "1US0", "score": 1.0, "services": null},
+    {"identifier": "1UCS", "score": 1.0, "services": null},
+    {"identifier": "1RGE", "score": 1.0, "services": null},
+    {"identifier": "1XY1", "score": 1.0, "services": null},
+    {"identifier": "2Q1N", "score": 1.0, "services": null},
+    {"identifier": "3HRI", "score": 1.0, "services": null},
+    {"identifier": "1D7Q", "score": 1.0, "services": null},
+    {"identifier": "2W4J", "score": 1.0, "services": null},
+    {"identifier": "4FT9", "score": 1.0, "services": null},
+    {"identifier": "1KNG", "score": 1.0, "services": null},
+    {"identifier": "3EZA", "score": 1.0, "services": null},
+    {"identifier": "2VH7", "score": 1.0, "services": null},
+    {"identifier": "4Q5Y", "score": 1.0, "services": null},
+    {"identifier": "1I9F", "score": 1.0, "services": null},
+    {"identifier": "3NE0", "score": 1.0, "services": null},
+    {"identifier": "2O9H", "score": 1.0, "services": null},
+    {"identifier": "4ION", "score": 1.0, "services": null},
+    {"identifier": "1JYJ", "score": 1.0, "services": null},
+    {"identifier": "3OEN", "score": 1.0, "services": null},
+    {"identifier": "2WPQ", "score": 1.0, "services": null},
+    {"identifier": "4HYB", "score": 1.0, "services": null},
+    {"identifier": "1CNU", "score": 1.0, "services": null},
+    {"identifier": "3ZJR", "score": 1.0, "services": null},
+    {"identifier": "2VXK", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 1243}
+      ]
+    },
+    {
+      "name": "Resolution",
+      "aggregation_type": "range",
+      "buckets": [
+        {"key": "0-0.8", "count": 312},
+        {"key": "0.8-0.9", "count": 498},
+        {"key": "0.9-1.0", "count": 433}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 478},
+        {"key": "Gallus gallus", "count": 187},
+        {"key": "Bos taurus", "count": 143},
+        {"key": "Mus musculus", "count": 112}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "query_id": "b6c7d8e9-0026-4778-7890-123456789012",
+  "result_type": "entry",
+  "total_count": 156,
+  "result_list": [
+    {"identifier": "7NHM", "score": 1.0, "services": null},
+    {"identifier": "4V6X", "score": 1.0, "services": null},
+    {"identifier": "6Q8Y", "score": 1.0, "services": null},
+    {"identifier": "5LZT", "score": 1.0, "services": null},
+    {"identifier": "3J7Y", "score": 1.0, "services": null},
+    {"identifier": "6GZQ", "score": 1.0, "services": null},
+    {"identifier": "5XYU", "score": 1.0, "services": null},
+    {"identifier": "4V7E", "score": 1.0, "services": null},
+    {"identifier": "7K00", "score": 1.0, "services": null},
+    {"identifier": "6OUO", "score": 1.0, "services": null},
+    {"identifier": "5LZS", "score": 1.0, "services": null},
+    {"identifier": "4V7D", "score": 1.0, "services": null},
+    {"identifier": "3J7Z", "score": 1.0, "services": null},
+    {"identifier": "7MSC", "score": 1.0, "services": null},
+    {"identifier": "6Y0G", "score": 1.0, "services": null},
+    {"identifier": "5IT8", "score": 1.0, "services": null},
+    {"identifier": "4V7R", "score": 1.0, "services": null},
+    {"identifier": "7A5F", "score": 1.0, "services": null},
+    {"identifier": "6XU7", "score": 1.0, "services": null},
+    {"identifier": "5LZW", "score": 1.0, "services": null},
+    {"identifier": "4V8I", "score": 1.0, "services": null},
+    {"identifier": "3J2C", "score": 1.0, "services": null},
+    {"identifier": "7NSO", "score": 1.0, "services": null},
+    {"identifier": "6WD3", "score": 1.0, "services": null},
+    {"identifier": "5JC9", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "ELECTRON MICROSCOPY", "count": 148},
+        {"key": "X-RAY DIFFRACTION", "count": 8}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 87},
+        {"key": "Escherichia coli", "count": 34},
+        {"key": "Saccharomyces cerevisiae", "count": 21},
+        {"key": "Thermus thermophilus", "count": 14}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "query_id": "b8c9d0e1-0008-4566-f012-345678901234",
+  "result_type": "entry",
+  "total_count": 234,
+  "result_list": [
+    {"identifier": "1YZD", "score": 1.0, "services": null},
+    {"identifier": "2OZB", "score": 1.0, "services": null},
+    {"identifier": "3P49", "score": 1.0, "services": null},
+    {"identifier": "1RZS", "score": 1.0, "services": null},
+    {"identifier": "2DXR", "score": 1.0, "services": null},
+    {"identifier": "4GXY", "score": 1.0, "services": null},
+    {"identifier": "3ZD5", "score": 1.0, "services": null},
+    {"identifier": "1M5O", "score": 1.0, "services": null},
+    {"identifier": "2G9C", "score": 1.0, "services": null},
+    {"identifier": "4FEY", "score": 1.0, "services": null},
+    {"identifier": "1JID", "score": 1.0, "services": null},
+    {"identifier": "3NVI", "score": 1.0, "services": null},
+    {"identifier": "2BUE", "score": 1.0, "services": null},
+    {"identifier": "4JF2", "score": 1.0, "services": null},
+    {"identifier": "1YVP", "score": 1.0, "services": null},
+    {"identifier": "3IRW", "score": 1.0, "services": null},
+    {"identifier": "2HOJ", "score": 1.0, "services": null},
+    {"identifier": "4CS1", "score": 1.0, "services": null},
+    {"identifier": "1MJI", "score": 1.0, "services": null},
+    {"identifier": "3R1L", "score": 1.0, "services": null},
+    {"identifier": "2PY5", "score": 1.0, "services": null},
+    {"identifier": "4LZB", "score": 1.0, "services": null},
+    {"identifier": "1Z43", "score": 1.0, "services": null},
+    {"identifier": "3SIQ", "score": 1.0, "services": null},
+    {"identifier": "2R8K", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "PolymerType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "RNA", "count": 234}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 172},
+        {"key": "SOLUTION NMR", "count": 48},
+        {"key": "ELECTRON MICROSCOPY", "count": 14}
+      ]
+    }
+  ]
+}

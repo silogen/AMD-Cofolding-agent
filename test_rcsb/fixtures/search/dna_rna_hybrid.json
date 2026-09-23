@@ -1,0 +1,51 @@
+{
+  "query_id": "c9d0e1f2-0009-4667-0123-456789012345",
+  "result_type": "entry",
+  "total_count": 156,
+  "result_list": [
+    {"identifier": "1HM6", "score": 1.0, "services": null},
+    {"identifier": "2DYW", "score": 1.0, "services": null},
+    {"identifier": "3QRP", "score": 1.0, "services": null},
+    {"identifier": "1EGT", "score": 1.0, "services": null},
+    {"identifier": "4OOO", "score": 1.0, "services": null},
+    {"identifier": "2ZY0", "score": 1.0, "services": null},
+    {"identifier": "3LRR", "score": 1.0, "services": null},
+    {"identifier": "1OBV", "score": 1.0, "services": null},
+    {"identifier": "2K4C", "score": 1.0, "services": null},
+    {"identifier": "4U3N", "score": 1.0, "services": null},
+    {"identifier": "1FIR", "score": 1.0, "services": null},
+    {"identifier": "3BD0", "score": 1.0, "services": null},
+    {"identifier": "2KDW", "score": 1.0, "services": null},
+    {"identifier": "4ITD", "score": 1.0, "services": null},
+    {"identifier": "1MZP", "score": 1.0, "services": null},
+    {"identifier": "3NTK", "score": 1.0, "services": null},
+    {"identifier": "2PY9", "score": 1.0, "services": null},
+    {"identifier": "4FU0", "score": 1.0, "services": null},
+    {"identifier": "1YMO", "score": 1.0, "services": null},
+    {"identifier": "3R2B", "score": 1.0, "services": null},
+    {"identifier": "2N6X", "score": 1.0, "services": null},
+    {"identifier": "4NLF", "score": 1.0, "services": null},
+    {"identifier": "1KX3", "score": 1.0, "services": null},
+    {"identifier": "3SUH", "score": 1.0, "services": null},
+    {"identifier": "2OXB", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "PolymerType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "DNA", "count": 156},
+        {"key": "RNA", "count": 156}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 112},
+        {"key": "SOLUTION NMR", "count": 38},
+        {"key": "ELECTRON MICROSCOPY", "count": 6}
+      ]
+    }
+  ]
+}

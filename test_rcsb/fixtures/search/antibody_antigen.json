@@ -1,0 +1,52 @@
+{
+  "query_id": "e1f2a3b4-0011-4869-2345-678901234567",
+  "result_type": "entry",
+  "total_count": 1847,
+  "result_list": [
+    {"identifier": "1IGT", "score": 1.0, "services": null},
+    {"identifier": "1IFC", "score": 1.0, "services": null},
+    {"identifier": "1AD0", "score": 1.0, "services": null},
+    {"identifier": "3NPS", "score": 1.0, "services": null},
+    {"identifier": "2NY7", "score": 1.0, "services": null},
+    {"identifier": "1MLC", "score": 1.0, "services": null},
+    {"identifier": "4GQW", "score": 1.0, "services": null},
+    {"identifier": "5C6T", "score": 1.0, "services": null},
+    {"identifier": "2YPV", "score": 1.0, "services": null},
+    {"identifier": "3QWO", "score": 1.0, "services": null},
+    {"identifier": "1FBJ", "score": 1.0, "services": null},
+    {"identifier": "4FQI", "score": 1.0, "services": null},
+    {"identifier": "2QHR", "score": 1.0, "services": null},
+    {"identifier": "1A2Y", "score": 1.0, "services": null},
+    {"identifier": "5E94", "score": 1.0, "services": null},
+    {"identifier": "3IU3", "score": 1.0, "services": null},
+    {"identifier": "2JB6", "score": 1.0, "services": null},
+    {"identifier": "4OGV", "score": 1.0, "services": null},
+    {"identifier": "1HZH", "score": 1.0, "services": null},
+    {"identifier": "3KMQ", "score": 1.0, "services": null},
+    {"identifier": "2VIR", "score": 1.0, "services": null},
+    {"identifier": "4KFZ", "score": 1.0, "services": null},
+    {"identifier": "1DEE", "score": 1.0, "services": null},
+    {"identifier": "3GBM", "score": 1.0, "services": null},
+    {"identifier": "5JAO", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 1612},
+        {"key": "ELECTRON MICROSCOPY", "count": 198},
+        {"key": "SOLUTION NMR", "count": 37}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 1723},
+        {"key": "Mus musculus", "count": 421},
+        {"key": "Oryctolagus cuniculus", "count": 89}
+      ]
+    }
+  ]
+}

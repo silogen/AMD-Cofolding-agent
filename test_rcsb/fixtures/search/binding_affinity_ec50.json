@@ -1,0 +1,50 @@
+{
+  "query_id": "e3f4a5b6-0023-4475-4567-890123456789",
+  "result_type": "entry",
+  "total_count": 89,
+  "result_list": [
+    {"identifier": "1BRS", "score": 1.0, "services": null},
+    {"identifier": "3HMX", "score": 1.0, "services": null},
+    {"identifier": "4GE1", "score": 1.0, "services": null},
+    {"identifier": "2A7S", "score": 1.0, "services": null},
+    {"identifier": "5JMN", "score": 1.0, "services": null},
+    {"identifier": "1USK", "score": 1.0, "services": null},
+    {"identifier": "3RQH", "score": 1.0, "services": null},
+    {"identifier": "2P4G", "score": 1.0, "services": null},
+    {"identifier": "4M7R", "score": 1.0, "services": null},
+    {"identifier": "1YNW", "score": 1.0, "services": null},
+    {"identifier": "3E8N", "score": 1.0, "services": null},
+    {"identifier": "2VWF", "score": 1.0, "services": null},
+    {"identifier": "4LBH", "score": 1.0, "services": null},
+    {"identifier": "1FKJ", "score": 1.0, "services": null},
+    {"identifier": "3OMY", "score": 1.0, "services": null},
+    {"identifier": "2X8L", "score": 1.0, "services": null},
+    {"identifier": "4AQD", "score": 1.0, "services": null},
+    {"identifier": "1KKQ", "score": 1.0, "services": null},
+    {"identifier": "3PGE", "score": 1.0, "services": null},
+    {"identifier": "2CVL", "score": 1.0, "services": null},
+    {"identifier": "4FO0", "score": 1.0, "services": null},
+    {"identifier": "1E3E", "score": 1.0, "services": null},
+    {"identifier": "3NB5", "score": 1.0, "services": null},
+    {"identifier": "2ISW", "score": 1.0, "services": null},
+    {"identifier": "4QO8", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 78},
+        {"key": "ELECTRON MICROSCOPY", "count": 8},
+        {"key": "SOLUTION NMR", "count": 3}
+      ]
+    },
+    {
+      "name": "AffinityType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "EC50", "count": 89}
+      ]
+    }
+  ]
+}

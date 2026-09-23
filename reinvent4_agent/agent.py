@@ -24,7 +24,7 @@ from reinvent4_agent.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 20
+MAX_TOOL_ROUNDS = 200
 
 
 @runtime_checkable

@@ -1,0 +1,51 @@
+{
+  "query_id": "b0c1d2e3-0020-4172-1234-567890123456",
+  "result_type": "entry",
+  "total_count": 12847,
+  "result_list": [
+    {"identifier": "1AKX", "score": 1.0, "services": null},
+    {"identifier": "2L9R", "score": 1.0, "services": null},
+    {"identifier": "3NTK", "score": 1.0, "services": null},
+    {"identifier": "1HLX", "score": 1.0, "services": null},
+    {"identifier": "2MKN", "score": 1.0, "services": null},
+    {"identifier": "4MYA", "score": 1.0, "services": null},
+    {"identifier": "1Q10", "score": 1.0, "services": null},
+    {"identifier": "3JYO", "score": 1.0, "services": null},
+    {"identifier": "2LQC", "score": 1.0, "services": null},
+    {"identifier": "4NMX", "score": 1.0, "services": null},
+    {"identifier": "1D3Z", "score": 1.0, "services": null},
+    {"identifier": "3JXS", "score": 1.0, "services": null},
+    {"identifier": "2MXO", "score": 1.0, "services": null},
+    {"identifier": "4GH2", "score": 1.0, "services": null},
+    {"identifier": "1P7E", "score": 1.0, "services": null},
+    {"identifier": "3OEI", "score": 1.0, "services": null},
+    {"identifier": "2N5G", "score": 1.0, "services": null},
+    {"identifier": "4TXM", "score": 1.0, "services": null},
+    {"identifier": "1RIF", "score": 1.0, "services": null},
+    {"identifier": "3KM3", "score": 1.0, "services": null},
+    {"identifier": "2JN0", "score": 1.0, "services": null},
+    {"identifier": "4QKI", "score": 1.0, "services": null},
+    {"identifier": "1XQU", "score": 1.0, "services": null},
+    {"identifier": "3NSS", "score": 1.0, "services": null},
+    {"identifier": "2L6R", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "SOLUTION NMR", "count": 12847}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 5843},
+        {"key": "Mus musculus", "count": 1876},
+        {"key": "Escherichia coli", "count": 1234},
+        {"key": "Rattus norvegicus", "count": 987}
+      ]
+    }
+  ]
+}

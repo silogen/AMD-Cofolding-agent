@@ -45,7 +45,13 @@ RUN mkdir -p /app/REINVENT4/priors && \
     wget --tries=3 -q -O /app/REINVENT4/priors/mol2mol_medium_similarity.prior \
       "https://zenodo.org/records/15641297/files/mol2mol_medium_similarity.prior?download=1" && \
     echo "f268eb072f4fca69ca9434768d3cd461  /app/REINVENT4/priors/reinvent.prior" | md5sum -c - && \
-    echo "78b75e478bfd7dcccee8ece010bc0b07  /app/REINVENT4/priors/mol2mol_medium_similarity.prior" | md5sum -c -
+    echo "78b75e478bfd7dcccee8ece010bc0b07  /app/REINVENT4/priors/mol2mol_medium_similarity.prior" | md5sum -c - && \
+    wget --tries=3 -q -O /app/REINVENT4/priors/libinvent.prior \
+      "https://zenodo.org/records/15641297/files/libinvent.prior?download=1" && \
+    wget --tries=3 -q -O /app/REINVENT4/priors/linkinvent.prior \
+      "https://zenodo.org/records/15641297/files/linkinvent.prior?download=1" && \
+    echo "fea30c293909216fe183bb0d1b7ca432  /app/REINVENT4/priors/libinvent.prior" | md5sum -c - && \
+    echo "65af13963aa2bf80fc941c0400288c8e  /app/REINVENT4/priors/linkinvent.prior" | md5sum -c -
 
 # --- Install MCP server + agent on top ---
 WORKDIR /app
