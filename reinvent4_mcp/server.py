@@ -137,6 +137,17 @@ def predict_admet(
             ),
         ),
     ] = None,
+    model_set: Annotated[
+        str,
+        Field(
+            default="drug",
+            description=(
+                "ADMET model stack: 'drug' (pharmaceutical, default) or "
+                "'agro' (agrochemical). 'pharma' is accepted as an alias "
+                "for 'drug' but is never emitted."
+            ),
+        ),
+    ] = "drug",
 ) -> str:
     """Predict ADMET properties for molecules directly (out-of-band, not RL).
 
@@ -149,7 +160,11 @@ def predict_admet(
 
     from reinvent4_mcp.tools.external import predict_admet as _impl
 
-    return json.dumps(_impl(smiles, endpoints), indent=2, default=_json_default)
+    return json.dumps(
+        _impl(smiles, endpoints, model_set=model_set),
+        indent=2,
+        default=_json_default,
+    )
 
 
 # ---------------------------------------------------------------------------

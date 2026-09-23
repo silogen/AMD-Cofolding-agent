@@ -22,13 +22,15 @@ import logging
 log = logging.getLogger(__name__)
 
 EXTENSION_MODULES: list[str] = [
-    "reinvent4_mcp.tools.rcsb",  # 01 — RCSB/PDB fetcher
-    "reinvent4_mcp.tools.chembl",  # 02 — ChEMBL fetcher
-    "reinvent4_mcp.tools.structure_prep",  # 03 — structure preparator
+    "reinvent4_mcp.tools.rcsb",                 # 01 — RCSB/PDB fetcher
+    "reinvent4_mcp.tools.chembl",               # 02 — ChEMBL fetcher
+    "reinvent4_mcp.tools.structure_prep",        # 03 — structure preparator
     "reinvent4_mcp.tools.interaction_profiler",  # 06 — interaction profiler v2
-    "reinvent4_mcp.tools.boltz_structure",  # 09 — Boltz structure conditioning
-    "reinvent4_mcp.tools.uniprot_features",  # 10 — UniProt extended features
-    "reinvent4_mcp.tools.interpro",  # 10 — InterPro domain annotations
+    "reinvent4_mcp.tools.synthesis",             # 07 — AiZynthFinder synthesis planner
+    "reinvent4_mcp.tools.generation",            # 08 — REINVENT generation contracts
+    "reinvent4_mcp.tools.boltz_structure",       # 09 — Boltz structure conditioning
+    "reinvent4_mcp.tools.uniprot_features",      # 10 — UniProt extended features
+    "reinvent4_mcp.tools.interpro",              # 10 — InterPro domain annotations
 ]
 
 

@@ -91,6 +91,24 @@ def _featurize(smiles):
     return X
 
 
+def _featurize_contract(smiles, avalon_bits: int, desc_cols: list[str]):
+    """Feature matrix for newly exported project XGBoost models.
+
+    Their training pipeline used Avalon bits followed by zero-filled descriptor
+    columns; preserve that exact representation.
+    """
+    X = np.zeros((len(smiles), avalon_bits + len(desc_cols)), dtype=np.float32)
+    for i, smi in enumerate(smiles):
+        mol = Chem.MolFromSmiles(str(smi))
+        if mol is None:
+            continue
+        fp = pyAvalonTools.GetAvalonFP(mol, nBits=avalon_bits)
+        arr = np.zeros(avalon_bits, dtype=np.int8)
+        DataStructs.ConvertToNumpyArray(fp, arr)
+        X[i, :avalon_bits] = arr
+    return X
+
+
 # ---------------- device + GNN plumbing ----------------
 def _device():
     global _DEV
@@ -155,7 +173,17 @@ def _get_xgb(target, w, task):
     p = MODELS_DIR / target / f"w{w:02d}" / "xgb" / f"{task}.pkl"
     if not p.exists():
         return None
-    return _cache_get((target, w, f"xgb:{task}"), lambda: pickle.load(open(p, "rb")))
+    def load():
+        artifact = pickle.load(open(p, "rb"))
+        if isinstance(artifact, dict) and "model" in artifact:
+            return {
+                "model": artifact["model"],
+                "avalon_bits": int(artifact.get("avalon_bits", AVALON_NBITS)),
+                "desc_cols": list(artifact.get("desc_cols", [])),
+            }
+        return {"model": artifact, "avalon_bits": None, "desc_cols": None}
+
+    return _cache_get((target, w, f"xgb:{task}"), load)
 
 
 # ---------------- prediction ----------------
@@ -255,12 +283,28 @@ def _predict_batch(target, w, endpoints, cut_date, smiles_list, method):
 
     per_method = {}   # method -> {endpoint: array}
     if "xgboost" in want:
-        X = _featurize(valid)
         xg = {}
+        feature_cache = {}
         for ep in endpoints:
-            mdl = _get_xgb(target, w, ep)
-            if mdl is not None:
-                xg[ep] = mdl.predict(X)
+            artifact = _get_xgb(target, w, ep)
+            if artifact is None:
+                continue
+            if artifact["avalon_bits"] is None:
+                key = ("legacy",)
+                if key not in feature_cache:
+                    feature_cache[key] = _featurize(valid)
+            else:
+                key = (
+                    artifact["avalon_bits"],
+                    tuple(artifact["desc_cols"]),
+                )
+                if key not in feature_cache:
+                    feature_cache[key] = _featurize_contract(
+                        valid,
+                        artifact["avalon_bits"],
+                        artifact["desc_cols"],
+                    )
+            xg[ep] = artifact["model"].predict(feature_cache[key])
         if xg:
             per_method["XGBoost"] = xg
     for comp, label in (("chemprop", "Chemprop-MTL"), ("chemeleon", "CheMeleon-MTL")):

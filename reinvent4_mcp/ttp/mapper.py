@@ -528,9 +528,11 @@ def _map_external_objective(
     if objective.service == "posebusters":
         params.update(_get_posebusters_defaults())
 
+    # Inject model-stack default before objective-level ADMET overrides.
+    if objective.service == "admet":
+        params.update(_get_admet_defaults())
+
     # Inject process config defaults for RetroDMTA (method/window) before TTP overrides.
-    # ADMET has no operational defaults; its endpoint is supplied per objective via
-    # service_params ({"endpoint": "logp"}).
     if objective.service == "retrodmta":
         params.update(_get_retrodmta_defaults())
 
@@ -712,6 +714,14 @@ def _get_retrodmta_defaults() -> dict[str, Any]:
     return {"method": r.method, "window": r.window}
 
 
+def _get_admet_defaults() -> dict[str, Any]:
+    """Pull the default ADMET model stack from process configuration."""
+
+    from reinvent4_mcp.config import get_config
+
+    return {"model_set": get_config().scoring.admet.model_set}
+
+
 def _get_interaction_profiler_defaults() -> dict[str, Any]:
     """Pull interaction-profiler operational defaults from the process config."""
 
@@ -739,4 +749,90 @@ def _map_constraint(constraint: ConstraintConfig) -> dict[str, Any]:
 
     return {
         component_name: {"endpoint": [endpoint]},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Generation config mapping — block 08 addition
+# ---------------------------------------------------------------------------
+
+def ttp_to_generation_config(ttp: "TTP") -> dict[str, Any]:  # noqa: F821
+    """Map a TTP's generation section to a REINVENT4 generation config dict.
+
+    The returned dict is consumed by ``toml_generator.py`` to produce the
+    correct ``[reinvent]`` / ``[libinvent]`` / ``[linkinvent]`` TOML block.
+
+    Parameters
+    ----------
+    ttp:
+        A fully-validated TTP object.
+
+    Returns
+    -------
+    dict
+        Empty dict when ``ttp.generation`` is ``None`` (backward compat).
+        Otherwise a dict with all generation parameters.
+
+    Raises
+    ------
+    ValueError
+        If mode-specific required inputs are absent (e.g. linkinvent without
+        fragments).  These checks are redundant with schema validators but are
+        repeated here so ``ttp_to_generation_config`` is safe to call on dicts
+        deserialized outside the Pydantic stack.
+    """
+    from reinvent4_mcp.ttp.schema import GenerationMode  # noqa: PLC0415
+
+    if ttp.generation is None:
+        return {}
+
+    g = ttp.generation
+
+    # Defensive mode-specific checks (Pydantic validators already ran, but
+    # this function may also be called from non-Pydantic code paths)
+    if g.mode == GenerationMode.linkinvent:
+        if not g.linkinvent_input or not g.linkinvent_input.fragments:
+            raise ValueError(
+                "linkinvent mode requires linkinvent_input.fragments "
+                "(at least 2 fragment SMILES with attachment points)."
+            )
+        if len(g.linkinvent_input.fragments) < 2:
+            raise ValueError(
+                "linkinvent requires at least 2 fragment SMILES."
+            )
+
+    if g.mode == GenerationMode.libinvent:
+        if not g.libinvent_input or not g.libinvent_input.scaffold:
+            raise ValueError(
+                "libinvent mode requires libinvent_input.scaffold "
+                "(scaffold SMILES with [*:n] attachment points)."
+            )
+
+    if g.mode == GenerationMode.mol2mol:
+        if not g.mol2mol_input or not g.mol2mol_input.seed_smiles:
+            raise ValueError(
+                "mol2mol mode requires mol2mol_input.seed_smiles "
+                "(one or more valid seed SMILES)."
+            )
+
+    return {
+        "mode":               g.mode.value,
+        "model":              g.model,
+        "batch_size":         g.batch_size,
+        "n_steps":            g.n_steps,
+        "checkpoint_every_n": g.checkpoint_every_n,
+        "seed":               g.seed,
+        "device":             g.device,
+        "linkinvent_input": (
+            g.linkinvent_input.model_dump() if g.linkinvent_input else None
+        ),
+        "libinvent_input": (
+            g.libinvent_input.model_dump() if g.libinvent_input else None
+        ),
+        "mol2mol_input": (
+            g.mol2mol_input.model_dump() if g.mol2mol_input else None
+        ),
+        "target_artifact_ids":              g.target_artifact_ids,
+        "prepared_structure_artifact_ids":  g.prepared_structure_artifact_ids,
+        "site_artifact_ids":                g.site_artifact_ids,
     }

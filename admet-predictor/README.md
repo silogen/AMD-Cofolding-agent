@@ -1,16 +1,21 @@
 # admet-predictor
 
-Consensus **ADMET** prediction over 7 physicochemical / ADME endpoints, with a double
-applicability-domain (AD) score. 
+Manifest-driven **ADMET** prediction with two selectable model stacks:
 
-Each endpoint is a **consensus mean ± std** over three independently-trained models:
+- `drug` (default): 17 pharmaceutical endpoints
+- `agro`: 25 endpoints (the drug set plus 8 agrochemical endpoints)
 
-- **XGBoost** (physchem + Avalon-2048, 5-seed mean)
-- **Chemprop-MTL** (message-passing GNN, from scratch)
-- **CheMeleon-MTL** (foundation-initialized GNN)
+Each endpoint is a consensus mean ± std over available **XGBoost** and
+**Chemprop-MTL** members. `pharma` is accepted as an input alias for `drug`
+but is never emitted. Endpoint names, units, conditions, and model assets are
+read from `models/admet/<model_set>/manifest.json`.
 
-Endpoints: `logp, logd, aqueous_solubility, kinetic_solubility, caco2_permeability,
-efflux_mdck, efflux_caco2`. Trained on the full curated ADME set (156,797 molecules).
+Chemprop v2 checkpoints return predictions in endpoint units; the runtime does
+not apply the exported training scaler a second time. Before consensus, every
+member is checked against endpoint-specific physical bounds. Impossible members
+are reported under `excluded_models` and omitted from the mean. The retained
+consensus is separately flagged against the endpoint's training-data p01–p99
+response range; this response-domain warning does not suppress the prediction.
 
 Input SMILES are standardized with the **same pipeline used for training** (desalt →
 stereo-preserving re-aromatization → Normalizer → canonical tautomer → dimorphite pH 7.4
@@ -87,7 +92,7 @@ curl -s http://localhost:8084/predict -H 'Content-Type: application/json' \
 docker rm -f admetp
 ```
 
-Sanity: aspirin `logp` ≈ **1.14**, `AD Pass: true`; identical input → identical output
+Sanity: aspirin `logp` ≈ **1.2**, `AD Pass: true`; identical input → identical output
 (deterministic); a failed SMILES returns `"ok": false` (never dropped, order preserved).
 
 ## CLI
@@ -117,11 +122,13 @@ Three shapes via `format` (see [SERVICE.md](SERVICE.md) for the full schema):
 
 - **`records`** (default) — list, one verbose object per molecule (full `per_model`, units, AD).
 - **`compact`** — metadata (`endpoints`/`units`/`conditions`/`models`) declared once + per
-  molecule `mean[]`/`std[]` arrays + `ad_pass`. ~5–10× smaller for large N.
+  molecule `mean[]`/`std[]`/`response_ad_pass[]` arrays + `ad_pass`. ~5–10×
+  smaller for large N.
 - **`table`** — `columns` + `rows` (drop straight into a DataFrame). CSV via `POST /predict_csv`.
 
 Every result carries the consensus `mean` (use this), cross-model `std` (uncertainty proxy),
-and the `applicability_domain` (`AD Tanimoto` + `AD Property profile FFN` + overall `AD Pass`).
+chemical-space `applicability_domain` (Avalon Tanimoto), physical-member validation,
+and a per-endpoint `response_domain` derived from the training p01–p99 range.
 
 ## License
 

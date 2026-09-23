@@ -1,0 +1,19 @@
+name: base
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  # RDKit via conda-forge (required by aizynthfinder; conda version is more reliable)
+  - rdkit>=2024.3
+  # C compiler for building molbloom and other C-extension aizynthfinder deps
+  - gcc
+  - gxx
+  # HTTP framework
+  - pip
+  - pip:
+    - aizynthfinder[all]>=4.4.0
+    - fastapi==0.115.6
+    - uvicorn[standard]==0.34.0
+    - pydantic>=2.0
+    - httpx>=0.27

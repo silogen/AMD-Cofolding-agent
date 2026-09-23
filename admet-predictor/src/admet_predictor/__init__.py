@@ -1,5 +1,4 @@
-"""ADMET predictor: consensus (XGBoost + Chemprop-MTL + CheMeleon-MTL) predictions for 7
-physicochemical / ADME endpoints, with a double applicability-domain score."""
+"""Manifest-driven drug/agro ADMET ensembles with response-domain reporting."""
 from admet_predictor import core
 
 __all__ = ["core"]

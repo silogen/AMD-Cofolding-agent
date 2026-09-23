@@ -236,12 +236,7 @@ class PoseBustersConfig(BaseModel):
 
 
 class AdmetConfig(BaseModel):
-    """General ADMET predictor scoring service configuration.
-
-    Exposes 7 physchem/ADME endpoints; use one TTP objective per endpoint
-    (``service_params: {"endpoint": "logp"}``). /score returns the raw predicted
-    value; the TTP transform owns the direction.
-    """
+    """Selectable pharmaceutical/agrochemical ADMET scoring service."""
 
     model_config = {"extra": "forbid"}
 
@@ -249,6 +244,10 @@ class AdmetConfig(BaseModel):
     service_url: str = Field(
         default="http://admet-predictor:8084/score",
         description="ADMET predictor REST endpoint URL",
+    )
+    model_set: Literal["drug", "agro"] = Field(
+        default="drug",
+        description="Default ADMET model stack when a TTP objective omits it",
     )
 
 

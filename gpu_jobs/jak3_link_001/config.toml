@@ -1,0 +1,39 @@
+run_type = "staged_learning"
+device = "cuda:0"
+tb_logdir = "tb_logs"
+json_out_config = "_config.json"
+
+[parameters]
+prior_file = "/app/REINVENT4/priors/linkinvent.prior"
+agent_file = "/app/REINVENT4/priors/linkinvent.prior"
+summary_csv_prefix = "results"
+batch_size = 64
+randomize_smiles = true
+use_checkpoint = false
+smiles_file = "warheads.smi"
+
+# Fragments: [*:1]c1cnc2[nH]ccc2n1 | [*:2]CC(=O)CC#N
+
+[learning_strategy]
+type = "dap"
+sigma = 128
+rate = 0.0001
+
+[diversity_filter]
+type = "IdenticalMurckoScaffold"
+bucket_size = 25
+minscore = 0.4
+
+[[stage]]
+max_score = 1.0
+max_steps = 50
+chkpt_file = "stage.chkpt"
+
+[stage.scoring]
+type = "geometric_mean"
+
+[[stage.scoring.component]]
+[stage.scoring.component.QED]
+[[stage.scoring.component.QED.endpoint]]
+name = "QED score"
+weight = 1.0

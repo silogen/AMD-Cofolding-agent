@@ -156,7 +156,14 @@ class ExternalRESTScorer:
         """
         selectors = [
             f"{key}={self.request_params[key]}"
-            for key in ("endpoint", "target", "interaction_type", "affinity_mode", "mode")
+            for key in (
+                "model_set",
+                "endpoint",
+                "target",
+                "interaction_type",
+                "affinity_mode",
+                "mode",
+            )
             if key in self.request_params
         ]
         return f" [{', '.join(selectors)}]" if selectors else ""

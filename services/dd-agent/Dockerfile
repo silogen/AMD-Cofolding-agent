@@ -22,10 +22,24 @@ FROM rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# --- Install REINVENT4 (torch comes from the base image; strip the pins) ---
-COPY REINVENT4/ /app/REINVENT4/
-WORKDIR /app/REINVENT4
+# Apply the one audited compatibility patch to a pinned, otherwise-pristine
+# REINVENT4 checkout. The source itself is restored by the launcher and is not
+# vendored in this repository.
+RUN apt-get update && apt-get install -y --no-install-recommends patch && \
+    rm -rf /var/lib/apt/lists/*
 
+COPY REINVENT4/ /app/REINVENT4/
+COPY services/dd-agent/REINVENT4_COMMIT /app/REINVENT4_COMMIT
+COPY services/dd-agent/patches/reinvent4-libinvent-transformer-rgroups.patch \
+    /tmp/reinvent4-libinvent-transformer-rgroups.patch
+WORKDIR /app/REINVENT4
+RUN patch --batch --forward --dry-run -p1 \
+      < /tmp/reinvent4-libinvent-transformer-rgroups.patch && \
+    patch --batch --forward -p1 \
+      < /tmp/reinvent4-libinvent-transformer-rgroups.patch && \
+    rm /tmp/reinvent4-libinvent-transformer-rgroups.patch
+
+# --- Install REINVENT4 (torch comes from the base image; strip the pins) ---
 # `-d none` = core deps only (rdkit, xxhash, numpy, pandas, pydantic, ...),
 # skipping openeye (needs license/index) and isim (git). The final import check
 # turns any silent install failure into a hard build failure.
@@ -51,7 +65,18 @@ RUN mkdir -p /app/REINVENT4/priors && \
     wget --tries=3 -q -O /app/REINVENT4/priors/linkinvent.prior \
       "https://zenodo.org/records/15641297/files/linkinvent.prior?download=1" && \
     echo "fea30c293909216fe183bb0d1b7ca432  /app/REINVENT4/priors/libinvent.prior" | md5sum -c - && \
-    echo "65af13963aa2bf80fc941c0400288c8e  /app/REINVENT4/priors/linkinvent.prior" | md5sum -c -
+    echo "65af13963aa2bf80fc941c0400288c8e  /app/REINVENT4/priors/linkinvent.prior" | md5sum -c - && \
+    echo "All 4 RNN priors downloaded and verified OK" && \
+    wget --tries=3 -q -O /app/REINVENT4/priors/libinvent_transformer_pubchem.prior \
+      "https://zenodo.org/records/15641297/files/libinvent_transformer_pubchem.prior?download=1" && \
+    wget --tries=3 -q -O /app/REINVENT4/priors/linkinvent_transformer_pubchem.prior \
+      "https://zenodo.org/records/15641297/files/linkinvent_transformer_pubchem.prior?download=1" && \
+    echo "Transformer priors downloaded OK"
+# SHA-256 (for reference, computed from Zenodo downloads):
+#   reinvent.prior:                  b6513ec6dbc54c87ea45cdbf9b4aaefadd7652548b74175366b27f12ec5732fe
+#   libinvent.prior:                 03e6cbe8a53e59a4ac3aa6728d041f1957bdd07b5eefdf2cfc5c8591036075af
+#   linkinvent.prior:                3aa629ab769e7c29f747f0a1ad3e9d90b33d7be9e04ec47b7db416026fc568ed
+#   mol2mol_medium_similarity.prior: a0f40a2fb4baedaf51ae199bb38a61a8c8d26f03062977eaf06e34079e9f22ca
 
 # --- Install MCP server + agent on top ---
 WORKDIR /app

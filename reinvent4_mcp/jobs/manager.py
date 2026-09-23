@@ -366,6 +366,94 @@ class JobManager:
             result["stopped_previous_jobs"] = stopped_jobs
         return result
 
+    def submit_toml(
+        self,
+        toml_str: str,
+        job_name: str = "generation",
+        extra_files: dict[str, str] | None = None,
+        max_steps: int = 0,
+        model: str = "generation",
+    ) -> dict[str, Any]:
+        """Write *toml_str* to a new job directory and launch the worker subprocess.
+
+        This is the block-08 generation entry-point — it accepts a pre-built TOML
+        string (from ``generate_generation_toml``) instead of building it from a TTP,
+        making it mode-agnostic (reinvent / libinvent / linkinvent).
+
+        Parameters
+        ----------
+        extra_files:
+            Optional dict of ``{filename: content}`` for auxiliary files that the
+            TOML references (e.g. ``{"warheads.smi": "[*:1]c1cc...|[*:2]CC..."}``
+            for LinkInvent fragment pairs).
+
+        Returns the same lifecycle/path metadata shape as ``create_and_start``.
+        """
+        import uuid  # noqa: PLC0415
+
+        stopped_jobs = self._stop_running_jobs()
+
+        job_id = uuid.uuid4().hex[:16]
+        job_dir = self._working_root / f"job_{job_id}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        toml_path = str(job_dir / "config.toml")
+        (job_dir / "config.toml").write_text(toml_str, encoding="utf-8")
+
+        # Write auxiliary files (e.g. warheads.smi for LinkInvent)
+        if extra_files:
+            for fname, content in extra_files.items():
+                (job_dir / fname).write_text(content, encoding="utf-8")
+        else:
+            # Auto-extract auxiliary SMILES files from TOML comments.
+            import re as _re  # noqa: PLC0415
+
+            # LinkInvent: # Fragments: SMILES1 | SMILES2  → warheads.smi
+            match = _re.search(r"^# Fragments: (.+)$", toml_str, _re.MULTILINE)
+            if match and "smiles_file" in toml_str:
+                frags = [f.strip() for f in match.group(1).split("|")]
+                if len(frags) >= 2:
+                    # RNN LinkinVent vocabulary uses bare [*] not [*:n]
+                    rnn_frags = [_re.sub(r'\[\*:\d+\]', '[*]', f) for f in frags]
+                    (job_dir / "warheads.smi").write_text("|".join(rnn_frags), encoding="utf-8")
+
+            # LibInvent: # Scaffold: SMILES  → scaffolds.smi
+            # - RNN prior: bare [*] (no map numbers; vocabulary limitation)
+            # - Transformer prior: keep [*:n] WITH map numbers so LibInvent can
+            #   fill each attachment position separately (richer vocabulary)
+            match2 = _re.search(r"^# Scaffold: (.+)$", toml_str, _re.MULTILINE)
+            if match2 and "scaffolds.smi" in toml_str:
+                scaffold = match2.group(1).strip()
+                is_transformer = "transformer" in toml_str.lower()
+                if not is_transformer:
+                    scaffold = _re.sub(r'\[\*:\d+\]', '[*]', scaffold)
+                # transformer keeps [*:1], [*:2] intact
+                (job_dir / "scaffolds.smi").write_text(scaffold + "\n", encoding="utf-8")
+
+        job = JobInfo(
+            job_id=job_id,
+            ttp_id=job_name,
+            ttp_version=1,
+            model=model,
+            job_type=JobType.OPTIMIZATION,
+            state=JobState.QUEUED,
+            working_dir=str(job_dir),
+            toml_path=toml_path,
+            max_steps=max_steps,
+            created_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        )
+
+        with self._lock:
+            self._jobs[job_id] = job
+
+        self._save_metadata(job)
+        self._start_process(job)
+
+        result = job.to_dict()
+        if stopped_jobs:
+            result["stopped_previous_jobs"] = stopped_jobs
+        return result
+
     def get_status(self, job_id: str) -> dict[str, Any]:
         """Return current job status with score trajectory.
 
@@ -940,7 +1028,7 @@ class JobManager:
             try:
                 result = self.stop_job(job.job_id)
                 entry: dict[str, str] = {"job_id": job.job_id}
-                if "checkpoint_path" in result:
+                if result.get("has_checkpoint"):
                     entry["checkpoint_path"] = result["checkpoint_path"]
                 stopped.append(entry)
             except Exception:

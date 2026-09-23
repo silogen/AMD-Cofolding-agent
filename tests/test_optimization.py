@@ -955,8 +955,44 @@ class TestJobManagerLifecycle:
         assert 'run_type = "staged_learning"' in toml_content
         assert "max_steps = 50" in toml_content
 
-    def test_max_concurrent_jobs_enforced(self, manager, tmp_path):
-        """Cannot exceed max_concurrent_jobs."""
+    def test_submit_toml_returns_real_paths_and_max_steps(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.submit_toml(
+                'run_type = "staged_learning"\n',
+                job_name="generation-mol2mol",
+                extra_files={"seed.smi": "CCO\nCCN\n"},
+                max_steps=77,
+                model=".m2m_medium",
+            )
+
+        job_dir = Path(result["working_dir"])
+        assert result["job_id"]
+        assert result["model"] == ".m2m_medium"
+        assert result["max_steps"] == 77
+        assert result["csv_path"] == str(job_dir / "results_1.csv")
+        assert result["checkpoint_path"] == str(job_dir / "stage.chkpt")
+        assert (job_dir / "seed.smi").read_text() == "CCO\nCCN\n"
+
+    def test_submit_toml_serializes_with_running_job(self, manager):
+        with patch.object(manager, "_start_process"):
+            previous = manager.create_and_start(
+                ttp_id="previous",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+            manager._jobs[previous["job_id"]].state = JobState.RUNNING
+
+            result = manager.submit_toml(
+                'run_type = "staged_learning"\n',
+                max_steps=10,
+            )
+
+        assert manager._jobs[previous["job_id"]].state == JobState.STOPPED
+        assert result["stopped_previous_jobs"] == [{"job_id": previous["job_id"]}]
+
+    def test_new_job_stops_running_job(self, manager, tmp_path):
+        """GPU jobs are serialized by stopping the currently running job."""
         with patch.object(manager, "_start_process"):
             for i in range(manager._config.jobs.max_concurrent_jobs):
                 result = manager.create_and_start(
@@ -975,8 +1011,9 @@ class TestJobManagerLifecycle:
                 scorer_config=MINIMAL_SCORER_CONFIG,
                 model="/model/prior.model",
             )
-            assert "error" in result
-            assert "Maximum concurrent jobs" in result["error"]
+            assert "error" not in result
+            assert result["state"] == JobState.QUEUED.value
+            assert len(result["stopped_previous_jobs"]) == 1
 
     def test_get_status_unknown_job(self, manager):
         result = manager.get_status("nonexistent")
@@ -1548,7 +1585,7 @@ class TestJobManagerTL:
         toml_content = (job_dir / "config.toml").read_text()
         assert "validation_smiles_file" in toml_content
 
-    def test_tl_max_concurrent_enforced(self, manager):
+    def test_tl_stops_running_job(self, manager):
         with patch.object(manager, "_start_process"):
             for i in range(manager._config.jobs.max_concurrent_jobs):
                 result = manager.create_and_start_tl(
@@ -1562,7 +1599,9 @@ class TestJobManagerTL:
                 model="/model/prior.model",
                 smiles=["CCO"],
             )
-            assert "error" in result
+            assert "error" not in result
+            assert result["state"] == JobState.QUEUED.value
+            assert len(result["stopped_previous_jobs"]) == 1
 
     def test_tl_job_to_dict(self, manager, tmp_path):
         with patch.object(manager, "_start_process"):
