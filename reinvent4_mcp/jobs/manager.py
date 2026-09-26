@@ -9,6 +9,7 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -101,9 +102,10 @@ class JobInfo:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "error": self.error,
             "exit_code": self.exit_code,
         }
+        if self.error is not None:
+            d["error"] = self.error
         if self.job_type == JobType.OPTIMIZATION:
             d["max_steps"] = self.max_steps
             d["csv_path"] = str(self.csv_path)
@@ -479,9 +481,21 @@ class JobManager:
         self._poll_process(job)
 
         result = job.to_dict()
-        trajectory = self._parse_trajectory(job)
-        if trajectory:
-            result["trajectory"] = trajectory
+        monitoring = self._parse_trajectory(job)
+        result["metrics_available"] = monitoring["metrics_available"]
+        result["csv_readiness"] = monitoring["csv_readiness"]
+        result["current_step"] = monitoring["current_step"]
+        result["max_steps"] = job.max_steps
+        result["last_csv_row"] = monitoring.get("last_csv_row")
+        result["data_policy"] = (
+            "metrics_available"
+            if monitoring["metrics_available"]
+            else "metrics_withheld"
+        )
+        if monitoring.get("reason"):
+            result["metrics_unavailable_reason"] = monitoring["reason"]
+        if monitoring["metrics_available"]:
+            result["trajectory"] = monitoring["trajectory"]
 
         return result
 
@@ -797,27 +811,62 @@ class JobManager:
     # CSV parsing for monitoring
     # ------------------------------------------------------------------
 
-    def _parse_trajectory(self, job: JobInfo) -> Optional[dict[str, Any]]:
+    def _parse_trajectory(self, job: JobInfo) -> dict[str, Any]:
         """Parse the output CSV to build a score trajectory for agent monitoring.
 
-        Returns per-step aggregated metrics: mean/max total score,
-        per-component means, validity rate, and current step count.
+        The return shape is explicit even before REINVENT writes its first row.
+        Callers must not infer metrics from a missing ``trajectory`` key.
         """
 
         csv_path = job.csv_path
         if not csv_path.exists():
-            return None
+            return {
+                "metrics_available": False,
+                "csv_readiness": "missing",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": "Results CSV has not been created yet.",
+            }
 
         try:
             import pandas as pd
-
+            from pandas.errors import EmptyDataError
+        except ImportError as exc:
+            return {
+                "metrics_available": False,
+                "csv_readiness": "parse_error",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": f"pandas unavailable: {exc}",
+            }
+        try:
             df = pd.read_csv(csv_path)
+        except EmptyDataError:
+            return {
+                "metrics_available": False,
+                "csv_readiness": "empty",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": "Results CSV exists but has no header or rows yet.",
+            }
         except Exception as exc:
             logger.warning("Failed to parse CSV for job %s: %s", job.job_id, exc)
-            return None
+            return {
+                "metrics_available": False,
+                "csv_readiness": "parse_error",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
 
         if df.empty:
-            return {"current_step": 0, "n_molecules_total": 0}
+            return {
+                "metrics_available": False,
+                "csv_readiness": "header_only",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": "Results CSV has a header but no molecule rows yet.",
+            }
 
         total_col = "total_score" if "total_score" in df.columns else None
 
@@ -869,10 +918,21 @@ class JobManager:
         diagnostics = _compute_diagnostics(
             df, total_col, step_col, component_stats, job,
         )
+        aggregate_check = _aggregate_consistency_check(df, total_col)
+        if aggregate_check:
+            if diagnostics is None:
+                diagnostics = {}
+            diagnostics["aggregate_consistency"] = aggregate_check
         if diagnostics:
             trajectory["diagnostics"] = diagnostics
 
-        return trajectory
+        return {
+            "metrics_available": True,
+            "csv_readiness": "ready",
+            "current_step": current_step,
+            "last_csv_row": len(df) - 1,
+            "trajectory": trajectory,
+        }
 
     def _parse_top_candidates(
         self,
@@ -1138,6 +1198,76 @@ def _per_component_stats(df: Any) -> dict[str, dict[str, Any]]:
         stats[col] = entry
 
     return stats
+
+
+def _aggregate_consistency_check(
+    df: Any,
+    total_col: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Compare the latest reported total with simple component aggregates.
+
+    REINVENT may apply weights, so a mismatch is a diagnostic rather than a
+    hard failure.  It is still valuable: it prevents an agent from publishing
+    a total that is arithmetically incompatible with the component values it
+    displays in the same report.
+    """
+    if total_col is None or total_col not in df.columns or df.empty:
+        return None
+
+    skip_cols = {
+        "SMILES", "SMILES_state", "Step", "step", "batch", total_col,
+    }
+    component_cols = [
+        col
+        for col in df.columns
+        if col not in skip_cols
+        and "(raw)" not in col
+        and getattr(df[col].dtype, "kind", "") in ("f", "i", "u")
+    ]
+    if len(component_cols) < 2:
+        return None
+
+    latest = df.dropna(subset=[total_col]).tail(1)
+    if latest.empty:
+        return None
+
+    values: list[float] = []
+    for col in component_cols:
+        value = _safe_float(latest.iloc[0][col])
+        if value is not None:
+            values.append(value)
+    if len(values) < 2:
+        return None
+
+    reported = _safe_float(latest.iloc[0][total_col])
+    if reported is None:
+        return None
+
+    arithmetic = sum(values) / len(values)
+    if any(value <= 0 for value in values):
+        geometric = 0.0
+    else:
+        geometric = math.exp(sum(math.log(value) for value in values) / len(values))
+
+    tolerance = max(0.02, abs(reported) * 0.10)
+    nearest_delta = min(
+        abs(reported - arithmetic),
+        abs(reported - geometric),
+    )
+    consistent = nearest_delta <= tolerance
+    result: dict[str, Any] = {
+        "reported_total": round(reported, 4),
+        "unweighted_arithmetic_mean": round(arithmetic, 4),
+        "unweighted_geometric_mean": round(geometric, 4),
+        "n_components": len(values),
+        "matches_unweighted_aggregate": consistent,
+    }
+    if not consistent:
+        result["warning"] = (
+            "Reported total differs from both unweighted component aggregates; "
+            "verify component weights before narrating the trajectory."
+        )
+    return result
 
 
 def _step_trajectory(

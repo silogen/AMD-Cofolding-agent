@@ -242,9 +242,17 @@ def _emit_endpoint_fields(lines: list[str], endpoint: dict[str, Any]) -> None:
                 if pval is not None:
                     # Mapper plumbing can wrap scalar parameters in a one-item
                     # list (radius=[3], use_counts=[True]). REINVENT4 expects
-                    # the bare scalar. Preserve real multi-value parameters
-                    # such as CustomAlerts.smarts.
+                    # the bare scalar at endpoint level. Preserve parameters
+                    # whose endpoint value is itself a list; collect_params()
+                    # adds the outer endpoint dimension at runtime.
                     if (
+                        pkey not in {
+                            "smiles",
+                            "reference_smiles",
+                            "smarts",
+                            "reaction_smarts",
+                        }
+                        and
                         isinstance(pval, list)
                         and len(pval) == 1
                         and not isinstance(pval[0], (list, dict))

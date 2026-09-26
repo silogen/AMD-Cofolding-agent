@@ -32,6 +32,86 @@ def reset_store() -> None:
     _store = None
 
 
+def _endpoint_params_for_component(
+    component: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one endpoint's native params with required safe defaults."""
+    from reinvent4_mcp.ttp.mapper import _native_component_params_with_defaults
+
+    endpoint = _native_component_params_with_defaults(component, params)
+    normalized = component.lower().replace("-", "").replace("_", "")
+    if normalized in {"tanimotosimilarity", "tanimotodistance"}:
+        smiles = endpoint.get("smiles")
+        if isinstance(smiles, str):
+            smiles = [smiles]
+        elif (
+            isinstance(smiles, list)
+            and len(smiles) == 1
+            and isinstance(smiles[0], list)
+        ):
+            smiles = smiles[0]
+        if (
+            not isinstance(smiles, list)
+            or not smiles
+            or not all(isinstance(value, str) and value for value in smiles)
+        ):
+            raise ValueError(
+                f"{component}.params.smiles must be a non-empty list of SMILES strings"
+            )
+        endpoint["smiles"] = smiles
+    return endpoint
+
+
+def _validate_native_component_params(ttp: TTP) -> None:
+    """Validate native scorer parameters before a TTP reaches job launch."""
+    native = [
+        objective
+        for objective in ttp.scoring.objectives
+        if objective.type == "native"
+    ]
+    if not native:
+        return
+
+    # Shape validation for known components works even when the external
+    # REINVENT checkout has not yet been restored (e.g. lightweight unit CI).
+    prepared: list[tuple[str, dict[str, Any]]] = []
+    for objective in native:
+        component = objective.component or ""
+        prepared.append(
+            (component, _endpoint_params_for_component(component, objective.params or {}))
+        )
+
+    try:
+        from reinvent4_mcp.utils import ensure_reinvent4_importable
+
+        ensure_reinvent4_importable()
+        from reinvent.scoring.importer import get_registry
+
+        registry = get_registry()
+    except (ImportError, ModuleNotFoundError, FileNotFoundError):
+        logger.info(
+            "REINVENT4 is unavailable; native parameter validation is limited "
+            "to built-in structural checks."
+        )
+        return
+
+    for component, endpoint in prepared:
+        lookup = component.lower().replace("-", "").replace("_", "")
+        if lookup not in registry:
+            raise ValueError(
+                f"Native scoring component {component!r} is unavailable in this runtime"
+            )
+        _, component_params = registry[lookup]
+        if component_params is None:
+            continue
+        collected = {key: [value] for key, value in endpoint.items()}
+        try:
+            component_params(**collected)
+        except Exception as exc:
+            raise ValueError(f"Invalid params for {component}: {exc}") from exc
+
+
 def create_ttp(ttp_data: dict[str, Any]) -> dict[str, Any]:
     """Validate and persist a new TTP.
 
@@ -39,13 +119,17 @@ def create_ttp(ttp_data: dict[str, Any]) -> dict[str, Any]:
     """
     try:
         ttp = TTP.model_validate(ttp_data)
+        _validate_native_component_params(ttp)
     except Exception as exc:
         return {"error": f"Invalid TTP: {exc}"}
 
     try:
         created = _get_store().create(ttp)
     except FileExistsError as exc:
-        return {"error": str(exc)}
+        return {
+            "error": str(exc),
+            "hint": f"Use update_ttp('{ttp.id}', updates) to preserve version history.",
+        }
 
     return {
         "status": "created",
@@ -63,7 +147,11 @@ def update_ttp(ttp_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     updated TTP so the agent can inspect the result.
     """
     try:
-        updated = _get_store().update(ttp_id, updates)
+        updated = _get_store().update(
+            ttp_id,
+            updates,
+            validator=_validate_native_component_params,
+        )
     except FileNotFoundError as exc:
         return {"error": str(exc)}
     except Exception as exc:
@@ -96,7 +184,11 @@ def list_ttps() -> list[dict[str, Any]]:
 
 
 def delete_ttp(ttp_id: str) -> dict[str, Any]:
-    """Delete a TTP and its version history."""
+    """Delete a TTP and its version history.
+
+    Prefer ``update_ttp`` for retries or corrections. Delete only when the
+    identifier is being abandoned; deletion is irreversible.
+    """
     try:
         _get_store().delete(ttp_id)
     except FileNotFoundError as exc:

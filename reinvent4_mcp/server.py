@@ -566,6 +566,8 @@ def delete_ttp(
     """Delete a stored TTP and all its version history.
 
     This is irreversible. The TTP and all versioned snapshots are removed.
+    Prefer update_ttp for corrections and campaign retries so provenance is
+    preserved. Delete only when abandoning the identifier.
     """
 
     from reinvent4_mcp.tools.ttp import delete_ttp as _impl

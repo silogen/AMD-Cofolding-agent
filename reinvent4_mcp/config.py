@@ -174,7 +174,7 @@ class BoltzConfig(BaseModel):
         description="Directory for Boltz model weights and MSA cache",
     )
     use_msa_server: bool = Field(
-        default=False,
+        default=True,
         description="Use ColabFold MSA server instead of pre-computed MSAs",
     )
     msa_server_url: str = Field(

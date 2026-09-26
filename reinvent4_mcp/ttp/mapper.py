@@ -121,7 +121,8 @@ def ttp_to_scorer_config(ttp: TTP) -> dict[str, Any]:
 
     # 2. Scoring objectives -- topologically sorted so pipeline
     #    dependencies (depends_on) are respected
-    ordered = _topological_sort_objectives(ttp.scoring.objectives)
+    objectives = _objectives_with_pose_gate(ttp)
+    ordered = _topological_sort_objectives(objectives)
     for obj in ordered:
         if obj.type == "native":
             assert obj.component is not None
@@ -140,6 +141,45 @@ def ttp_to_scorer_config(ttp: TTP) -> dict[str, Any]:
         "type": ttp.scoring.aggregation,
         "component": scorer_components,
     }
+
+
+def _objectives_with_pose_gate(ttp: TTP) -> list[ScoringObjective]:
+    """Ensure every Boltz affinity reward is hard-gated by PoseBusters."""
+    objectives = list(ttp.scoring.objectives)
+    boltz = [
+        objective
+        for objective in objectives
+        if objective.type == "external" and objective.service == "boltz"
+    ]
+    if not boltz:
+        return objectives
+    if ttp.scoring.aggregation != "geometric_mean":
+        raise ValueError(
+            "Boltz affinity objectives require geometric_mean aggregation so "
+            "the automatic PoseBusters objective is a hard zero gate."
+        )
+
+    for producer in boltz:
+        already_gated = any(
+            objective.type == "external"
+            and objective.service == "posebusters"
+            and objective.depends_on == producer.name
+            for objective in objectives
+        )
+        if already_gated:
+            continue
+        objectives.append(
+            ScoringObjective(
+                name=f"{producer.name}_pose_gate",
+                type="external",
+                service="posebusters",
+                service_url="http://posebusters:8080/score",
+                depends_on=producer.name,
+                weight=1.0,
+                comment="Automatically added hard pose-validity gate.",
+            )
+        )
+    return objectives
 
 
 def ttp_to_native_scorer_config(ttp: TTP) -> dict[str, Any]:
@@ -220,7 +260,11 @@ def extract_native_components(ttp: TTP) -> list[dict[str, Any]]:
             if obj.params:
                 from reinvent4_mcp.tools.scoring import _normalize_endpoint_params
 
-                entry["params"] = _normalize_endpoint_params(obj.params)
+                entry["params"] = _normalize_endpoint_params(
+                    _native_component_params_with_defaults(
+                        obj.component or "", obj.params
+                    )
+                )
             components.append(entry)
 
     return components
@@ -369,21 +413,29 @@ def get_mapper_summary(
     n_pre_scoring = (
         len(ttp.pre_scoring.components) if ttp.pre_scoring else 0
     )
+    effective_objectives = _objectives_with_pose_gate(ttp)
     native_objectives = [
-        o.name for o in ttp.scoring.objectives if o.type == "native"
+        o.name for o in effective_objectives if o.type == "native"
     ]
     external_objectives = [
-        o.name for o in ttp.scoring.objectives if o.type == "external"
+        o.name for o in effective_objectives if o.type == "external"
     ]
     n_constraints = len(ttp.constraints) if ttp.constraints else 0
 
     pipeline_deps: list[dict[str, str]] = []
-    for obj in ttp.scoring.objectives:
+    for obj in effective_objectives:
         if obj.depends_on:
             pipeline_deps.append(
                 {"from": obj.depends_on, "to": obj.name}
             )
 
+    effective_ttp = ttp.model_copy(
+        update={
+            "scoring": ttp.scoring.model_copy(
+                update={"objectives": effective_objectives}
+            )
+        }
+    )
     return {
         "n_pre_scoring": n_pre_scoring,
         "n_native_objectives": len(native_objectives),
@@ -397,7 +449,9 @@ def get_mapper_summary(
         ),
         "native_objective_names": native_objectives,
         "external_objective_names": external_objectives,
-        "external_components": describe_external_objectives(ttp, scorer_config),
+        "external_components": describe_external_objectives(
+            effective_ttp, scorer_config
+        ),
         "pipeline_dependencies": pipeline_deps,
         "aggregation": ttp.scoring.aggregation,
     }
@@ -468,10 +522,26 @@ def _map_native_component(
     if isinstance(source, ScoringObjective) and source.params:
         from reinvent4_mcp.tools.scoring import _normalize_endpoint_params
 
-        endpoint["params"] = _normalize_endpoint_params(source.params)
+        endpoint["params"] = _normalize_endpoint_params(
+            _native_component_params_with_defaults(component_type, source.params)
+        )
     return {
         component_type: {"endpoint": [endpoint]},
     }
+
+
+def _native_component_params_with_defaults(
+    component_type: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Fill required endpoint parameters for well-known native components."""
+    out = dict(params)
+    normalized = component_type.lower().replace("-", "").replace("_", "")
+    if normalized in {"tanimotosimilarity", "tanimotodistance"}:
+        out.setdefault("radius", 2)
+        out.setdefault("use_counts", True)
+        out.setdefault("use_features", False)
+    return out
 
 
 def _map_external_objective(
@@ -527,6 +597,10 @@ def _map_external_objective(
     # Inject process config defaults for PoseBusters before TTP overrides
     if objective.service == "posebusters":
         params.update(_get_posebusters_defaults())
+        # Pose validity is a hard gate. Service errors and declined/null
+        # verdicts must score zero, never NaN (which REINVENT may drop from
+        # aggregation).
+        params["failure_score"] = 0.0
 
     # Inject model-stack default before objective-level ADMET overrides.
     if objective.service == "admet":

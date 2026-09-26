@@ -164,7 +164,7 @@ def register_tools(mcp) -> None:
                     "sequence are free.  Requires internet access."
                 ),
             ),
-        ] = False,
+        ] = True,
         msa_free_fallback: Annotated[
             bool,
             Field(

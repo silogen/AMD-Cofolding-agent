@@ -963,7 +963,9 @@ class TestGetMapperSummary:
         summary = get_mapper_summary(ttp)
         assert summary["n_pre_scoring"] == 6
         assert summary["n_native_objectives"] == 1
-        assert summary["n_external_objectives"] == 3
+        # Binder Probability has no explicit PoseBusters dependent in the
+        # source TTP, so the mapper adds one hard gate.
+        assert summary["n_external_objectives"] == 4
         assert summary["n_constraints"] == 1
         assert summary["n_total_components"] == 11
         assert summary["aggregation"] == "geometric_mean"
@@ -978,10 +980,13 @@ class TestGetMapperSummary:
     def test_pipeline_dependencies_listed(self):
         ttp = TTP.model_validate(FULL_TTP)
         summary = get_mapper_summary(ttp)
-        assert len(summary["pipeline_dependencies"]) == 1
-        dep = summary["pipeline_dependencies"][0]
-        assert dep["from"] == "Binding Affinity"
-        assert dep["to"] == "Pose Quality"
+        assert summary["pipeline_dependencies"] == [
+            {"from": "Binding Affinity", "to": "Pose Quality"},
+            {
+                "from": "Binder Probability",
+                "to": "Binder Probability_pose_gate",
+            },
+        ]
 
     def test_minimal_ttp_summary(self):
         ttp = TTP.model_validate(MINIMAL_TTP)
@@ -1016,6 +1021,7 @@ class TestGetMapperSummary:
             "Binding Affinity",
             "Binder Probability",
             "Pose Quality",
+            "Binder Probability_pose_gate",
         ]
 
     def test_no_external_components_when_native_only(self):

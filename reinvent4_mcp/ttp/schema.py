@@ -314,7 +314,8 @@ class ScoringObjective(BaseModel):
             "Component-specific parameters forwarded to REINVENT4. "
             "Use plain values -- per-endpoint wrapping is automatic. "
             "Example for TanimotoSimilarity: "
-            "{'smiles': ['CCO'], 'radius': 3, 'use_features': true}"
+            "{'smiles': ['CCO'], 'radius': 3, 'use_counts': true, "
+            "'use_features': false}"
         ),
     )
     comment: Optional[str] = Field(
