@@ -133,6 +133,41 @@ class TargetConfig(BaseModel):
         default=None,
         description="Path to protein structure PDB file",
     )
+    # E3: binding-site constraints
+    binding_site_residues: Optional[list[list]] = Field(
+        default=None,
+        description=(
+            "Pocket constraint contacts: list of [chain_id, author_resseq] pairs "
+            "using PDB author numbering. The framework translates them to Boltz "
+            "sequence positions via the residue_numbering.json artifact."
+        ),
+    )
+    binding_site_max_distance_A: float = Field(
+        default=6.0,
+        ge=4.0,
+        le=20.0,
+        description="max_distance for the pocket constraint (Angstrom).",
+    )
+    binding_site_force: bool = Field(
+        default=False,
+        description="Apply the pocket constraint as a hard potential (E4).",
+    )
+    contact_pairs: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "Per-atom contact constraints. Each entry: "
+            "{token1: ['A', resseq], token2: ['B', atom_name], "
+            "max_distance: 3.5, force: true}."
+        ),
+    )
+    covalent_bond: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Bond constraint for a covalent warhead (L1). "
+            "{atom1: ['A', 145, 'SG'], atom2: ['B', 1, 'C7']}. "
+            "Affinity prediction is suppressed automatically (L2)."
+        ),
+    )
 
     @field_validator("protein_sequence")
     @classmethod

@@ -154,6 +154,42 @@ def register_tools(mcp) -> None:
                 ),
             ),
         ] = None,
+        pocket_constraints: Annotated[
+            list[dict] | None,
+            Field(
+                default=None,
+                description=(
+                    "Boltz pocket constraints (E1). Each entry: "
+                    "{binder: 'B', contacts: [['A', 145], ['A', 41]], "
+                    "max_distance: 6.0, force: true}. "
+                    "Use resolve_author_residue to translate PDB author numbers "
+                    "to Boltz sequence positions before setting contacts. "
+                    "Force automatically enables --use_potentials (E4)."
+                ),
+            ),
+        ] = None,
+        contact_constraints: Annotated[
+            list[dict] | None,
+            Field(
+                default=None,
+                description=(
+                    "Boltz contact constraints (E1). Each entry: "
+                    "{token1: ['A', 145], token2: ['B', 'O20'], max_distance: 3.5, force: true}. "
+                    "Ligand atom names can be computed with the boltz_atom_names helper."
+                ),
+            ),
+        ] = None,
+        bond_constraints: Annotated[
+            list[dict] | None,
+            Field(
+                default=None,
+                description=(
+                    "Boltz bond constraints for covalent warheads (L1). Each entry: "
+                    "{atom1: ['A', 145, 'SG'], atom2: ['B', 1, 'C7']}. "
+                    "Affinity prediction is automatically suppressed (L2)."
+                ),
+            ),
+        ] = None,
         use_msa_server: Annotated[
             bool,
             Field(
@@ -246,6 +282,14 @@ def register_tools(mcp) -> None:
             payload["params"]["template"]["expected_sha256"] = expected_sha256
         if msa_path is not None:
             payload["params"]["msa_path"] = _resolve_shared_path(msa_path)
+
+        # E1-E4: pass constraints through to the service
+        if pocket_constraints:
+            payload["params"]["pocket_constraints"] = pocket_constraints
+        if contact_constraints:
+            payload["params"]["contact_constraints"] = contact_constraints
+        if bond_constraints:
+            payload["params"]["bond_constraints"] = bond_constraints
 
         try:
             with _client() as client:

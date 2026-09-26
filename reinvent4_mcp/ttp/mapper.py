@@ -650,6 +650,29 @@ def _map_external_objective(
             # fails for lack of an alignment.
             params.update(_resolve_boltz_msa(ttp.target.protein_sequence))
 
+        # L3: affinity-limit preflight
+        seq_len = len(ttp.target.protein_sequence)
+        if seq_len > 128:
+            import logging as _log  # noqa: PLC0415
+            _log.getLogger(__name__).warning(
+                "protein_sequence length %d exceeds the Boltz affinity-head "
+                "training maximum of 128 tokens; affinity output will be inaccurate.",
+                seq_len,
+            )
+
+        # E3: binding-site constraints from TargetConfig
+        if ttp.target.binding_site_residues:
+            params["pocket_constraints"] = [{
+                "binder": "B",
+                "contacts": ttp.target.binding_site_residues,
+                "max_distance": ttp.target.binding_site_max_distance_A,
+                "force": ttp.target.binding_site_force,
+            }]
+        if ttp.target.contact_pairs:
+            params["contact_constraints"] = ttp.target.contact_pairs
+        if ttp.target.covalent_bond:
+            params["bond_constraints"] = [ttp.target.covalent_bond]
+
     # protein_pdb_path is relevant for both structure prediction and
     # pose validation services
     if ttp.target and ttp.target.protein_pdb_path:

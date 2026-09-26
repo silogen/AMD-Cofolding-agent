@@ -120,6 +120,36 @@ class StructureTemplate(BaseModel):
     )
 
 
+class PocketConstraint(BaseModel):
+    """Boltz pocket constraint (E1)."""
+    binder: str = Field(description="Chain ID of the binder (ligand chain).")
+    contacts: list[list] = Field(
+        description="List of [chain_id, residue_index_or_atom_name] pairs."
+    )
+    max_distance: float = Field(
+        default=6.0, ge=4.0, le=20.0,
+        description="Maximum distance in Angstrom between binder and each contact.",
+    )
+    force: bool = Field(
+        default=False,
+        description="Use a steering potential to enforce the constraint.",
+    )
+
+
+class ContactConstraint(BaseModel):
+    """Boltz contact constraint (E1)."""
+    token1: list = Field(description="[chain_id, residue_index_or_atom_name] for token1.")
+    token2: list = Field(description="[chain_id, residue_index_or_atom_name] for token2.")
+    max_distance: float = Field(default=6.0, ge=4.0, le=20.0)
+    force: bool = False
+
+
+class BondConstraint(BaseModel):
+    """Boltz bond constraint for covalent warheads (L1)."""
+    atom1: list = Field(description="[chain_id, residue_index_1based, atom_name].")
+    atom2: list = Field(description="[chain_id, residue_index_1based, atom_name].")
+
+
 class PredictStructureParams(ScoreParams):
     """Parameters for the structure-conditioned prediction endpoint."""
 
@@ -128,6 +158,18 @@ class PredictStructureParams(ScoreParams):
     run_posebusters: bool = Field(
         default=True,
         description="Validate the best generated pose with PoseBusters.",
+    )
+    pocket_constraints: list[PocketConstraint] = Field(
+        default_factory=list,
+        description="Pocket constraints for Boltz-2 (E1).",
+    )
+    contact_constraints: list[ContactConstraint] = Field(
+        default_factory=list,
+        description="Contact constraints for Boltz-2 (E1).",
+    )
+    bond_constraints: list[BondConstraint] = Field(
+        default_factory=list,
+        description="Bond constraints for covalent warheads (L1).",
     )
 
 
@@ -385,12 +427,17 @@ def _build_molecule_yaml(
     msa_path: Optional[str],
     msa_free: bool = False,
     template_dict: Optional[dict] = None,
+    pocket_constraints: Optional[list] = None,
+    contact_constraints: Optional[list] = None,
+    bond_constraints: Optional[list] = None,
+    predict_affinity: bool = True,
 ) -> dict:
-    """Build the Boltz input YAML dict for a single protein–ligand pair.
+    """Build the Boltz input YAML dict for a single protein-ligand pair.
 
-    ``msa_free`` sets ``msa: empty`` so Boltz runs single-sequence (no MSA);
-    used as a last-resort fallback when no MSA file exists and the MSA server
-    is unreachable.
+    ``msa_free`` sets ``msa: empty`` so Boltz runs single-sequence (no MSA).
+    Constraints are serialised verbatim as Boltz expects them.
+    When *predict_affinity* is False the properties block is omitted so the
+    affinity head does not run (covalent mode, L2).
     """
     protein_entry: dict[str, Any] = {"id": "A", "sequence": protein_sequence}
     if msa_free:
@@ -404,12 +451,36 @@ def _build_molecule_yaml(
             {"protein": protein_entry},
             {"ligand": {"id": "B", "smiles": smiles}},
         ],
-        "properties": [
-            {"affinity": {"binder": "B"}},
-        ],
     }
+    if predict_affinity:
+        yaml_dict["properties"] = [{"affinity": {"binder": "B"}}]
+
     if template_dict:
         yaml_dict["templates"] = [template_dict]
+
+    constraints: list[dict] = []
+    for pc in (pocket_constraints or []):
+        entry: dict = {
+            "binder": pc["binder"],
+            "contacts": pc["contacts"],
+        }
+        if "max_distance" in pc:
+            entry["max_distance"] = pc["max_distance"]
+        if pc.get("force"):
+            entry["force"] = True
+        constraints.append({"pocket": entry})
+    for cc in (contact_constraints or []):
+        entry = {"token1": cc["token1"], "token2": cc["token2"]}
+        if "max_distance" in cc:
+            entry["max_distance"] = cc["max_distance"]
+        if cc.get("force"):
+            entry["force"] = True
+        constraints.append({"contact": entry})
+    for bc in (bond_constraints or []):
+        constraints.append({"bond": {"atom1": bc["atom1"], "atom2": bc["atom2"]}})
+    if constraints:
+        yaml_dict["constraints"] = constraints
+
     return yaml_dict
 
 
@@ -443,11 +514,21 @@ def _write_batch_yamls(
 # Subprocess invocation
 # ---------------------------------------------------------------------------
 
+def _needs_use_potentials(yaml_dict: dict) -> bool:
+    """Return True when any constraint has force=True (E4)."""
+    for constraint in yaml_dict.get("constraints", []):
+        for _kind, spec in constraint.items():
+            if isinstance(spec, dict) and spec.get("force"):
+                return True
+    return False
+
+
 def _build_predict_cmd(
     batch_dir: Path,
     out_dir: Path,
     params: ScoreParams,
     use_msa_server: bool,
+    use_potentials: bool = False,
 ) -> list[str]:
     cmd = [
         "boltz", "predict", str(batch_dir),
@@ -467,6 +548,8 @@ def _build_predict_cmd(
         cmd.extend(["--msa_server_url", params.msa_server_url])
     if params.affinity_mw_correction:
         cmd.append("--affinity_mw_correction")
+    if use_potentials:
+        cmd.append("--use_potentials")
     return cmd
 
 
@@ -1269,13 +1352,31 @@ def _run_structure_prediction(
                     )
 
         batch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine whether affinity prediction should run (L2):
+        # suppress when any bond constraint (covalent) is present.
+        has_bond = bool(getattr(params, "bond_constraints", None))
+        predict_affinity = not has_bond
+
         molecule_yaml = _build_molecule_yaml(
             smiles,
             protein_sequence,
             effective_msa_path,
             msa_free=msa_free,
             template_dict=template_dict,
+            pocket_constraints=[pc.model_dump() for pc in getattr(params, "pocket_constraints", [])],
+            contact_constraints=[cc.model_dump() for cc in getattr(params, "contact_constraints", [])],
+            bond_constraints=[bc.model_dump() for bc in getattr(params, "bond_constraints", [])],
+            predict_affinity=predict_affinity,
         )
+        if has_bond:
+            warnings.append(
+                "Bond constraints detected: affinity head disabled. "
+                "Covalent binding is kinetic (k_inact/K_I), not an equilibrium K_d."
+            )
+
+        use_potentials = _needs_use_potentials(molecule_yaml)
+
         with open(batch_dir / "mol_0.yaml", "w") as handle_out:
             yaml.dump(
                 molecule_yaml,
@@ -1285,7 +1386,7 @@ def _run_structure_prediction(
             )
 
         result = _run_predict(
-            _build_predict_cmd(batch_dir, out_dir, params, use_server_flag),
+            _build_predict_cmd(batch_dir, out_dir, params, use_server_flag, use_potentials),
             handle,
         )
         stdout_tail = result.stdout[-4000:] if result.stdout else None
