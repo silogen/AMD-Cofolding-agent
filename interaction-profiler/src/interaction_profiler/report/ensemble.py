@@ -253,11 +253,95 @@ def _estimate_linker_distance(result_a: Any, result_b: Any) -> float | None:
 
 
 def _exit_vector_positions(result: Any) -> list[list[float]]:
-    """Extract ligand atom positions classified as exit_vector."""
+    """Extract ligand exit-vector atom positions (N1).
+
+    Uses the ligand atom coordinates from the ``ligand_atoms`` field when
+    present; falls back to an empty list so pair selection degrades
+    gracefully rather than crashing.
+    """
     positions: list[list[float]] = []
-    for ix in getattr(result, "enriched_interactions", []):
-        if getattr(ix, "vector_type", None) == "exit_vector":
-            # We don't store raw coordinates in EnrichedInteraction;
-            # use the ligand center of mass from MoleculeMetadata if available
-            break
-    return positions  # empty when no 3D coords stored
+    # Try prepared_ligand_path → extract via gemmi
+    ligand_atoms = getattr(result, "ligand_atoms", None)
+    if ligand_atoms:
+        for atom in ligand_atoms:
+            if getattr(atom, "is_exit_vector", False):
+                pos = getattr(atom, "pos", None)
+                if pos is not None:
+                    try:
+                        positions.append([float(pos[0]), float(pos[1]), float(pos[2])])
+                    except (TypeError, IndexError):
+                        pass
+    # Fallback: scan enriched interactions for exit_vector type
+    if not positions:
+        for ix in getattr(result, "enriched_interactions", []):
+            if getattr(ix, "vector_type", None) == "exit_vector":
+                coords = getattr(ix, "ligand_atom_coords", None)
+                if coords and len(coords) >= 3:
+                    positions.append([float(coords[0]), float(coords[1]), float(coords[2])])
+    return positions
+
+
+def derive_linkinvent_fragments(
+    pair: Any,
+    fragment_smiles_map: dict[str, str],
+    max_linker_A: float = 15.0,
+) -> dict | None:
+    """Convert a CompatiblePair into a LinkInvent-ready fragment pair spec (N3).
+
+    Parameters
+    ----------
+    pair:
+        A ``CompatiblePair`` from ``compute_compatible_pairs``.
+    fragment_smiles_map:
+        Maps structure path (pair.fragment_a / pair.fragment_b) to SMILES with
+        exactly one ``[*:1]`` / ``[*:2]`` attachment point.  If a mapping is
+        absent the pair is skipped.
+    max_linker_A:
+        Reject pairs whose linker distance exceeds this threshold (N4).
+
+    Returns
+    -------
+    dict or None
+        ``{"fragments": ["smi_a", "smi_b"], "linker_distance_A": float, ...}``
+        ready to pass as ``linkinvent_input.fragments`` in a TTP, or None if
+        the pair should be skipped.
+    """
+    fa = getattr(pair, "fragment_a", None)
+    fb = getattr(pair, "fragment_b", None)
+    dist = getattr(pair, "linker_distance_A", None)
+
+    if not (fa and fb and fa != fb):
+        return None
+
+    # N4: distance prefilter
+    if dist is not None and dist > max_linker_A:
+        return None
+
+    smi_a = fragment_smiles_map.get(fa)
+    smi_b = fragment_smiles_map.get(fb)
+    if not smi_a or not smi_b:
+        return None
+
+    # Validate that each SMILES has exactly one attachment point
+    def _has_single_attach(smi: str) -> bool:
+        try:
+            from rdkit import Chem  # noqa: PLC0415
+            m = Chem.MolFromSmiles(smi)
+            if m is None:
+                return False
+            dummies = [a for a in m.GetAtoms() if a.GetAtomicNum() == 0]
+            return len(dummies) == 1
+        except Exception:
+            return False
+
+    if not _has_single_attach(smi_a) or not _has_single_attach(smi_b):
+        return None
+
+    return {
+        "fragments": [smi_a, smi_b],
+        "linker_distance_A": dist,
+        "fragment_a_source": fa,
+        "fragment_b_source": fb,
+        "compatible": getattr(pair, "compatible", True),
+        "overlap_residues": getattr(pair, "overlap_residues", []),
+    }

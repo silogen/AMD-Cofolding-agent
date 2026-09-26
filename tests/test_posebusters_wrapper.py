@@ -188,7 +188,7 @@ class TestScoreSingleMolecule:
         )
 
         assert score is None
-        assert checks == {}
+        assert "pose_status" in checks  # now always populated
 
     def test_exception_returns_none(self):
         buster = MagicMock()
@@ -199,7 +199,7 @@ class TestScoreSingleMolecule:
         )
 
         assert score is None
-        assert checks == {}
+        assert "pose_status" in checks  # service_error or declined
 
     def test_passes_mol_cond_and_mol_true(self):
         df = _make_bust_df({"bond_lengths": True})

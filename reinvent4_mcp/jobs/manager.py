@@ -965,6 +965,29 @@ class JobManager:
         if "SMILES_state" in df.columns:
             df = df[df["SMILES_state"] == 1]
 
+        # J1: chemical validity gate — RDKit sanitize + valence check.
+        # Filters out molecules that would crash Boltz or produce misleading
+        # cofolding results (as happened with compound 3 in the agro run).
+        def _is_chemically_valid(smi: str) -> bool:
+            try:
+                from rdkit import Chem  # noqa: PLC0415
+                from rdkit import RDLogger  # noqa: PLC0415
+                RDLogger.DisableLog("rdApp.*")
+                mol = Chem.MolFromSmiles(smi, sanitize=True)
+                if mol is None:
+                    return False
+                Chem.SanitizeMol(mol)
+                return True
+            except Exception:
+                return False
+
+        if smiles_col:
+            valid_mask = df[smiles_col].apply(lambda s: _is_chemically_valid(str(s)))
+            n_invalid = int((~valid_mask).sum())
+            df = df[valid_mask]
+            if n_invalid:
+                df.attrs["n_invalid_filtered"] = n_invalid
+
         if total_col and min_score is not None:
             df = df[df[total_col] >= min_score]
 

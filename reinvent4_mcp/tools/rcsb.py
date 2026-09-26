@@ -1014,7 +1014,7 @@ def _norm_model_block(raw: dict) -> dict:
 def _norm_validation(raw: dict) -> dict:
     geom = (raw.get("pdbx_vrpt_summary_geometry") or [{}])[0]
     diff = (raw.get("pdbx_vrpt_summary_diffraction") or [{}])[0]
-    return {
+    result = {
         "clashscore":              _safe_get(geom, "clashscore"),
         "ramachandran_outlier_pct": _safe_get(geom, "percent_ramachandran_outliers"),
         "rotamer_outlier_pct":     _safe_get(geom, "percent_rotamer_outliers"),
@@ -1024,6 +1024,33 @@ def _norm_validation(raw: dict) -> dict:
         "data_completeness_pct":   _safe_get(diff, "data_completeness"),
         "percentiles":             None,
     }
+    # J2: automated crystal-quality tier (reliable / use_with_caution / exclude).
+    # Thresholds match those agreed in the PR4 plan based on the 7LDX case.
+    rsrz = result["percent_rsrz_outliers"]
+    comp = result["data_completeness_pct"]
+    r_free_val = None  # not available in validation block; caller may override
+    tier = "reliable"
+    reasons: list[str] = []
+    if rsrz is not None and rsrz > 10.0:
+        tier = "exclude"
+        reasons.append(f"RSRZ outliers {rsrz:.1f}% > 10%")
+    if comp is not None and comp < 90.0:
+        tier = "exclude"
+        reasons.append(f"data completeness {comp:.1f}% < 90%")
+    if clashscore := result["clashscore"]:
+        if clashscore > 40.0:
+            if tier != "exclude":
+                tier = "use_with_caution"
+            reasons.append(f"clashscore {clashscore:.1f} > 40")
+    if not reasons and (
+        (rsrz is not None and rsrz > 5.0)
+        or (comp is not None and comp < 95.0)
+    ):
+        tier = "use_with_caution"
+        reasons.append("borderline RSRZ or completeness")
+    result["quality_tier"] = tier
+    result["quality_tier_reasons"] = reasons
+    return result
 
 
 def _norm_composition(raw: dict) -> dict:

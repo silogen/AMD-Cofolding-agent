@@ -366,3 +366,80 @@ def profile_interactions(
     r = requests.post(f"{base}/analyze", json=payload, timeout=_TIMEOUT)
     r.raise_for_status()
     return r.json()
+
+
+def ingest_fragment_activities(
+    path: str,
+    smiles_col: str = "std_smiles",
+    value_col: str = "activity_value",
+    unit_col: str = "activity_unit",
+    type_col: str = "activity_type",
+    id_col: str = "compound_id",
+) -> dict[str, Any]:
+    """Load fragment activities from a CSV and return a SMILES-keyed potency dict (O4).
+
+    The resulting dict maps canonical SMILES to
+    ``{"experimental": {"value": float, "unit": str, "type": str}}``,
+    which is the shape accepted by ``profile_complex_interaction(potency=...)``.
+
+    Parameters
+    ----------
+    path:
+        Path to a reference CSV (e.g. validation/reference/reference.csv).
+    smiles_col, value_col, unit_col, type_col, id_col:
+        Column names for SMILES, numeric activity value, unit, type, and ID.
+
+    Returns
+    -------
+    dict with keys "n_loaded", "n_no_value", "activities" (the potency dict).
+    """
+    try:
+        import pandas as pd  # noqa: PLC0415
+        from rdkit import Chem  # noqa: PLC0415
+        from rdkit import RDLogger  # noqa: PLC0415
+        RDLogger.DisableLog("rdApp.*")
+    except ImportError as exc:
+        return {"error": f"pandas or RDKit unavailable: {exc}"}
+
+    try:
+        df = pd.read_csv(path, low_memory=False)
+    except Exception as exc:
+        return {"error": f"Cannot read CSV: {exc}"}
+
+    required = {smiles_col, value_col}
+    missing = required - set(df.columns)
+    if missing:
+        return {"error": f"Missing columns: {missing}"}
+
+    n_loaded = 0
+    n_no_value = 0
+    activities: dict[str, dict] = {}
+
+    for _, row in df.iterrows():
+        smi = str(row.get(smiles_col, "")).strip()
+        val = row.get(value_col)
+        if not smi or pd.isna(val):
+            n_no_value += 1
+            continue
+        try:
+            val = float(val)
+        except (ValueError, TypeError):
+            n_no_value += 1
+            continue
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            n_no_value += 1
+            continue
+        can = Chem.MolToSmiles(mol)
+        unit = str(row.get(unit_col, "pIC50")).strip() if unit_col in df.columns else "pIC50"
+        atype = str(row.get(type_col, "pIC50")).strip() if type_col in df.columns else "pIC50"
+        activities[can] = {
+            "experimental": {"value": val, "unit": unit, "type": atype},
+        }
+        n_loaded += 1
+
+    return {
+        "n_loaded": n_loaded,
+        "n_no_value": n_no_value,
+        "activities": activities,
+    }
