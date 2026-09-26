@@ -571,6 +571,7 @@ def run(
         covalent_links=covalent_links,
         altloc_positions=altloc_positions,
         assembly_info=asm_info,
+        space_group=(getattr(structure, "spacegroup_hm", "") or None),
         seqres_vs_atom=seqres_vs_atom,
         engineered_residues=engineered_residues,
         format_warnings=format_warnings,

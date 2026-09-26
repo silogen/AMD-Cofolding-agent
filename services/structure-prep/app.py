@@ -132,6 +132,8 @@ def _validate_sync(req: ValidateRequest):
     from structure_prep.stages.assembly import run as run_assembly
     _, s1 = run_assembly(structure, profile.stage1_assembly)
     _, role_map = run_roles(structure, profile.stage2_roles, inventory, registry)
+    from structure_prep.construct import assess_construct
+    construct_assessment = assess_construct(structure)
 
     profile_preview = {
         "proposed_protein_chains": role_map.protein_chains,
@@ -156,6 +158,26 @@ def _validate_sync(req: ValidateRequest):
         "missing_residues_count": sum(
             len(v.get("missing_from_atom", []))
             for v in inventory.seqres_vs_atom.values()
+        ),
+        "space_group": inventory.space_group,
+        "construct_assessment": [
+            assessment.model_dump(mode="json")
+            for assessment in construct_assessment
+        ],
+        "construct_form": (
+            "immature"
+            if any(a.form == "immature" for a in construct_assessment)
+            else (
+                "mature"
+                if construct_assessment
+                and all(a.form == "mature" for a in construct_assessment)
+                else "unknown"
+            )
+        ),
+        "recommended_trim": (
+            "native"
+            if any(a.non_native_n_terminal for a in construct_assessment)
+            else "none"
         ),
         "format_warnings": inventory.format_warnings,
     }

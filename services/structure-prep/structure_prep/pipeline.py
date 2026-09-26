@@ -175,6 +175,34 @@ def run_pipeline(
     )
 
     # ------------------------------------------------------------------
+    # Construct form — detect and optionally trim non-native termini
+    # ------------------------------------------------------------------
+    t0 = time.monotonic()
+    from .construct import apply_construct_policy  # noqa: PLC0415
+
+    structure, construct_assessment = apply_construct_policy(
+        structure, profile.construct_profile
+    )
+    timings["construct"] = time.monotonic() - t0
+    report.construct_assessment = construct_assessment
+    if any(item.trimmed_residues for item in construct_assessment):
+        report.construct_form = "trimmed_to_mature"
+    elif any(item.form == "immature" for item in construct_assessment):
+        report.construct_form = "immature"
+    elif construct_assessment and all(
+        item.form == "mature" for item in construct_assessment
+    ):
+        report.construct_form = "mature"
+    else:
+        report.construct_form = "unknown"
+
+    if any(item.non_native_n_terminal for item in construct_assessment):
+        warnings.append(
+            "Non-native N-terminal residues detected; inspect "
+            "construct_assessment before structure-conditioned prediction."
+        )
+
+    # ------------------------------------------------------------------
     # Stage 3 — HETATM curation (waters, additives, ligand selection)
     # ------------------------------------------------------------------
     t0 = time.monotonic()
@@ -380,6 +408,18 @@ def run_pipeline(
         )
     else:
         logger.info("[Stage 9] Minimization: skipped (minimize='none')")
+
+    # The final structure is the only safe source for sequence positions:
+    # assembly, construct trimming, and later chain selection may all change it.
+    from .numbering import build_residue_numbering  # noqa: PLC0415
+
+    numbering, final_sequences = build_residue_numbering(
+        structure,
+        profile.construct_profile.uniprot_offsets,
+        profile.construct_profile.uniprot_sequence,
+    )
+    report.residue_numbering = numbering
+    report.sequences_by_chain = final_sequences
 
     # ------------------------------------------------------------------
     # Write all output artefacts

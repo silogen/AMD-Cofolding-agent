@@ -447,6 +447,24 @@ def write_all_artefacts(
         )
 
     # ------------------------------------------------------------------
+    # sequences/residue_numbering.json
+    # Author numbering is the public API; sequence and UniProt positions are
+    # explicit translations rather than assumptions made by downstream tools.
+    # ------------------------------------------------------------------
+    numbering_path = sequences_dir / "residue_numbering.json"
+    numbering_payload = {
+        "construct_form": report.construct_form,
+        "entries": [
+            entry.model_dump(mode="json") for entry in report.residue_numbering
+        ],
+    }
+    _atomic_write_text(
+        numbering_path,
+        json.dumps(numbering_payload, indent=2),
+    )
+    artifact_paths.residue_numbering_json = _rel(numbering_path, base)
+
+    # ------------------------------------------------------------------
     # sequences/entity_map.json
     # Human- and machine-readable summary of entity roles.
     # ------------------------------------------------------------------
@@ -474,6 +492,12 @@ def write_all_artefacts(
             for l in ligand_residues
         ],
         "ambiguous_groups": role_map.ambiguous_groups,
+        "construct_form": report.construct_form,
+        "construct_assessment": [
+            assessment.model_dump(mode="json")
+            for assessment in report.construct_assessment
+        ],
+        "residue_numbering": artifact_paths.residue_numbering_json,
     }
     entity_map_path = sequences_dir / "entity_map.json"
     _atomic_write_text(entity_map_path, json.dumps(entity_map, indent=2))
@@ -524,6 +548,7 @@ def write_manifest(
             "water": report.artifacts.water,
             "ions": report.artifacts.ions,
             "sequences_fasta": report.artifacts.sequences_fasta,
+            "residue_numbering_json": report.artifacts.residue_numbering_json,
             "entity_map": report.artifacts.entity_map,
             "inventory_json": report.artifacts.inventory_json,
             "report_json": report.artifacts.report_json,
@@ -533,6 +558,7 @@ def write_manifest(
         "warnings": report.warnings,
         "n_ligands": len(report.ligands),
         "n_waters_retained": report.n_waters_retained,
+        "construct_form": report.construct_form,
         "protonation_method": report.protonation_method,
         "protonation_ph": report.protonation_ph,
         "minimization_performed": report.minimization.performed,

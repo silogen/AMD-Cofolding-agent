@@ -35,7 +35,7 @@ scoring:
     sampling_steps_affinity: 200
     affinity_mode: "pred_value"
     cache_dir: "/data/boltz/cache"
-    use_msa_server: false
+    use_msa_server: true
     msa_server_url: "https://api.colabfold.com"
   posebusters:
     enabled: true

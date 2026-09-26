@@ -237,3 +237,78 @@ def register_tools(mcp) -> None:
             except ValueError:
                 result["sdf_relative_path"] = out.name  # fallback to filename only
         return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def resolve_author_residue(
+        numbering_json_path: Annotated[
+            str,
+            Field(
+                description=(
+                    "Absolute or /shared-relative path to the residue_numbering.json "
+                    "artifact produced by prepare_structure."
+                )
+            ),
+        ],
+        chain: Annotated[str, Field(description="PDB chain ID, e.g. 'A'.")],
+        author_resseq: Annotated[
+            int,
+            Field(description="Author (PDB) residue sequence number, e.g. 145."),
+        ],
+        expected_resname: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional 3-letter residue name to assert, e.g. 'CYS'. "
+                    "Raises an error if the found residue does not match — "
+                    "this is the primary guard against the +3-offset silent mismatch."
+                ),
+            ),
+        ] = None,
+        author_icode: Annotated[
+            str,
+            Field(default="", description="Insertion code, usually empty."),
+        ] = "",
+    ) -> str:
+        """Translate a PDB author residue number into a 1-based Boltz sequence position.
+
+        Boltz constraint tokens are indexed by 1-based position in the sequence string
+        supplied at prediction time, NOT by PDB author number. Structures with non-native
+        N-terminal extensions (e.g. immature 7KVL starting at author -2) shift every
+        canonical residue by the extension length.
+
+        This tool reads the residue_numbering.json artifact written by prepare_structure,
+        resolves the author residue, optionally asserts its identity, and returns the
+        sequence position safe to use in Boltz pocket/contact/bond constraints.
+
+        Returns {chain, author_resseq, sequence_position, resname, uniprot_position} on
+        success or {error} on failure.
+        """
+        import json as _json
+        from pathlib import Path
+
+        shared_root = os.environ.get("IP_SHARED_DIR", "/shared")
+        p = numbering_json_path.strip()
+        if not os.path.isabs(p):
+            p = os.path.join(shared_root, p)
+
+        try:
+            data = _json.loads(Path(p).read_text())
+        except Exception as e:
+            return _json.dumps({"error": f"Cannot read numbering map: {e}"}, indent=2)
+
+        from reinvent4_mcp.tools._numbering import (  # noqa: PLC0415
+            resolve_author_resseq,
+        )
+
+        try:
+            result = resolve_author_resseq(
+                data["entries"],
+                chain=chain,
+                author_resseq=author_resseq,
+                expected_resname=expected_resname,
+                author_icode=author_icode,
+            )
+            return _json.dumps(result, indent=2)
+        except ValueError as e:
+            return _json.dumps({"error": str(e)}, indent=2)
