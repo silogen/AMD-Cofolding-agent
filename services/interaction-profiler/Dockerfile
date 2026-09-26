@@ -21,10 +21,30 @@ FROM mambaorg/micromamba:1.5.8
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
+
+# fpocket drives subpocket detection (the `run_fpocket` code path). Without the
+# binary, site_profile.subpockets comes back empty. It is not packaged on
+# conda-forge, bioconda or apt, so build it from source.
+# fpocket's bundled qhull make target is not parallel-safe, so build serially.
+ARG FPOCKET_VERSION=4.2.2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git libnetcdf-dev \
+    && git clone --depth 1 --branch "${FPOCKET_VERSION}" \
+        https://github.com/Discngine/fpocket.git /tmp/fpocket \
+    && make -C /tmp/fpocket \
+    && make -C /tmp/fpocket install \
+    && rm -rf /tmp/fpocket \
+    && apt-get purge -y build-essential git libnetcdf-dev \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v fpocket
+
 USER $MAMBA_USER
 
+# requests is needed by the UniProt / InterPro annotation path.
 RUN micromamba install -y -n base -c conda-forge \
         python=3.11 rdkit openmm pdbfixer mdanalysis numpy scipy pandas \
+        requests \
     && micromamba clean --all --yes
 
 WORKDIR /app

@@ -66,6 +66,7 @@ services:
       - REINVENT4_AGENT_LOG_TIMESTAMPS=${REINVENT4_AGENT_LOG_TIMESTAMPS:-}
       # Block 10 annotation cache/proxy.
       - ANNOTATION_SERVICE_URL=http://annotation:8080
+      - SP_SERVICE_URL=http://structure-prep:8080
     # No extra_hosts: the gateway is reached directly by DNS. Nodes that
     # cannot resolve/reach it need the SSH tunnel, which is opt-in via
     # `-f docker-compose.yml -f docker-compose.tunnel.yml`.
@@ -83,6 +84,8 @@ services:
       synthesis-planner:
         condition: service_healthy
       annotation:
+        condition: service_healthy
+      structure-prep:
         condition: service_healthy
 
   boltz:
@@ -109,6 +112,29 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  structure-prep:
+    build:
+      context: .
+      dockerfile: services/structure-prep/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8087:8080"
+    volumes:
+      - ${DATA_DIR:-./data}/shared:/shared
+    environment:
+      - SP_SHARED_DIR=/shared
+      - SP_HOST=0.0.0.0
+      - SP_PORT=8080
+      - SP_MAX_CONCURRENCY=1
+    healthcheck:
+      test: ["CMD", "micromamba", "run", "-n", "base",
+             "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   posebusters:
     build: ./services/posebusters

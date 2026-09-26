@@ -859,6 +859,14 @@ class SiteProfile(BaseModel):
 
     # ── Provenance ────────────────────────────────────────────────────────
     fpocket_version: str | None = Field(default=None, description="fpocket binary version.")
+    component_status: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Named status for optional components (available, skipped, or "
+            "error:<reason>). Empty scientific fields must not hide missing "
+            "dependencies."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
     timing_seconds: float | None = None
 

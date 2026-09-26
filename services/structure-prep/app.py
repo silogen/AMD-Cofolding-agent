@@ -99,6 +99,24 @@ async def schema():
 @app.post("/validate")
 async def validate(req: ValidateRequest):
     """Run Stage 0 (inventory only) synchronously. Does not modify any file."""
+    try:
+        return _validate_sync(req)
+    except HTTPException:
+        raise
+    except PrepError as exc:
+        # The message already carries a "[StageN]" prefix.
+        raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+    except Exception as exc:  # noqa: BLE001
+        # Without this the endpoint returns a bare 500 with no body, which
+        # leaves the caller nothing to act on.
+        logger.exception("validate failed for %s", req.path)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"{type(exc).__name__}: {exc}", "path": req.path},
+        ) from exc
+
+
+def _validate_sync(req: ValidateRequest):
     input_path = _resolve_safe(req.path)
     profile = req.profile or PreparationProfile()
     registry = get_registry(profile.stage3_curation.additive_registry_path)
@@ -148,24 +166,33 @@ async def validate(req: ValidateRequest):
 @app.post("/jobs", status_code=202)
 async def submit_job(req: PrepareRequest, background_tasks: BackgroundTasks):
     """Submit an async preparation job. Returns job_id immediately."""
-    input_path = _resolve_safe(req.path)
-    job_id = uuid.uuid4().hex[:12]
+    try:
+        input_path = _resolve_safe(req.path)
+        job_id = uuid.uuid4().hex[:12]
 
-    job_dir = JOB_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
+        job_dir = JOB_ROOT / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
 
-    record = JobRecord(
-        job_id=job_id,
-        status="queued",
-        input_path=str(input_path),
-        profile=req.profile,
-        job_dir=str(job_dir),
-    )
-    _jobs[job_id] = record
+        record = JobRecord(
+            job_id=job_id,
+            status="queued",
+            input_path=str(input_path),
+            profile=req.profile,
+            job_dir=str(job_dir),
+        )
+        _jobs[job_id] = record
 
-    background_tasks.add_task(_run_job, job_id, input_path, req.profile, job_dir)
+        background_tasks.add_task(_run_job, job_id, input_path, req.profile, job_dir)
 
-    return {"job_id": job_id, "status": "queued"}
+        return {"job_id": job_id, "status": "queued"}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("job submission failed for %s", req.path)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"{type(exc).__name__}: {exc}", "path": req.path},
+        ) from exc
 
 
 async def _run_job(job_id: str, input_path: Path, profile: PreparationProfile, job_dir: Path):

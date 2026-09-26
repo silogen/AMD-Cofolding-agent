@@ -40,14 +40,15 @@ RUN patch --batch --forward --dry-run -p1 \
     rm /tmp/reinvent4-libinvent-transformer-rgroups.patch
 
 # --- Install REINVENT4 (torch comes from the base image; strip the pins) ---
-# `-d none` = core deps only (rdkit, xxhash, numpy, pandas, pydantic, ...),
-# skipping openeye (needs license/index) and isim (git). The final import check
-# turns any silent install failure into a hard build failure.
+# Chemprop v2 is the open scoring plugin supported on Python 3.12. Chemprop v1
+# cannot coexist with v2 and remains intentionally unavailable; OpenEye still
+# requires a licensed index. The final import check turns any silent install
+# failure into a hard build failure.
 RUN sed -i.bak '/torch==/d' pyproject.toml && \
     sed -i.bak '/torchvision/d' pyproject.toml && \
-    python install.py cpu -d none && \
+    python install.py cpu -d chemprop2 && \
     pip install --no-cache-dir --upgrade "numpy>=2,<3" "scipy>=1.13" && \
-    python -c "import numpy, scipy; from scipy.stats import gaussian_kde; import rdkit, xxhash, tomllib, pandas, pydantic; print('REINVENT4 deps OK; numpy', numpy.__version__, 'scipy', scipy.__version__)"
+    python -c "import numpy, scipy, chemprop; from scipy.stats import gaussian_kde; import rdkit, xxhash, tomllib, pandas, pydantic; assert chemprop.__version__.split('.')[0] == '2'; print('REINVENT4 deps OK; chemprop', chemprop.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"
 
 # --- Download prior models from Zenodo ---
 # Fail the build (not silently at runtime) if a prior is missing, an HTTP

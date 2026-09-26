@@ -232,6 +232,53 @@ def test_path_traversal_rejected():
     resp = client.post("/validate", json={"path": "../../etc/passwd"})
     assert resp.status_code in (400, 404)
 
+
+def test_validate_internal_error_is_actionable(monkeypatch):
+    """Unexpected validation failures must not become an empty HTTP 500."""
+    from fastapi.testclient import TestClient
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import app as service_app
+
+    def fail(_request):
+        raise RuntimeError("inventory exploded")
+
+    monkeypatch.setattr(service_app, "_validate_sync", fail)
+    response = TestClient(service_app.app).post(
+        "/validate", json={"path": "input.pdb"}
+    )
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["error"] == "RuntimeError: inventory exploded"
+    assert detail["path"] == "input.pdb"
+
+
+def test_job_submission_internal_error_is_actionable(tmp_path, monkeypatch):
+    """Job-directory failures return a reason rather than a bare 500."""
+    from fastapi.testclient import TestClient
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import app as service_app
+
+    not_a_directory = tmp_path / "blocked"
+    not_a_directory.write_text("file")
+    monkeypatch.setattr(service_app, "JOB_ROOT", not_a_directory)
+    monkeypatch.setattr(
+        service_app, "_resolve_safe", lambda _path: tmp_path / "input.pdb"
+    )
+
+    response = TestClient(service_app.app).post(
+        "/jobs",
+        json={"path": "input.pdb", "profile": {"version": "1.0"}},
+    )
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["error"].startswith("NotADirectoryError:")
+    assert detail["path"] == "input.pdb"
+
+
 # ---- Service health ----
 
 def test_health_endpoint_returns_ok():
