@@ -623,6 +623,119 @@ def _parse_molecule_outputs(
     return score, meta, structure_path
 
 
+def _split_complex_artifacts(
+    complex_path: str,
+    smiles: str,
+    out_dir: Path,
+) -> dict[str, Optional[str]]:
+    """Split a predicted complex into receptor, receptor_noh, and ligand SDF (K1).
+
+    Bond orders in the SDF are templated from the input SMILES.
+    All extraction failures are non-fatal (logged as warnings).
+    """
+    result: dict[str, Optional[str]] = {
+        "complex": complex_path,
+        "receptor": None,
+        "receptor_noh": None,
+        "ligand_sdf": None,
+    }
+    try:
+        import gemmi  # noqa: PLC0415
+        from rdkit import Chem  # noqa: PLC0415
+        from rdkit.Chem import AllChem  # noqa: PLC0415
+
+        st = gemmi.read_structure(complex_path)
+        WATER = {"HOH", "WAT", "H2O"}
+        STD_AA = {
+            "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY",
+            "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER",
+            "THR", "TRP", "TYR", "VAL", "HID", "HIE", "HIP",
+        }
+
+        # Identify ligand chain (last non-protein non-water chain)
+        lig_chain: Optional[str] = None
+        if len(st) > 0:
+            for chain in reversed(list(st[0])):
+                non_prot = [r for r in chain if r.name not in STD_AA and r.name not in WATER]
+                if non_prot:
+                    lig_chain = chain.name
+                    break
+
+        # Receptor = all chains minus the ligand chain
+        if len(st) > 0:
+            rec_st = st.clone()
+            if lig_chain is not None:
+                for model in rec_st:
+                    model.remove_chain(lig_chain)
+            rec_path = out_dir / "receptor.pdb"
+            rec_st.write_pdb(str(rec_path))
+            result["receptor"] = str(rec_path)
+
+            for model in rec_st:
+                model.remove_hydrogens()
+            noh_path = out_dir / "receptor_noh.pdb"
+            rec_st.write_pdb(str(noh_path))
+            result["receptor_noh"] = str(noh_path)
+
+        # Ligand SDF with correct bond orders
+        if lig_chain and smiles and len(st) > 0:
+            lig_lines: list[str] = []
+            for chain in st[0]:
+                if chain.name != lig_chain:
+                    continue
+                for res in chain:
+                    if res.name in WATER:
+                        continue
+                    for atom in res:
+                        lig_lines.append(
+                            f"HETATM{atom.serial:>5}  {atom.name:<4}{res.name:<4}"
+                            f"{chain.name}{res.seqid.num:>4}    "
+                            f"{atom.pos.x:>8.3f}{atom.pos.y:>8.3f}"
+                            f"{atom.pos.z:>8.3f}  1.00 10.00\n"
+                        )
+            lig_lines.append("END\n")
+            template = Chem.MolFromSmiles(smiles)
+            mol_raw = Chem.MolFromPDBBlock("".join(lig_lines), removeHs=False, sanitize=False)
+            if template is not None and mol_raw is not None:
+                mol_fixed = AllChem.AssignBondOrdersFromTemplate(template, mol_raw)
+                sdf_path = out_dir / "ligand.sdf"
+                writer = Chem.SDWriter(str(sdf_path))
+                writer.write(mol_fixed)
+                writer.close()
+                result["ligand_sdf"] = str(sdf_path)
+    except Exception:
+        logger.warning("_split_complex_artifacts failed for %s", complex_path, exc_info=True)
+    return result
+
+
+def _write_prediction_manifest(
+    out_dir: Path,
+    inputs: dict[str, Any],
+    artifact_bundle: dict[str, Optional[str]],
+) -> str:
+    """Write manifest.json alongside prediction artifacts (K4)."""
+    import hashlib  # noqa: PLC0415
+
+    complex_path = artifact_bundle.get("complex")
+    sha256: Optional[str] = None
+    if complex_path and Path(complex_path).is_file():
+        digest = hashlib.sha256()
+        with open(complex_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        sha256 = digest.hexdigest()
+
+    manifest = {
+        "schema": "boltz-prediction-manifest-v1",
+        "inputs": inputs,
+        "artifacts": artifact_bundle,
+        "complex_sha256": sha256,
+    }
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
+    return str(manifest_path)
+
+
 def _assemble_response(
     predictions_dir: Path,
     n_molecules: int,
@@ -656,7 +769,6 @@ def _assemble_response(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}

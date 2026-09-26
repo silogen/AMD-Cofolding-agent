@@ -312,3 +312,79 @@ def register_tools(mcp) -> None:
             return _json.dumps(result, indent=2)
         except ValueError as e:
             return _json.dumps({"error": str(e)}, indent=2)
+
+    @mcp.tool()
+    def validate_pose(
+        smiles: Annotated[str, Field(description="Ligand SMILES.")],
+        structure_path: Annotated[
+            str,
+            Field(description="Path to the predicted complex (from a Boltz prediction)."),
+        ],
+        protein_pdb_path: Annotated[
+            str | None,
+            Field(default=None, description="Receptor PDB path (required for 'dock' mode)."),
+        ] = None,
+        ligand_sdf_path: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Pre-extracted ligand SDF with correct bond orders. "
+                    "If absent, the service attempts extraction from the complex."
+                ),
+            ),
+        ] = None,
+        mode: Annotated[
+            str, Field(default="dock", description="PoseBusters mode (dock, mol, redock, gen).")
+        ] = "dock",
+    ) -> str:
+        """Validate a predicted pose with PoseBusters (K3).
+
+        Wraps the PoseBusters service so it is callable ad hoc after cofolding,
+        not only inside a TTP pipeline. Returns {score, checks, pose_status} on
+        success or {error} on failure.
+
+        `pose_status` is one of: passed | failed | declined | unavailable | service_error.
+
+        When `ligand_sdf_path` is not supplied, PoseBusters will attempt to
+        extract the ligand from the complex PDB using the fixed residue name 'LIG'.
+        For Boltz outputs the dedicated `ligand.sdf` artifact in the prediction
+        directory is more reliable.
+        """
+        import json as _json  # noqa: PLC0415
+
+        pb_url = os.environ.get("POSEBUSTERS_SERVICE_URL", "http://posebusters:8080")
+        shared_root = os.environ.get("IP_SHARED_DIR", "/shared")
+
+        def _abs(p: str) -> str:
+            return p if os.path.isabs(p) else os.path.join(shared_root, p)
+
+        payload: dict = {
+            "smiles": [smiles],
+            "params": {
+                "mode": mode,
+                "structure_paths": [_abs(structure_path)],
+            },
+        }
+        if protein_pdb_path:
+            payload["params"]["protein_pdb_path"] = _abs(protein_pdb_path)
+        if ligand_sdf_path:
+            payload["params"]["structure_paths"] = [_abs(ligand_sdf_path)]
+
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                resp = client.post(f"{pb_url}/score", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return _json.dumps({"error": str(exc), "pose_status": "service_error"}, indent=2)
+
+        scores = data.get("scores", [None])
+        score = scores[0] if scores else None
+        checks = {k: v[0] if v else None for k, v in (data.get("metadata") or {}).items()}
+        pose_status = checks.get("pose_status", "unavailable" if score is None else ("passed" if score == 1.0 else "failed"))
+        return _json.dumps({
+            "score": score,
+            "pose_status": pose_status,
+            "checks": checks,
+        }, indent=2)

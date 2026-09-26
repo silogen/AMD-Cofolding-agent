@@ -105,6 +105,49 @@ def _extract_ligand_mol(
 
 
 # ---------------------------------------------------------------------------
+# SMILES from RCSB CCD API (D1) and Fragalysis sidecar (D2)
+# ---------------------------------------------------------------------------
+
+def _smiles_from_rcsb_ccd(comp_id: str) -> str | None:
+    """Fetch SMILES from the RCSB CCD REST API for a given comp_id.
+
+    Returns None without raising so callers fall through to the next tier.
+    The call has a 10 s timeout so it never blocks the pipeline for long.
+    """
+    try:
+        import urllib.request as _req  # noqa: PLC0415
+        url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{comp_id.upper()}"
+        with _req.urlopen(url, timeout=10) as resp:
+            import json as _json  # noqa: PLC0415
+            data = _json.loads(resp.read())
+        for descriptor in data.get("pdbx_chem_comp_descriptor", []):
+            if descriptor.get("type", "").upper().startswith("SMILES"):
+                smiles = descriptor.get("descriptor", "").strip()
+                if smiles and smiles not in (".", "?", ""):
+                    return smiles
+    except Exception:
+        logger.debug("RCSB CCD fetch failed for %s.", comp_id, exc_info=True)
+    return None
+
+
+def _smiles_from_fragalysis_sidecar(input_path: str, comp_id: str) -> str | None:
+    """Look for a Fragalysis *_smiles.txt sidecar file alongside the structure."""
+    from pathlib import Path as _Path  # noqa: PLC0415
+    if not input_path:
+        return None
+    for candidate_dir in [_Path(input_path).parent, _Path(input_path).parent.parent]:
+        sidecar = candidate_dir / f"{_Path(input_path).stem}_smiles.txt"
+        if sidecar.exists():
+            try:
+                text = sidecar.read_text().strip().split()[0]
+                if text:
+                    return text
+            except Exception:
+                pass
+    return None
+
+
+# ---------------------------------------------------------------------------
 # SMILES from CIF CCD data
 # ---------------------------------------------------------------------------
 
@@ -368,6 +411,23 @@ def _process_ligand(
             logger.debug(
                 "Stage 8: CIF CCD SMILES lookup failed for %s.", comp_id, exc_info=True
             )
+
+    # Priority 2b: Fragalysis *_smiles.txt sidecar (D2)
+    if smiles is None:
+        sidecar_smiles = _smiles_from_fragalysis_sidecar(
+            getattr(structure, "_source_path", "") or "", comp_id
+        )
+        if sidecar_smiles:
+            smiles = sidecar_smiles
+            smiles_source = "fragalysis_sidecar"
+
+    # Priority 2c: RCSB CCD fetch by comp_id (D1).  Skip generic comp_ids
+    # (LIG/UNK/UNL) that Fragalysis reuses for unrelated ligands.
+    if smiles is None and comp_id not in ("LIG", "UNK", "UNL"):
+        rcsb_smiles = _smiles_from_rcsb_ccd(comp_id)
+        if rcsb_smiles:
+            smiles = rcsb_smiles
+            smiles_source = "ccd_rcsb"
 
     # Priority 3: geometry-perceived via RDKit
     if smiles is None and mol_3d is not None:
