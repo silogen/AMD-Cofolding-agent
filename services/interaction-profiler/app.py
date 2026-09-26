@@ -560,6 +560,18 @@ def _add_profile_complex_route(app_instance) -> None:
 
         try:
             from interaction_profiler.core_complex import profile_complex
+
+            # F1: resolve structure_paths in annotation_accessions so relative
+            # paths actually work. Without this the ensemble returns 0/N processed
+            # with a silent warning rather than a hard error.
+            aa = dict(req.annotation_accessions or {})
+            if "structure_paths" in aa and isinstance(aa["structure_paths"], list):
+                resolved: list[str] = []
+                for sp in aa["structure_paths"]:
+                    rp = _resolve_shared_path(sp)
+                    resolved.append(str(rp) if rp else sp)
+                aa["structure_paths"] = resolved
+
             result = profile_complex(
                 structure_path=structure_path,
                 smiles=req.smiles,
@@ -570,7 +582,7 @@ def _add_profile_complex_route(app_instance) -> None:
                 ligand_comp_id=req.ligand_comp_id,
                 ligand_resname=req.ligand_resname,
                 ligand_chain=req.ligand_chain,
-                annotation_accessions=req.annotation_accessions,
+                annotation_accessions=aa,
                 potency=req.potency.model_dump() if req.potency else None,
                 ph=req.ph,
                 radius=req.radius,
