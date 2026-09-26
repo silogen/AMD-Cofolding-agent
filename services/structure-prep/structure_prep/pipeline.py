@@ -203,7 +203,20 @@ def run_pipeline(
         )
 
     # ------------------------------------------------------------------
+    # Chain selection — reduce to target chains (extends Stage 2)
+    # ------------------------------------------------------------------
+    t0 = time.monotonic()
+    from .stages.chain_selection import run as run_chain_selection  # noqa: PLC0415
+
+    structure, chain_selection_log = run_chain_selection(
+        structure, profile.stage2_roles, role_map
+    )
+    timings["chain_selection"] = time.monotonic() - t0
+    report.chain_selection_log = chain_selection_log
+
+    # ------------------------------------------------------------------
     # Stage 3 — HETATM curation (waters, additives, ligand selection)
+    # ------------------------------------------------------------------ (waters, additives, ligand selection)
     # ------------------------------------------------------------------
     t0 = time.monotonic()
     from .stages.curation import run as run_curation  # noqa: PLC0415
@@ -420,6 +433,32 @@ def run_pipeline(
     )
     report.residue_numbering = numbering
     report.sequences_by_chain = final_sequences
+
+    # ------------------------------------------------------------------
+    # Stage 10 — Optional structural alignment
+    # ------------------------------------------------------------------
+    from .stages.alignment import run as run_alignment  # noqa: PLC0415
+
+    ref_path = profile.stage10_alignment.reference_path
+    if ref_path:
+        try:
+            reference_structure = gemmi.read_structure(ref_path)
+            reference_structure.setup_entities()
+        except Exception as exc:
+            warnings.append(f"[Stage 10] Cannot read reference structure: {exc}")
+            reference_structure = None
+
+        if reference_structure is not None:
+            t0 = time.monotonic()
+            structure, align_result = run_alignment(
+                structure, profile.stage10_alignment, reference_structure
+            )
+            timings["stage10"] = time.monotonic() - t0
+            from .models import AlignmentResult  # noqa: PLC0415
+
+            report.alignment = AlignmentResult(**align_result)
+    else:
+        report.alignment = report.alignment  # keep default (performed=False)
 
     # ------------------------------------------------------------------
     # Write all output artefacts

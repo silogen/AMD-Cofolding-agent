@@ -49,6 +49,44 @@ class Stage2Profile(BaseModel):
     peptide_max_residues: int = Field(default=29, ge=10, le=60)
     metal_coordination_cutoff_A: float = Field(default=3.0, ge=2.5, le=4.0)
 
+    # Chain-selection policy (C-items in the PR4 backlog)
+    chain_policy: Literal[
+        "keep_all",
+        "keep_target",
+        "keep_target_plus_binder",
+        "keep_listed",
+    ] = Field(default="keep_all", description="Which chains to retain after role classification.")
+    keep_chains: list[str] = Field(
+        default_factory=list,
+        description="Explicit chain IDs to retain (used when chain_policy='keep_listed').",
+    )
+    dedup_identical: bool = Field(
+        default=False,
+        description=(
+            "Collapse chains with >= dedup_identity_threshold sequence identity. "
+            "The chain with the ligand (or lowest alphabetical ID) is kept."
+        ),
+    )
+    dedup_identity_threshold: float = Field(default=0.99, ge=0.0, le=1.0)
+    interface_policy: Literal["drop", "keep_chain", "keep_within_A"] = Field(
+        default="drop",
+        description=(
+            "How to handle chains outside the keep-set that contact the selected chains. "
+            "'keep_within_A' retains any chain with a heavy atom within interface_radius_A "
+            "of the selected chains."
+        ),
+    )
+    keep_partner_chain: str | None = Field(
+        default=None,
+        description="Always retain this chain (used when interface_policy='keep_chain').",
+    )
+    interface_radius_A: float = Field(
+        default=5.0,
+        ge=2.0,
+        le=15.0,
+        description="Radius for keep_within_A interface policy.",
+    )
+
 
 class ConstructProfile(BaseModel):
     """Construct detection and optional non-native terminus trimming."""
@@ -182,6 +220,32 @@ class Stage9Profile(BaseModel):
     minimize_interface_cutoff_A: float = Field(default=5.0, ge=3.0, le=10.0)
 
 
+class Stage10Profile(BaseModel):
+    """Alignment: superpose the mobile structure onto a reference."""
+
+    model_config = {"extra": "forbid"}
+
+    reference_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to the reference PDB/mmCIF. "
+            "If None, alignment is skipped."
+        ),
+    )
+    reference_chain: str = Field(
+        default="A",
+        description="Chain in the reference to superpose onto.",
+    )
+    mobile_chain: str = Field(
+        default="A",
+        description="Chain in the mobile structure to move.",
+    )
+    max_rmsd_A: float | None = Field(
+        default=None,
+        description="Reject if Cα RMSD exceeds this threshold (Å).",
+    )
+
+
 class OutputProfile(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -215,6 +279,7 @@ class PreparationProfile(BaseModel):
     stage7_termini: Stage7Profile = Field(default_factory=Stage7Profile)
     stage8_ligand: Stage8Profile = Field(default_factory=Stage8Profile)
     stage9_minimization: Stage9Profile = Field(default_factory=Stage9Profile)
+    stage10_alignment: Stage10Profile = Field(default_factory=Stage10Profile)
     output: OutputProfile = Field(default_factory=OutputProfile)
 
     def profile_hash(self) -> str:
@@ -444,6 +509,20 @@ class MinimizationResult(BaseModel):
     label: str = "geometry_cleanup — not an affinity prediction"
 
 
+class AlignmentResult(BaseModel):
+    """Stage 10 output."""
+
+    performed: bool = False
+    reference_path: str | None = None
+    reference_chain: str | None = None
+    mobile_chain: str | None = None
+    n_aligned: int | None = None
+    rmsd_ca_A: float | None = None
+    transform_4x4: list[list[float]] | None = None
+    reason: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ArtifactPaths(BaseModel):
     complex: str | None = None
     receptor: str | None = None
@@ -453,6 +532,7 @@ class ArtifactPaths(BaseModel):
     ions: str | None = None
     ligands: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     sequences_fasta: str | None = None
+    aligned_complex: str | None = None
     residue_numbering_json: str | None = None
     entity_map: str | None = None
     inventory_json: str = ""
@@ -483,6 +563,10 @@ class PreparationReport(BaseModel):
     residue_numbering: list[ResidueNumberingEntry] = Field(default_factory=list)
     construct_assessment: list[ConstructAssessment] = Field(default_factory=list)
     construct_form: str = "unknown"
+
+    # Stage 10
+    alignment: AlignmentResult = Field(default_factory=AlignmentResult)
+    chain_selection_log: dict[str, Any] = Field(default_factory=dict)
     engineered_residues: list[dict[str, Any]] = Field(default_factory=list)
     seqres_vs_atom: dict[str, Any] = Field(default_factory=dict)
 

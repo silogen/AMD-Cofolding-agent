@@ -465,6 +465,17 @@ def write_all_artefacts(
     artifact_paths.residue_numbering_json = _rel(numbering_path, base)
 
     # ------------------------------------------------------------------
+    # prepared/aligned_complex.pdb — if alignment was applied, write the
+    # transformed complex as a distinct artifact so downstream tools have
+    # a named path rather than guessing from the job directory.
+    # ------------------------------------------------------------------
+    if report.alignment.performed:
+        aligned_path = prepared_dir / f"aligned_complex{ext}"
+        _write_structure(structure, aligned_path, output_format=fmt, strip_h=False)
+        artifact_paths.aligned_complex = _rel(aligned_path, base)
+        logger.debug("Wrote aligned complex: %s", aligned_path)
+
+    # ------------------------------------------------------------------
     # sequences/entity_map.json
     # Human- and machine-readable summary of entity roles.
     # ------------------------------------------------------------------

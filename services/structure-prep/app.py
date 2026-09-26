@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from structure_prep.models import PreparationProfile, PreparationReport, JobRecord
 from structure_prep.pipeline import run_pipeline, PrepError
@@ -183,6 +183,48 @@ def _validate_sync(req: ValidateRequest):
     }
 
     return {"inventory": inventory.model_dump(), "profile_preview": profile_preview}
+
+
+class BatchPrepareRequest(BaseModel):
+    paths: list[str] = Field(..., min_length=1, description="Paths to prepare")
+    profile: PreparationProfile = Field(default_factory=PreparationProfile)
+
+
+@app.post("/jobs/batch", status_code=202)
+async def submit_batch_jobs(
+    req: BatchPrepareRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Submit one preparation job per input path; return all job_ids (C6)."""
+    try:
+        results: list[dict] = []
+        for path in req.paths:
+            try:
+                input_path = _resolve_safe(path)
+                job_id = uuid.uuid4().hex[:12]
+                job_dir = JOB_ROOT / job_id
+                job_dir.mkdir(parents=True, exist_ok=True)
+                record = JobRecord(
+                    job_id=job_id,
+                    status="queued",
+                    input_path=str(input_path),
+                    profile=req.profile,
+                    job_dir=str(job_dir),
+                )
+                _jobs[job_id] = record
+                background_tasks.add_task(
+                    _run_job, job_id, input_path, req.profile, job_dir
+                )
+                results.append({"path": path, "job_id": job_id, "status": "queued"})
+            except HTTPException as exc:
+                results.append({"path": path, "error": exc.detail})
+        return {"batch_size": len(req.paths), "jobs": results}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("batch submission failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"{type(exc).__name__}: {exc}"},
+        ) from exc
 
 
 @app.post("/jobs", status_code=202)
