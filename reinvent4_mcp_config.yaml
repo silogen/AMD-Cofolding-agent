@@ -37,6 +37,11 @@ scoring:
     cache_dir: "/data/boltz/cache"
     use_msa_server: true
     msa_server_url: "https://api.colabfold.com"
+    # If no local/cached MSA exists, automatically try the MSA server first.
+    auto_msa_fallback: true
+    # If the MSA server is unreachable, fall through to single-sequence mode
+    # rather than aborting the run. Confidence is reduced; a warning is emitted.
+    msa_free_fallback: true
   posebusters:
     enabled: true
     service_url: "http://posebusters:8080/score"
