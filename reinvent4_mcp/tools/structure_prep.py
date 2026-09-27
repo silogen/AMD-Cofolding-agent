@@ -141,10 +141,19 @@ def register_tools(mcp) -> None:
                 description=(
                     "Complete PreparationProfile JSON. Must include '\"version\": \"1.0\"'. "
                     "Build this after reviewing the validate_structure output. "
-                    "Key fields: stage3_curation.ligand_policy, stage3_curation.keep_metals, "
-                    "stage3_curation.keep_waters, stage4_altlocs.altloc_policy, "
-                    "stage5_missing.missing_policy, stage6_protonation.protonation_method (default pdb2pqr_propka), "
-                    "stage8_ligand.ligand_ff (default openff_2.1), output.emit_fasta (true for Boltz)."
+                    "Key fields:\n"
+                    "  stage3_curation.ligand_policy     — 'all'|'none'|'primary'|'listed'\n"
+                    "  stage3_curation.keep_metals        — 'structural'|'all'|'none'\n"
+                    "  stage3_curation.keep_waters        — 'none'|'pocket'|'structural'|'all'\n"
+                    "  stage3_curation.water_pocket_radius_A — float (default 4.0)\n"
+                    "  stage2_roles.chain_policy          — 'keep_all'|'keep_target'|'keep_listed'\n"
+                    "  stage2_roles.keep_chains           — list[str] (used when chain_policy='keep_listed')\n"
+                    "  stage4_altlocs.altloc_policy       — 'highest_occupancy'|'all'|'none'\n"
+                    "  stage5_missing.missing_policy      — 'model_atoms'|'none'\n"
+                    "  stage6_protonation.protonation_method — 'pdb2pqr_propka'|'pdbfixer_basic'\n"
+                    "  stage8_ligand.ligand_ff             — 'openff_2.1'|'none'\n"
+                    "  output.emit_fasta                  — true for Boltz input\n"
+                    "Do NOT send any other top-level or nested keys — extra fields are rejected (HTTP 422)."
                 ),
             ),
         ],

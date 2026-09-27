@@ -1023,6 +1023,55 @@ def list_shared_assets() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: read_shared_file
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def read_shared_file(
+    path: Annotated[str, Field(description="Shared-volume relative path (e.g. 'mpro_fbdd/fragments.csv')")],
+    max_bytes: Annotated[int, Field(default=131072, description="Maximum bytes to return (default 128 KB).")] = 131072,
+) -> str:
+    """Read a text file from the shared volume and return its contents.
+
+    Use this to read CSV manifests, FASTA files, SMILES lists, and similar
+    text assets staged under /shared/. Paths are resolved relative to the
+    shared-volume root (/shared/) and are sandboxed to that directory.
+
+    Returns the file contents as a string, or an error dict if the file
+    cannot be read.
+    """
+    import os  # noqa: PLC0415
+
+    shared_root = os.environ.get("IP_SHARED_DIR", "/shared")
+    p = path.strip()
+    if os.path.isabs(p):
+        abs_path = p
+    else:
+        abs_path = os.path.join(shared_root, p)
+
+    # Sandbox: must stay inside shared_root
+    abs_path = os.path.realpath(abs_path)
+    if not abs_path.startswith(os.path.realpath(shared_root)):
+        return json.dumps({"error": f"Path escapes shared volume: {path}"})
+
+    try:
+        size = os.path.getsize(abs_path)
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read(max_bytes)
+        truncated = size > max_bytes
+        return json.dumps({
+            "path": path,
+            "size_bytes": size,
+            "truncated": truncated,
+            "content": content,
+        })
+    except FileNotFoundError:
+        return json.dumps({"error": f"File not found: {path}"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
 # Tool: fetch_target_info
 # ---------------------------------------------------------------------------
 

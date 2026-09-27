@@ -204,6 +204,20 @@ def register_tools(mcp) -> None:
                 ),
             ),
         ] = None,
+        ligand_sdf: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Shared-volume relative path to a pre-extracted ligand SDF "
+                    "(e.g. the 'sdf' value from get_preparation_status artifacts.ligands). "
+                    "When supplied, MMFF94 conformational strain is computed from this file "
+                    "instead of requiring a prepared_ligand_path on the server. "
+                    "Pass this whenever you have run prepare_structure first — it enables "
+                    "strain and ligand efficiency in the output."
+                ),
+            ),
+        ] = None,
         ensemble_profile: Annotated[
             str | None,
             Field(
@@ -257,6 +271,7 @@ def register_tools(mcp) -> None:
             "analysis_profile": analysis_profile,
             "site_profile_id": site_profile_id,
             "ensemble_profile": ensemble_profile,
+            "ligand_sdf": ligand_sdf,
         }
         # Drop explicit None values so the service uses its own defaults.
         payload = {k: v for k, v in payload.items() if v is not None}
