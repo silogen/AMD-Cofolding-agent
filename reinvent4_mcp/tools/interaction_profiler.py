@@ -34,10 +34,11 @@ def _ip_url() -> str:
     return os.environ.get("INTERACTION_PROFILER_URL", "http://interaction-profiler:8080")
 
 _TIMEOUT = 120.0
+_TIMEOUT_ENSEMBLE = 1800.0  # hotspot_ensemble over 100s of structures can take minutes
 
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=_ip_url(), timeout=_TIMEOUT)
+def _client(timeout: float = _TIMEOUT) -> httpx.Client:
+    return httpx.Client(base_url=_ip_url(), timeout=timeout)
 
 
 def _resolve_shared_path(path_str: str | None) -> str | None:
@@ -277,7 +278,9 @@ def register_tools(mcp) -> None:
         payload = {k: v for k, v in payload.items() if v is not None}
 
         try:
-            with _client() as client:
+            # Use a longer timeout for ensemble mode — 366 structures can take minutes
+            timeout = _TIMEOUT_ENSEMBLE if mode == "hotspot_ensemble" else _TIMEOUT
+            with _client(timeout) as client:
                 resp = client.post("/profile_complex", json=payload)
                 resp.raise_for_status()
                 return json.dumps(resp.json(), indent=2)
