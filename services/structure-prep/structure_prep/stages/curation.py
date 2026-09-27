@@ -263,7 +263,7 @@ def run(
         registry = get_registry(profile.additive_registry_path)
 
     # Work on a deep copy — Stage 3 must not mutate the caller's structure
-    st = copy.deepcopy(structure)
+    st = structure.clone()
 
     # ------------------------------------------------------------------
     # Pre-compute ligand keep-set

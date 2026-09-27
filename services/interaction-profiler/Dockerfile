@@ -44,7 +44,7 @@ USER $MAMBA_USER
 # requests is needed by the UniProt / InterPro annotation path.
 RUN micromamba install -y -n base -c conda-forge \
         python=3.11 rdkit openmm pdbfixer mdanalysis numpy scipy pandas \
-        requests \
+        requests freesasa \
     && micromamba clean --all --yes
 
 WORKDIR /app

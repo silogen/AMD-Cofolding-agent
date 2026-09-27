@@ -227,12 +227,16 @@ def run(
     # 2. Parse
     # ------------------------------------------------------------------
     structure = gemmi.read_structure(str(input_path))
+    # gemmi leaves Residue.entity_type as Unknown until entities are set up.
+    # The chain and HETATM classification below filters on that field, so
+    # without this every chain reports zero polymer residues and no ligands.
+    structure.setup_entities()
 
     # ------------------------------------------------------------------
     # 3. Basic model metadata
     # ------------------------------------------------------------------
     n_models = len(structure)
-    model_ids: list[str] = [str(model.num) for model in structure]
+    model_ids: list[str] = [model.name for model in structure]
 
     format_warnings: list[str] = []
 

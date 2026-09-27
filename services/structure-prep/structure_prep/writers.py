@@ -82,7 +82,7 @@ def _write_structure_pdb(
     os.close(fd)
     try:
         if strip_h:
-            st = copy.deepcopy(structure)
+            st = structure.clone()
             for model in st:
                 for chain in model:
                     for res in chain:
@@ -114,7 +114,7 @@ def _write_structure_cif(
     os.close(fd)
     try:
         if strip_h:
-            st = copy.deepcopy(structure)
+            st = structure.clone()
             for model in st:
                 for chain in model:
                     for res in chain:
@@ -160,7 +160,7 @@ def _extract_chains(
 
     Deletion is performed in reverse index order to avoid index shifting.
     """
-    st = copy.deepcopy(structure)
+    st = structure.clone()
     for model in st:
         to_remove = [
             i for i, ch in enumerate(model)
