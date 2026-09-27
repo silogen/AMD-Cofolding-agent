@@ -660,6 +660,7 @@ class ComplexProvenance(BaseModel):
     sc_method: str | None = None
     strain_method: str | None = None
     tool_versions: dict[str, str] = Field(default_factory=detect_tool_versions)
+    structure_path: str | None = None  # ensemble member source path (hotspot_ensemble)
 
 
 class ComplexResult(BaseModel):
