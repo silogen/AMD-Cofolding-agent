@@ -283,7 +283,10 @@ def write_all_artefacts(
 
     fmt = profile.output.output_format  # "pdb" | "cif"
     ext = ".pdb" if fmt == "pdb" else ".cif"
-    base = job_dir.parent  # artefact paths are relative to this
+    # Artefact paths are relative to the shared-volume root so that any
+    # downstream tool resolving against /shared/ can use them verbatim.
+    # job_dir layout: <shared_root>/structure-prep/<job_id>/
+    base = job_dir.parent.parent  # <shared_root>
 
     artifact_paths = ArtifactPaths()
 
@@ -370,8 +373,28 @@ def write_all_artefacts(
             lig_key = f"{comp_id}:{chain_name}:{resseq}"
             artifact_paths.ligands.setdefault(lig_key, {})
             artifact_paths.ligands[lig_key]["pdb"] = _rel(lig_path, base)
-            artifact_paths.ligands[lig_key]["sdf"] = None
             artifact_paths.ligands[lig_key]["mol2"] = None
+
+            # Copy the SDF produced by stage 8 (ligand parameterization) if
+            # it exists and matches this ligand instance.
+            sdf_dest: str | None = None
+            for lig_param in report.ligands:
+                if (
+                    lig_param.comp_id == comp_id
+                    and lig_param.chain == chain_name
+                    and lig_param.resseq == resseq
+                    and lig_param.artifact_sdf
+                ):
+                    import shutil  # noqa: PLC0415
+                    sdf_src = Path(lig_param.artifact_sdf)
+                    if sdf_src.is_file():
+                        sdf_filename = f"ligand_{comp_id}_{chain_name}_{resseq}.sdf"
+                        sdf_path = prepared_dir / sdf_filename
+                        shutil.copy2(sdf_src, sdf_path)
+                        sdf_dest = _rel(sdf_path, base)
+                        logger.debug("Copied ligand SDF %s → %s", sdf_src, sdf_path)
+                    break
+            artifact_paths.ligands[lig_key]["sdf"] = sdf_dest
             logger.debug("Wrote ligand %s → %s", lig_key, lig_path)
 
     # ------------------------------------------------------------------

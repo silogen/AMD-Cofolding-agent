@@ -471,7 +471,7 @@ def run_pipeline(
 
     # Inventory was written atomically by Stage 0; record its relative path
     inventory_path = job_dir / "inventory.json"
-    artifact_paths.inventory_json = _rel(inventory_path, job_dir.parent)
+    artifact_paths.inventory_json = _rel(inventory_path, job_dir.parent.parent)
 
     report.artifacts = artifact_paths
     report.warnings = warnings
@@ -481,7 +481,7 @@ def run_pipeline(
     # Resolve and record the report path before writing so report.json is
     # self-consistent (contains its own path in artifacts.report_json).
     report_path = job_dir / "report.json"
-    report.artifacts.report_json = _rel(report_path, job_dir.parent)
+    report.artifacts.report_json = _rel(report_path, job_dir.parent.parent)
 
     write_report(report, report_path)
     write_manifest(job_id, profile, report, job_dir)
