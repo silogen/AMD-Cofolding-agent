@@ -40,47 +40,49 @@ _TIMEOUT_ENSEMBLE = 1800.0  # hotspot_ensemble over 100s of structures can take 
 def _summarise_hotspot(data: dict) -> str:
     """Compact summary of a hotspot_ensemble result for the LLM context window.
 
-    The raw response can be 2M+ tokens (all per-residue contact data from
-    hundreds of structures). This extracts only what the agent needs:
-      - top-50 hotspot residues by contact_occupancy
-      - warnings / error counts
-      - n_structures processed
+    The raw response can be 2M+ tokens. Returns a compact summary with correct
+    field names from the service schema:
+      target_residue, occupancy, n_structures_observed, interaction_types_observed
     """
     hotspots: list[dict] = data.get("hotspots") or []
     warnings: list[str] = data.get("warnings") or []
-    n_success = sum(1 for w in warnings if "successfully" in w and w.strip().startswith("Hotspot ensemble:") is False)
+    timing: float | None = data.get("timing_seconds")
 
-    # parse "Hotspot ensemble: N/M structures processed successfully" warning
+    # parse "Hotspot ensemble: N/M structures processed successfully" from warnings
     n_total, n_ok = 0, 0
     for w in warnings:
         if "structures processed successfully" in w:
             try:
                 part = w.split(":")[-1].strip()
-                n_ok, n_total = (int(x.strip()) for x in part.split("/")[:2])
+                n_ok_str, rest = part.split("/", 1)
+                n_total_str = rest.split()[0]
+                n_ok = int(n_ok_str.strip())
+                n_total = int(n_total_str.strip())
             except Exception:
                 pass
 
-    # sort hotspots by occupancy descending
-    sorted_hs = sorted(hotspots, key=lambda r: r.get("contact_occupancy", 0.0), reverse=True)
+    # sort by occupancy descending — actual service field name is "occupancy"
+    sorted_hs = sorted(hotspots, key=lambda r: r.get("occupancy", 0.0), reverse=True)
     top50 = sorted_hs[:50]
 
     summary = {
         "mode": "hotspot_ensemble",
-        "n_structures_ok": n_ok or len([h for h in hotspots if h]),
+        "n_structures_ok": n_ok,
         "n_structures_total": n_total,
         "n_hotspot_residues": len(hotspots),
+        "timing_seconds": timing,
+        "compatible_pairs_count": len(data.get("compatible_pairs") or []),
+        "fragment_families_count": len(data.get("fragment_families") or []),
         "top_50_residues_by_occupancy": [
             {
-                "chain": h.get("chain"),
-                "resseq": h.get("resseq"),
-                "resname": h.get("resname"),
-                "contact_occupancy": round(h.get("contact_occupancy", 0.0), 4),
-                "n_contacts": h.get("n_contacts"),
-                "interaction_types": h.get("interaction_types"),
+                "target_residue": h.get("target_residue"),
+                "occupancy": round(h.get("occupancy", 0.0), 4),
+                "n_structures_observed": h.get("n_structures_observed"),
+                "interaction_types": h.get("interaction_types_observed"),
             }
             for h in top50
         ],
-        "warnings": warnings[:20],  # first 20 warnings only
+        "warnings": warnings[:20],
         "errors": [w for w in warnings if "failed" in w.lower()][:10],
     }
     return json.dumps(summary, indent=2)

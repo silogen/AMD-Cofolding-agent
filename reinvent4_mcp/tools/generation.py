@@ -237,6 +237,44 @@ def register_tools(mcp: Any) -> None:
         except ValueError as exc:
             errors.append(f"Generation config mapping failed: {exc}")
 
+        # ── Covalent / affinity conflict check ───────────────────────────
+        # bond_constraints in any objective's service_params suppress Boltz
+        # affinity prediction (L1 and L2 are mutually exclusive).  The
+        # TTP schema accepts this combination silently, but the resulting
+        # run will score 0.0 on every molecule.
+        has_bond_constraints = bool(
+            ttp_parsed.target and ttp_parsed.target.covalent_bond
+        ) or any(
+            "bond_constraints" in (obj.service_params or {})
+            for obj in (ttp_parsed.scoring.objectives if ttp_parsed.scoring else [])
+        )
+        has_boltz_affinity = any(
+            "boltz" in (obj.component or "").lower() or "affinity" in (obj.name or "").lower()
+            for obj in (ttp_parsed.scoring.objectives if ttp_parsed.scoring else [])
+        )
+        has_pose_gate = any(
+            "posebusters" in str(obj.service_url or "").lower() or
+            "pose_gate" in (obj.name or "").lower()
+            for obj in (ttp_parsed.scoring.objectives if ttp_parsed.scoring else [])
+        )
+        if has_bond_constraints and has_boltz_affinity:
+            warnings.append(
+                "COVALENT CONFLICT: bond_constraints are present alongside a "
+                "Boltz affinity objective. Boltz suppresses its affinity head "
+                "whenever bond_constraints (L1 constraints) are active — every "
+                "molecule will receive NaN affinity, coerced to 0.0. Remove the "
+                "BoltzAffinity objective or remove bond_constraints to avoid a "
+                "silent all-zero scoring run."
+            )
+        if has_bond_constraints and has_pose_gate:
+            warnings.append(
+                "COVALENT CONFLICT: bond_constraints are present alongside a "
+                "PoseBusters pose gate. PoseBusters is not covalent-aware and "
+                "will flag every covalent pose as 'failed' on "
+                "minimum_distance_to_protein, zeroing out the gate score. "
+                "Remove the PoseBusters gate or use mode='redock' for covalent poses."
+            )
+
         valid = len(errors) == 0
         return {"valid": valid, "errors": errors, "warnings": warnings}
 
