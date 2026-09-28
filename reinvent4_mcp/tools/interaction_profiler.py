@@ -37,6 +37,55 @@ _TIMEOUT = 120.0
 _TIMEOUT_ENSEMBLE = 1800.0  # hotspot_ensemble over 100s of structures can take minutes
 
 
+def _summarise_hotspot(data: dict) -> str:
+    """Compact summary of a hotspot_ensemble result for the LLM context window.
+
+    The raw response can be 2M+ tokens (all per-residue contact data from
+    hundreds of structures). This extracts only what the agent needs:
+      - top-50 hotspot residues by contact_occupancy
+      - warnings / error counts
+      - n_structures processed
+    """
+    hotspots: list[dict] = data.get("hotspots") or []
+    warnings: list[str] = data.get("warnings") or []
+    n_success = sum(1 for w in warnings if "successfully" in w and w.strip().startswith("Hotspot ensemble:") is False)
+
+    # parse "Hotspot ensemble: N/M structures processed successfully" warning
+    n_total, n_ok = 0, 0
+    for w in warnings:
+        if "structures processed successfully" in w:
+            try:
+                part = w.split(":")[-1].strip()
+                n_ok, n_total = (int(x.strip()) for x in part.split("/")[:2])
+            except Exception:
+                pass
+
+    # sort hotspots by occupancy descending
+    sorted_hs = sorted(hotspots, key=lambda r: r.get("contact_occupancy", 0.0), reverse=True)
+    top50 = sorted_hs[:50]
+
+    summary = {
+        "mode": "hotspot_ensemble",
+        "n_structures_ok": n_ok or len([h for h in hotspots if h]),
+        "n_structures_total": n_total,
+        "n_hotspot_residues": len(hotspots),
+        "top_50_residues_by_occupancy": [
+            {
+                "chain": h.get("chain"),
+                "resseq": h.get("resseq"),
+                "resname": h.get("resname"),
+                "contact_occupancy": round(h.get("contact_occupancy", 0.0), 4),
+                "n_contacts": h.get("n_contacts"),
+                "interaction_types": h.get("interaction_types"),
+            }
+            for h in top50
+        ],
+        "warnings": warnings[:20],  # first 20 warnings only
+        "errors": [w for w in warnings if "failed" in w.lower()][:10],
+    }
+    return json.dumps(summary, indent=2)
+
+
 def _client(timeout: float = _TIMEOUT) -> httpx.Client:
     return httpx.Client(base_url=_ip_url(), timeout=timeout)
 
@@ -283,7 +332,13 @@ def register_tools(mcp) -> None:
             with _client(timeout) as client:
                 resp = client.post("/profile_complex", json=payload)
                 resp.raise_for_status()
-                return json.dumps(resp.json(), indent=2)
+                data = resp.json()
+                # hotspot_ensemble returns per-residue contact data across hundreds of
+                # structures — the raw JSON can exceed the LLM context window (2M+ tokens).
+                # Return a compact summary instead of the full payload.
+                if mode == "hotspot_ensemble":
+                    return _summarise_hotspot(data)
+                return json.dumps(data, indent=2)
         except httpx.HTTPStatusError as e:
             return json.dumps({"error": str(e), "detail": e.response.text}, indent=2)
         except Exception as e:
