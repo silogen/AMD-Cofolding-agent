@@ -134,6 +134,11 @@ and `run_generation_campaign`. Jobs are asynchronous and serialise on a single
 GPU, so launch one branch at a time and poll `get_optimization_status`. Pull
 winners with `get_top_candidates`.
 
+**Polling discipline:** call `get_optimization_status` at most **5 times per
+turn**. If the job is still running after 5 polls, stop, report the current
+status, and tell the user to check back. Do not poll in a tight loop — the
+conversation context window fills up and the session will crash at 1 M tokens.
+
 ### 5. Confirm
 
 For the top ~20 across all three branches:
