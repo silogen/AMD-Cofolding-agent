@@ -810,6 +810,29 @@ def _profile_hotspot_ensemble(
     # Sort by occupancy descending
     result.hotspots.sort(key=lambda h: -(h.occupancy or 0))
 
+    # ── Write ensemble artifacts to disk if requested ─────────────────────
+    artifact_dir_str = annotation_accessions.get("ensemble_artifact_dir")
+    if artifact_dir_str and result.hotspots:
+        try:
+            import json as _json  # noqa: PLC0415
+            from pathlib import Path  # noqa: PLC0415
+            adir = Path(artifact_dir_str)
+            adir.mkdir(parents=True, exist_ok=True)
+
+            hotspots_path = adir / "hotspots.json"
+            hotspots_path.write_text(
+                _json.dumps(
+                    [h.model_dump(exclude_none=True) for h in result.hotspots],
+                    indent=2,
+                )
+            )
+            warnings.append(
+                f"Hotspot artifact written to {hotspots_path} "
+                f"({len(result.hotspots)} residues)."
+            )
+        except Exception as _ae:
+            warnings.append(f"ensemble_artifact_dir write failed: {_ae}")
+
     # ── Extended ensemble analysis (ensemble_profile) ─────────────────────
     if ensemble_profile and ensemble_profile != "hotspots" and member_results:
         try:
