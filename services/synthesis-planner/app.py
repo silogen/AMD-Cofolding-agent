@@ -462,6 +462,120 @@ def availability(request: AvailabilityRequest) -> AvailabilityResponse:
     )
 
 
+class ScoreRequest(BaseModel):
+    smiles: list[str] = Field(..., min_length=1)
+    max_transforms: int = Field(default=3, ge=1, le=6)
+    iteration_limit: int = Field(default=25, ge=5, le=200,
+        description="Lower = faster but misses harder routes. 25 is the RL default.")
+    score_fn: str = Field(default="solved_steps",
+        description=(
+            "How to convert retrosynthesis results to a [0,1] score:\n"
+            "  solved_steps — 1.0 if solved in ≤2 steps, 0.7 if ≤4, 0.3 if routes "
+            "found (any length), 0.0 if no route.\n"
+            "  n_routes     — sigmoid on number of routes found (more = easier).\n"
+            "  best_score   — raw AiZynthFinder MCTS top_score (0–1)."
+        ))
+
+
+class ScoreResult(BaseModel):
+    smiles: str
+    score: float
+    n_routes: int
+    shortest_steps: int | None
+    is_solved: bool
+    status: str
+
+
+class ScoreResponse(BaseModel):
+    results: list[ScoreResult]
+    model_version: str | None
+    elapsed_seconds: float
+
+
+def _retro_score(result: dict, score_fn: str) -> float:
+    """Convert a /plan molecule result to a [0,1] RL score."""
+    import math
+    stats = result.get("search_stats") or {}
+    n_routes: int = result.get("n_routes", 0)
+    routes = result.get("routes") or []
+    steps = min((r["n_steps"] for r in routes if r.get("n_steps", 0) > 0),
+                default=None)
+    is_solved: bool = stats.get("is_solved", False)
+
+    if score_fn == "n_routes":
+        # sigmoid: 5 routes → 0.5, 20 routes → 0.95
+        return round(1 / (1 + math.exp(-0.15 * (n_routes - 10))), 4)
+    elif score_fn == "best_score":
+        return round(float(stats.get("top_score") or 0.0), 4)
+    else:  # solved_steps (default)
+        if n_routes == 0:
+            return 0.0
+        if steps is None or steps == 0:
+            # Only route_000 (direct in stock) — treat as 0-step synthesis
+            return 1.0
+        if steps <= 2:
+            return 1.0
+        if steps <= 4:
+            return 0.7
+        return 0.3
+
+
+@app.post("/score")
+async def score(request: ScoreRequest) -> ScoreResponse:
+    """Per-molecule AiZynthFinder synthesis score for REINVENT RL objectives.
+
+    Returns a [0,1] score per SMILES based on retrosynthesis route quality.
+    Designed to be called by ExternalRESTScorer in REINVENT4 TTPs.
+
+    Score semantics (default score_fn='solved_steps'):
+      1.0 — ≤2-step synthesis from catalogue building blocks
+      0.7 — ≤4-step synthesis found
+      0.3 — route found, >4 steps
+      0.0 — no route found (AiZynthFinder MCTS exhausted without solution)
+
+    Faster than /plan (lower iteration_limit=25) — suitable for RL step latency.
+    """
+    import time
+    t0 = time.monotonic()
+
+    planner = _get_planner()
+    manifest = _get_manifest()
+
+    params = PlanParams(
+        max_transforms=request.max_transforms,
+        iteration_limit=request.iteration_limit,
+        return_first=False,
+        time_limit=60,
+    )
+
+    async with _plan_sem:
+        raw_results = await asyncio.to_thread(
+            _run_batch, planner, request.smiles, params,
+        )
+
+    scored = []
+    for r in raw_results:
+        stats = r.get("search_stats") or {}
+        routes = r.get("routes") or []
+        steps_list = [rt["n_steps"] for rt in routes if rt.get("n_steps", 0) > 0]
+        shortest = min(steps_list) if steps_list else None
+        scored.append(ScoreResult(
+            smiles=r.get("input_smiles", ""),
+            score=_retro_score(r, request.score_fn),
+            n_routes=r.get("n_routes", 0),
+            shortest_steps=shortest,
+            is_solved=stats.get("is_solved", False),
+            status=r.get("status", "unknown"),
+        ))
+
+    model_version = manifest.version if manifest else None
+    return ScoreResponse(
+        results=scored,
+        model_version=model_version,
+        elapsed_seconds=round(time.monotonic() - t0, 3),
+    )
+
+
 @app.post("/jobs", response_model=JobSubmitResponse)
 async def submit_job(request: PlanRequest) -> JobSubmitResponse:
     """Submit an asynchronous batch planning job.
