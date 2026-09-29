@@ -61,6 +61,11 @@ scoring:
     interaction_type: "all"    # default family counted by /score (hbond, ionic, ... , all)
     radius: 8.0
     ph: 7.4
+  synthesis_planner:
+    enabled: true
+    service_url: "http://synthesis-planner:8086/score"
+    iteration_limit: 25       # fast mode for RL (25 iterations ≈ 0.3-0.8s/mol)
+    score_fn: "solved_steps"  # 1.0=≤2 steps, 0.7=≤4 steps, 0.3=route found, 0.0=no route
 
 jobs:
   working_dir: "/data/reinvent4_mcp/jobs"
