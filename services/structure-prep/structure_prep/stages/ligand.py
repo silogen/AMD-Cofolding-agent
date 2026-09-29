@@ -309,14 +309,30 @@ def _write_sdf(
     """Write ligand SDF to job_dir and return the path string, or None on failure."""
     try:
         from rdkit.Chem import SDWriter  # type: ignore[import]
+        from rdkit import Chem  # type: ignore[import]
+        from rdkit.Chem import AllChem  # type: ignore[import]
     except ImportError:
         logger.warning("Stage 8: RDKit SDWriter not available; skipping SDF emit.")
         return None
 
     sdf_path = job_dir / f"ligand_{comp_id}_{chain_name}_{resseq}.sdf"
     try:
+        # Sanitize to restore aromaticity perception and correct bond orders.
+        # SDWriter may emit Kekulé-form V2000 which has all-single bonds;
+        # downstream tools that don't call SanitizeMol (e.g. REINVENT4 mol_cache)
+        # will receive aromatic SMILES when we round-trip through MolToSmiles first.
+        mol_clean = Chem.RWMol(mol_3d)
+        Chem.SanitizeMol(mol_clean)
+        # Remove invalid stereochemistry (e.g. wedge bonds on sp² aromatic atoms)
+        # that cause RDKit to return None on re-parsing.
+        Chem.AssignStereochemistry(mol_clean, cleanIt=True, force=True)
+        Chem.RemoveStereochemistry(mol_clean)
+        # Re-assign only stereochemistry that can actually be perceived from the 3D
+        # coordinates so the file remains chemically valid.
+        AllChem.AssignStereochemistry(mol_clean, cleanIt=True, force=False)
+
         writer = SDWriter(str(sdf_path))
-        writer.write(mol_3d)
+        writer.write(mol_clean)
         writer.close()
         logger.debug("Stage 8: wrote SDF → %s", sdf_path)
         return str(sdf_path)
