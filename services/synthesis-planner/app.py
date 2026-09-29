@@ -492,18 +492,17 @@ class ScoreResponse(BaseModel):
     elapsed_seconds: float
 
 
-def _retro_score(result: dict, score_fn: str) -> float:
+def _retro_score(result: "PlanMoleculeResult", score_fn: str) -> float:
     """Convert a /plan molecule result to a [0,1] RL score."""
     import math
-    stats = result.get("search_stats") or {}
-    n_routes: int = result.get("n_routes", 0)
-    routes = result.get("routes") or []
-    steps = min((r["n_steps"] for r in routes if r.get("n_steps", 0) > 0),
-                default=None)
-    is_solved: bool = stats.get("is_solved", False)
+    stats = result.search_stats or {}
+    n_routes: int = result.n_routes or 0
+    routes = result.routes or []
+    steps_list = [r["n_steps"] for r in routes if r.get("n_steps", 0) > 0]
+    steps = min(steps_list) if steps_list else None
+    is_solved: bool = bool(stats.get("is_solved", False))
 
     if score_fn == "n_routes":
-        # sigmoid: 5 routes → 0.5, 20 routes → 0.95
         return round(1 / (1 + math.exp(-0.15 * (n_routes - 10))), 4)
     elif score_fn == "best_score":
         return round(float(stats.get("top_score") or 0.0), 4)
@@ -511,7 +510,6 @@ def _retro_score(result: dict, score_fn: str) -> float:
         if n_routes == 0:
             return 0.0
         if steps is None or steps == 0:
-            # Only route_000 (direct in stock) — treat as 0-step synthesis
             return 1.0
         if steps <= 2:
             return 1.0
@@ -555,20 +553,20 @@ async def score(request: ScoreRequest) -> ScoreResponse:
 
     scored = []
     for r in raw_results:
-        stats = r.get("search_stats") or {}
-        routes = r.get("routes") or []
+        stats = r.search_stats or {}
+        routes = r.routes or []
         steps_list = [rt["n_steps"] for rt in routes if rt.get("n_steps", 0) > 0]
         shortest = min(steps_list) if steps_list else None
         scored.append(ScoreResult(
-            smiles=r.get("input_smiles", ""),
+            smiles=r.input_smiles or "",
             score=_retro_score(r, request.score_fn),
-            n_routes=r.get("n_routes", 0),
+            n_routes=r.n_routes or 0,
             shortest_steps=shortest,
-            is_solved=stats.get("is_solved", False),
-            status=r.get("status", "unknown"),
+            is_solved=bool(stats.get("is_solved", False)),
+            status=r.status or "unknown",
         ))
 
-    model_version = manifest.version if manifest else None
+    model_version = manifest.policy_version() if manifest else None
     return ScoreResponse(
         results=scored,
         model_version=model_version,
