@@ -257,7 +257,12 @@ def register_tools(mcp) -> None:
         payload: dict[str, Any] = {
             "smiles": smiles,
             "params": {
-                "protein_sequence": protein_sequence,
+                # Strip FASTA headers (>...) and whitespace so raw FASTA text
+                # from read_shared_file doesn't cause a Boltz 422 rejection.
+                "protein_sequence": "".join(
+                    line for line in protein_sequence.splitlines()
+                    if not line.startswith(">")
+                ).replace(" ", "").strip(),
                 "diffusion_samples": diffusion_samples,
                 "run_posebusters": run_posebusters,
                 "recycling_steps": recycling_steps,
