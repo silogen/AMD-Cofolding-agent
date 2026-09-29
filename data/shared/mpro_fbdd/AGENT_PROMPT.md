@@ -121,6 +121,19 @@ subsites, measured distance for the link — **before** building anything.
   interaction term rewarding the Glu166 backbone H-bond. Add a PoseBusters
   gate automatically via `_objectives_with_pose_gate`. Add RetroDMTA potency
   only in a second-round TTP after the first round narrows the scaffold.
+  **Boltz affinity sign convention (critical):** `affinity_pred_value` is
+  log₁₀(IC₅₀ / 1 µM). **MORE NEGATIVE = tighter binding = BETTER.**
+  +2.0 means ~100 µM (very weak); −2.0 means ~10 nM (very tight).
+  NEVER say a rising `affinity_pred_value` is "improvement" — it means the
+  molecules are getting WEAKER. When reporting results, flag if affinity is
+  going in the wrong direction.
+  **In RL TTP objectives**: always use `affinity_mode: probability_binary`
+  (P(IC50 < 1 µM) ∈ [0,1], higher = better) with `sigmoid(low=0.3, high=0.8)`.
+  Do NOT use `affinity_mode: pred_value` in RL — it would require a negated
+  transform that is easy to set up incorrectly. If you see `affinity_pred_value`
+  in Boltz output while using `pred_value` mode, interpret it as: needing a
+  `reverse_sigmoid(low=-2.0, high=0.0)` transform (−2.0→score=1.0, 0.0→score=0.5,
+  +2.0→score=0.0). Default to `probability_binary` to avoid this ambiguity.
   **SAScore transform note:** use `reverse_sigmoid(low=1.0, high=3.5)` — this
   rewards molecules with SA ≤ 1 (score→1.0) and penalises SA ≥ 3.5 (score→0.0).
   Do NOT set high < low (e.g. high=3.0, low=5.0) — that would reward hard-to-make
