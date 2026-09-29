@@ -121,6 +121,10 @@ subsites, measured distance for the link — **before** building anything.
   interaction term rewarding the Glu166 backbone H-bond. Add a PoseBusters
   gate automatically via `_objectives_with_pose_gate`. Add RetroDMTA potency
   only in a second-round TTP after the first round narrows the scaffold.
+  **SAScore transform note:** use `reverse_sigmoid(low=1.0, high=3.5)` — this
+  rewards molecules with SA ≤ 1 (score→1.0) and penalises SA ≥ 3.5 (score→0.0).
+  Do NOT set high < low (e.g. high=3.0, low=5.0) — that would reward hard-to-make
+  molecules. Check your transform direction before validating.
 - **constraints** — no PAINS; no reactive electrophiles (see Scope)
 
 Growth discipline: keep ligand efficiency at or above the parent fragment's.
