@@ -33,6 +33,10 @@ scoring:
     recycling_steps: 3
     diffusion_samples: 1
     sampling_steps_affinity: 200
+    # pred_value = log10(IC50/µM): MORE NEGATIVE = tighter = BETTER
+    #   → use reverse_sigmoid(low=-2.0, high=0.0) in TTP transforms
+    # probability_binary = P(IC50 < 1µM) ∈ [0,1]: higher = better
+    #   → use sigmoid(low=0.3, high=0.8) in TTP transforms
     affinity_mode: "pred_value"
     cache_dir: "/data/boltz/cache"
     use_msa_server: true

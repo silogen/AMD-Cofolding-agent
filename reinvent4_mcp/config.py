@@ -165,8 +165,13 @@ class BoltzConfig(BaseModel):
     affinity_mode: Literal["pred_value", "probability_binary"] = Field(
         default="pred_value",
         description=(
-            "pred_value: log10(IC50 uM) regression; "
-            "probability_binary: binder probability 0-1"
+            "Boltz2 affinity output mode.\n"
+            "pred_value: log10(IC50/µM) — MORE NEGATIVE = tighter = BETTER. "
+            "Use reverse_sigmoid(low=-2.0, high=0.0) in TTP transforms so that "
+            "score→1.0 at −2 (10 nM) and score→0.0 at +2 (100 µM). "
+            "Do NOT use upward sigmoid(low=0.3, high=0.8) — that rewards weak binders.\n"
+            "probability_binary: P(IC50 < 1 µM) ∈ [0,1] — higher = better. "
+            "Use sigmoid(low=0.3, high=0.8)."
         ),
     )
     cache_dir: str = Field(
@@ -301,6 +306,35 @@ class InteractionProfilerConfig(BaseModel):
     ph: float = Field(default=7.4, description="Default protonation pH")
 
 
+class SynthesisPlannerConfig(BaseModel):
+    """AiZynthFinder synthesis-planner service configuration.
+
+    The /score endpoint returns a [0,1] synthesizability score per molecule
+    based on AiZynthFinder MCTS retrosynthesis results. Use as an RL objective
+    to guide generation toward synthetically accessible molecules using actual
+    retrosynthesis — not the heuristic SAScore.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = Field(default=True, description="Enable synthesis-planner scoring")
+    service_url: str = Field(
+        default="http://synthesis-planner:8086/score",
+        description="AiZynthFinder /score REST endpoint URL",
+    )
+    iteration_limit: int = Field(
+        default=25,
+        description="MCTS iterations per molecule (25 = fast RL mode, ~0.3-0.8s/mol)",
+    )
+    score_fn: str = Field(
+        default="solved_steps",
+        description=(
+            "Scoring function: solved_steps (1.0=≤2 steps, 0.7=≤4 steps, 0.3=any route, "
+            "0.0=no route) | n_routes (sigmoid on route count) | best_score (raw MCTS score)"
+        ),
+    )
+
+
 class ScoringConfig(BaseModel):
     """Scoring pipeline configuration.
 
@@ -333,6 +367,9 @@ class ScoringConfig(BaseModel):
     retrodmta: RetroDMTAConfig = Field(default_factory=RetroDMTAConfig)
     interaction_profiler: InteractionProfilerConfig = Field(
         default_factory=InteractionProfilerConfig
+    )
+    synthesis_planner: SynthesisPlannerConfig = Field(
+        default_factory=SynthesisPlannerConfig
     )
 
 
@@ -483,6 +520,8 @@ class ProcessConfig(BaseModel):
             services["retrodmta"] = self.scoring.retrodmta.service_url
         if self.scoring.interaction_profiler.enabled:
             services["interaction_profiler"] = self.scoring.interaction_profiler.service_url
+        if self.scoring.synthesis_planner.enabled:
+            services["synthesis_planner"] = self.scoring.synthesis_planner.service_url
         return services
 
 
