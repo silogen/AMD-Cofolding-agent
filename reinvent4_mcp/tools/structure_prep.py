@@ -368,10 +368,31 @@ def register_tools(mcp) -> None:
         def _abs(p: str) -> str:
             return p if os.path.isabs(p) else os.path.join(shared_root, p)
 
+        # Modes that need a protein PDB separate from the complex.
+        _PROTEIN_MODES = frozenset(
+            {"dock", "dock_fast", "redock", "redock_fast", "gen", "gen_fast"}
+        )
+        # Auto-degrade: if mode requires protein but none is provided, fall back
+        # to mol mode which checks ligand geometry only (no protein needed).
+        effective_mode = mode
+        if mode in _PROTEIN_MODES and not protein_pdb_path:
+            # Try to find a protein PDB alongside the structure path
+            # Boltz outputs a receptor_noh.pdb in its prediction dir (rare) but
+            # more reliably the prepared receptor is in the structure-prep asset.
+            # Degrade gracefully to mol mode so geometry checks still run.
+            import logging as _logging  # noqa: PLC0415
+            _logging.getLogger(__name__).warning(
+                "validate_pose: mode=%s requires protein_pdb_path but none provided; "
+                "falling back to 'mol' mode (ligand geometry checks only). "
+                "Pass protein_pdb_path=<prepared receptor path> for full dock-mode validation.",
+                mode,
+            )
+            effective_mode = "mol"
+
         payload: dict = {
             "smiles": [smiles],
             "params": {
-                "mode": mode,
+                "mode": effective_mode,
                 "structure_paths": [_abs(structure_path)],
             },
         }
