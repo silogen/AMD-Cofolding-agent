@@ -574,6 +574,53 @@ class TTP(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_boltz_affinity_transform_direction(self) -> "TTP":
+        """Warn when pred_value affinity mode is combined with an upward transform.
+
+        affinity_pred_value is log10(IC50/µM) — MORE NEGATIVE = tighter = BETTER.
+        An upward sigmoid (low < high, e.g. sigmoid(low=0.3, high=0.8)) rewards
+        POSITIVE values (weak binders) instead of negative ones, which is wrong.
+
+        Correct transforms for pred_value mode:
+          reverse_sigmoid(low=-2.0, high=0.0)  → score=1.0 at −2 (10 nM), 0.0 at +2 (100 µM)
+          sigmoid(low=-2.0, high=0.0)           → score=0.0 at −2, 1.0 at 0  ← also WRONG
+
+        Safe default: use affinity_mode='probability_binary' with sigmoid(low=0.3, high=0.8).
+        """
+        import logging as _logging  # noqa: PLC0415
+        _log = _logging.getLogger("reinvent")
+
+        for obj in self.scoring.objectives:
+            sp = obj.service_params or {}
+            # service_params may be a dict or Pydantic model
+            if hasattr(sp, "get"):
+                affinity_mode = sp.get("affinity_mode", "probability_binary")
+            else:
+                affinity_mode = getattr(sp, "affinity_mode", "probability_binary")
+            if affinity_mode != "pred_value":
+                continue
+            transform = obj.transform
+            if transform is None:
+                continue
+            # transform is a TransformConfig Pydantic model — use attribute access
+            t_type = getattr(transform, "type", "") or ""
+            t_low = getattr(transform, "low", None)
+            t_high = getattr(transform, "high", None)
+            # Upward sigmoid (low < high) with pred_value rewards positive (weak) values
+            if t_type == "sigmoid" and t_low is not None and t_high is not None:
+                if float(t_low) < float(t_high) and float(t_high) >= 0:
+                    _log.warning(
+                        "⚠️  TTP objective '%s' uses affinity_mode='pred_value' with "
+                        "sigmoid(low=%s, high=%s). affinity_pred_value is log10(IC50/µM): "
+                        "MORE NEGATIVE = tighter = BETTER. This sigmoid rewards POSITIVE "
+                        "(weak-binding) values. Use reverse_sigmoid(low=-2.0, high=0.0) "
+                        "to reward tight binders, or switch to affinity_mode='probability_binary' "
+                        "with sigmoid(low=0.3, high=0.8).",
+                        obj.name, t_low, t_high,
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _validate_no_name_collisions(self) -> "TTP":
         """Ensure component/objective names are unique across sections."""
         all_names: list[str] = []
