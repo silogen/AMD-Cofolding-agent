@@ -41,8 +41,8 @@ _KNOWN_PRIORS: dict[str, list[str]] = {
 
 _DEFAULT_MODEL_BY_MODE = {
     "reinvent": ".reinvent",
-    "libinvent": ".libinvent",
-    "linkinvent": ".linkinvent",
+    "libinvent": ".libinvent_transformer",
+    "linkinvent": ".linkinvent_transformer",
     "mol2mol": ".m2m_medium",
 }
 
