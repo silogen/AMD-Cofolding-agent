@@ -57,9 +57,19 @@ def _params_schema_from_dataclass(param_cls: type) -> list[dict[str, Any]]:
 
 
 def _component_kind(component_cls: type) -> str:
-    """Classify a component as scorer, filter, or penalty."""
+    """Classify a component as scorer, filter, or penalty.
 
-    tag = getattr(component_cls, "__component", True)
+    REINVENT4 tags components via ``@add_tag("__component", "filter"|"penalty")``,
+    which ``setattr``s the literal attribute name ``"__component"`` (no name
+    mangling). Be defensive: if that literal lookup misses, also try the
+    name-mangled ``_<ClassName>__component`` form, in case a component ever
+    declares the tag directly in its class body (where Python mangles ``__component``),
+    so such a component isn't silently misclassified as a scorer.
+    """
+    tag = getattr(component_cls, "__component", None)
+    if not isinstance(tag, str):
+        mangled = f"_{component_cls.__name__.lstrip('_')}__component"
+        tag = getattr(component_cls, mangled, None)
     if isinstance(tag, str) and tag in ("filter", "penalty"):
         return tag
     return "scorer"

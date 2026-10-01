@@ -424,7 +424,17 @@ class JobManager:
             match2 = _re.search(r"^# Scaffold: (.+)$", toml_str, _re.MULTILINE)
             if match2 and "scaffolds.smi" in toml_str:
                 scaffold = match2.group(1).strip()
-                is_transformer = "transformer" in toml_str.lower()
+                # Only treat as a transformer prior when "transformer" appears in a
+                # model/prior-file assignment — not anywhere in the TOML (a stray
+                # occurrence in a comment or unrelated path must not flip handling).
+                is_transformer = bool(
+                    _re.search(
+                        r'(?:prior_file|agent_file|model_file|model)\s*=\s*'
+                        r'["\'][^"\']*transformer',
+                        toml_str,
+                        _re.IGNORECASE,
+                    )
+                )
                 if not is_transformer:
                     scaffold = _re.sub(r'\[\*:\d+\]', '[*]', scaffold)
                 # transformer keeps [*:1], [*:2] intact

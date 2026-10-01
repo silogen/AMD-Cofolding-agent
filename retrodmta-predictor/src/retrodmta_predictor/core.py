@@ -215,6 +215,9 @@ def _gnn_predict(model, smiles, endpoints):
     import torch
     n = len(smiles)
     padded = list(smiles)
+    # chemprop's BatchNorm fails on a batch of a single molecule, so pad the input
+    # to at least 2 rows and avoid a trailing batch of size 1 (len % BATCH_SIZE == 1)
+    # by repeating the last SMILES. The extra rows are trimmed off via [:n] below.
     while len(padded) < 2 or len(padded) % BATCH_SIZE == 1:
         padded.append(padded[-1])
     loader = _make_loader(padded)
@@ -327,7 +330,9 @@ def _predict_batch(target, w, endpoints, cut_date, smiles_list, method):
             arr = np.array(list(vals.values()), dtype=float)
             rec["predictions"][ep] = {
                 "mean": round(float(arr.mean()), 4) if len(arr) else None,
-                "std": round(float(arr.std(ddof=0)), 4) if len(arr) else None,
+                # std is a consensus signal only with >= 2 models; a single model
+                # yields 0.0 which would misread as perfect agreement. Report None.
+                "std": round(float(arr.std(ddof=0)), 4) if len(arr) >= 2 else None,
                 "unit": ENDPOINT_META.get(ep, {}).get("unit"),
                 "n_models": int(len(arr)),
                 "per_model": {k: round(v, 4) for k, v in vals.items()},

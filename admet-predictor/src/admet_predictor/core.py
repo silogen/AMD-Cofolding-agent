@@ -29,6 +29,11 @@ PRED_DEVICE = os.environ.get("PRED_DEVICE", "auto").lower()
 DEFAULT_MODEL_SET = os.environ.get("ADMET_MODEL_SET", "drug").lower()
 ALIASES = {"pharma": "drug", "pharmaceutical": "drug", "agrochemical": "agro"}
 
+# Dense-matrix placeholder for rows whose standardization failed: only used to
+# keep the batch feature matrix/loader aligned; these rows are dropped (ok=False)
+# before any prediction is reported, so the placeholder's values never surface.
+_PLACEHOLDER_SMILES = "C"
+
 # Absolute plausibility limits. A member outside its endpoint's limits is
 # excluded from the consensus rather than clipped to the boundary.
 PHYSICAL_BOUNDS: dict[str, tuple[float, float]] = {
@@ -328,7 +333,11 @@ def _summarize_endpoint(
 
     values = np.asarray(list(accepted.values()), dtype=float)
     mean = float(values.mean()) if len(values) else None
-    std = float(values.std(ddof=0)) if len(values) else None
+    # std is only a consensus signal with >= 2 accepted members. With a single
+    # member numpy returns 0.0, which reads as "models agreed perfectly" when it
+    # actually means "one model, no consensus" — report None instead so callers
+    # (and n_models) aren't misled.
+    std = float(values.std(ddof=0)) if len(values) >= 2 else None
 
     range_info = state.get("training_ranges", {}).get(endpoint)
     response_domain: dict[str, Any] = {
@@ -476,8 +485,21 @@ def predict(
 
 def _predict_batch(state: dict[str, Any], smiles_list: list[str], batch_size: int):
     standardized = [standardize_one(value) for value in smiles_list]
-    std_smiles = [item["std_smiles"] if item["ok"] else None for item in standardized]
-    valid = [value or "C" for value in std_smiles]
+    # A row is usable only if standardization succeeded AND produced a non-empty
+    # SMILES. An ok-but-empty std_smiles would otherwise slip through (``"" or "C"``
+    # → methane) and be reported with methane's ADMET values as if they were the
+    # molecule's. Mark such rows failed instead.
+    ok_flags = [
+        bool(item.get("ok")) and bool((item.get("std_smiles") or "").strip())
+        for item in standardized
+    ]
+    std_smiles = [
+        (item["std_smiles"] if ok else None)
+        for item, ok in zip(standardized, ok_flags)
+    ]
+    # Placeholder only keeps the batch feature matrix dense for failed rows; those
+    # rows are dropped (ok=False) before any prediction is reported.
+    valid = [smi if smi else _PLACEHOLDER_SMILES for smi in std_smiles]
     n_bits, desc_cols = state["feature_contract"]
     features = _avalon_matrix(valid, n_bits, len(desc_cols))
 
@@ -492,7 +514,7 @@ def _predict_batch(state: dict[str, Any], smiles_list: list[str], batch_size: in
         record: dict[str, Any] = {
             "input_smiles": input_smiles,
             "standardized_smiles": std_smiles[row_index],
-            "ok": std_smiles[row_index] is not None,
+            "ok": ok_flags[row_index],
             "model_set": state["name"],
             "predictions": {},
         }

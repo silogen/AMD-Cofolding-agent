@@ -384,6 +384,7 @@ class ScoringSection(BaseModel):
     @model_validator(mode="after")
     def _validate_depends_on(self) -> "ScoringSection":
         objective_names = {o.name for o in self.objectives}
+        dep_of: dict[str, str] = {}
         for obj in self.objectives:
             if obj.depends_on and obj.depends_on not in objective_names:
                 raise ValueError(
@@ -395,6 +396,24 @@ class ScoringSection(BaseModel):
                 raise ValueError(
                     f"Objective '{obj.name}' cannot depend on itself"
                 )
+            if obj.depends_on:
+                dep_of[obj.name] = obj.depends_on
+
+        # Detect cycles in the depends_on graph (e.g. A->B->A): without a cycle
+        # check the pipeline has no valid starting point. Each objective has at
+        # most one dependency, so follow each chain and flag any revisit.
+        for start in dep_of:
+            seen: set[str] = set()
+            node: str | None = start
+            while node in dep_of:
+                if node in seen:
+                    chain = " -> ".join([*seen, node])
+                    raise ValueError(
+                        f"Circular depends_on detected involving objective "
+                        f"'{start}' (cycle through: {chain})"
+                    )
+                seen.add(node)
+                node = dep_of[node]
         return self
 
 
@@ -589,11 +608,13 @@ def _validate_linkinvent_fragment(smiles: str, frag_idx: int) -> list[str]:
     errors: list[str] = []
     try:
         from rdkit import Chem  # noqa: PLC0415
-        mol = Chem.MolFromSmiles(smiles)
     except ImportError:
-        # RDKit unavailable — skip structural checks, only parse-shape check
-        mol = None
+        # RDKit unavailable — the structural checks below need it, so skip them
+        # rather than report a false "cannot parse" error (matches
+        # _validate_seed_smiles, which treats a missing RDKit as "cannot check").
+        return errors
 
+    mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return [f"Fragment {frag_idx}: cannot parse SMILES {smiles!r}"]
 
@@ -623,10 +644,12 @@ def _validate_libinvent_scaffold(smiles: str) -> list[str]:
     """
     try:
         from rdkit import Chem  # noqa: PLC0415
-        mol = Chem.MolFromSmiles(smiles)
     except ImportError:
-        mol = None
+        # RDKit unavailable — skip structural checks rather than report a false
+        # parse error (consistent with _validate_seed_smiles / linkinvent).
+        return []
 
+    mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return [f"Scaffold: cannot parse SMILES {smiles!r}"]
 
