@@ -23,7 +23,7 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import requests
 
@@ -43,7 +43,6 @@ _MAX_RETRIES = 3
 _RETRY_STATUSES = {429, 502, 503, 504}
 _MAX_LIMIT = 1000   # ChEMBL hard cap
 _DEFAULT_LIMIT = 20
-_MAX_PAGES = 50     # prevent runaway pagination in single calls
 _USER_AGENT = "Cofolding-Agent/1.0 ChEMBL-Fetcher/1.0"
 
 # Common LLM aliases for standard_type values.
@@ -92,6 +91,34 @@ class ChEMBLValidationError(ChEMBLError):
 # HTTP client
 # ---------------------------------------------------------------------------
 
+def _parse_retry_after(raw: str | None, fallback: float) -> float:
+    """Parse a ``Retry-After`` header into seconds.
+
+    Per RFC 7231 the value may be either delta-seconds (an integer) **or** an
+    HTTP-date (e.g. ``"Fri, 25 Sep 2026 12:00:00 GMT"``).  A bare ``float()`` on
+    the date form raises ``ValueError`` and would crash the retry loop, so parse
+    both forms and fall back to *fallback* on anything unparseable.
+    """
+    if not raw:
+        return fallback
+    raw = raw.strip()
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime  # noqa: PLC0415
+
+        dt = parsedate_to_datetime(raw)
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return fallback
+
+
 def _http_get(path: str, params: dict | None = None) -> dict[str, Any]:
     """GET a ChEMBL endpoint with retry on transient errors.
 
@@ -130,32 +157,43 @@ def _http_get(path: str, params: dict | None = None) -> dict[str, Any]:
                 time.sleep(2 ** attempt)
             continue
         except requests.ConnectionError as exc:
-            raise ChEMBLUnavailableError(
+            # Transient connection failures (DNS blip, dropped socket) are as
+            # retryable as a 503; retry rather than failing immediately. The
+            # typed error is kept so it is raised if all retries are exhausted.
+            last_exc = ChEMBLUnavailableError(
                 f"Connection error reaching ChEMBL ({_BASE_URL}): {exc}"
-            ) from exc
+            )
+            logger.warning(
+                "ChEMBL connection error on attempt %d: %s %s", attempt + 1, url, exc
+            )
+            if attempt < _MAX_RETRIES:
+                time.sleep(2 ** attempt)
+            continue
         except requests.RequestException as exc:
             raise ChEMBLError(f"Request failed: {exc}") from exc
 
-        # Handle transient server errors
+        # Handle transient server errors (429 / 502 / 503 / 504).
         if resp.status_code in _RETRY_STATUSES:
-            if resp.status_code == 429 and attempt < _MAX_RETRIES:
-                retry_after = float(resp.headers.get("Retry-After", 2 ** attempt))
-                logger.warning(
-                    "ChEMBL rate limit (429); waiting %.1fs before retry %d.",
-                    retry_after, attempt + 2,
-                )
-                time.sleep(retry_after)
+            if resp.status_code == 429:
                 last_exc = ChEMBLRateLimitError("Rate limited by ChEMBL API.")
-                continue
-            elif resp.status_code in (502, 503, 504) and attempt < _MAX_RETRIES:
-                wait = 2 ** attempt
+                wait = _parse_retry_after(resp.headers.get("Retry-After"), 2 ** attempt)
+            else:  # 502, 503, 504
+                last_exc = ChEMBLUnavailableError(
+                    f"ChEMBL service error {resp.status_code}."
+                )
+                wait = float(2 ** attempt)
+
+            if attempt < _MAX_RETRIES:
                 logger.warning(
-                    "ChEMBL transient error %d; waiting %ds (attempt %d).",
-                    resp.status_code, wait, attempt + 1,
+                    "ChEMBL transient %d; waiting %.1fs before retry %d.",
+                    resp.status_code, wait, attempt + 2,
                 )
                 time.sleep(wait)
-                last_exc = ChEMBLUnavailableError(f"ChEMBL service error {resp.status_code}.")
                 continue
+            # Retries exhausted on a transient status → raise the TYPED error
+            # (rate_limit / service_unavailable), not a generic ChEMBLError, so
+            # callers keying off exc.code see the right classification.
+            raise last_exc
 
         # HTTP 500 can be either a legitimate API error (JSON body with a message)
         # or an EBI infrastructure outage that returns an HTML error page.
@@ -224,28 +262,20 @@ def _provenance(endpoint: str, params: dict | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Identifier validation
-# ---------------------------------------------------------------------------
-
-def _validate_chembl_id(value: str, prefix: str) -> None:
-    """Raise ChEMBLValidationError if *value* is not a valid ChEMBL ID."""
-    if not value or not value.upper().startswith(prefix.upper()):
-        raise ChEMBLValidationError(
-            f"Expected a ChEMBL ID starting with {prefix!r}, got {value!r}."
-        )
-
-
-# ---------------------------------------------------------------------------
 # Pagination helper
 # ---------------------------------------------------------------------------
 
 def _fetch_smiles_bulk(chembl_ids: list[str]) -> dict[str, str | None]:
-    """Fetch canonical SMILES for a list of ChEMBL molecule IDs in batches of 1000.
+    """Fetch canonical SMILES for a list of ChEMBL molecule IDs in batches.
 
     Returns a dict {chembl_id: canonical_smiles_or_None}.
     Missing / invalid molecules map to None.
     """
-    BATCH = 1000
+    # Keep the comma-joined ``molecule_chembl_id__in`` query well under the
+    # common ~8 KB URL limit: 1000 IDs (~13 KB) risks a 414 or silent gateway
+    # truncation, which would quietly return mostly-None SMILES. ~200 IDs per
+    # batch (~2.6 KB) stays safe.
+    BATCH = 200
     result: dict[str, str | None] = {cid: None for cid in chembl_ids}
     unique = list(dict.fromkeys(chembl_ids))  # deduplicate, preserve order
 
@@ -289,7 +319,9 @@ def _paginate(
     Returns a unified dict with ``records``, ``page``, and ``meta``.
     """
     params = dict(params)
-    params["limit"]  = min(int(limit), _MAX_LIMIT)
+    # Clamp to [1, _MAX_LIMIT]: offset is floored below, but a negative limit
+    # would otherwise be sent to ChEMBL unchanged.
+    params["limit"]  = max(1, min(int(limit), _MAX_LIMIT))
     params["offset"] = max(int(offset), 0)
 
     data = _http_get(path, params)
@@ -673,7 +705,7 @@ def register_tools(mcp: Any) -> None:
             ``molecules_count`` (unique molecules), ``assay_count``
             (unique assays), ``phase4_molecule_count`` (approved drugs only).
         """
-        import json, math, os, statistics as _stats
+        import json, os, statistics as _stats
 
         op = "fetch_all_activities"
 
@@ -737,6 +769,12 @@ def register_tools(mcp: Any) -> None:
                     break
         except ChEMBLError as exc:
             return _err(op, getattr(exc, "code", "chembl_error"), str(exc))
+
+        # Enforce the hard cap exactly: the loop extends a whole page before
+        # checking offset >= cap, so the last page can overshoot by up to
+        # page_sz-1 records. Trim so max_records is a true ceiling.
+        if len(all_records) > cap:
+            all_records = all_records[:cap]
 
         # --- Optionally enrich with SMILES ---
         smiles_map: dict[str, str | None] = {}

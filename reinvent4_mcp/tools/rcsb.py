@@ -243,11 +243,29 @@ class RCSBHTTPClient:
 
     @staticmethod
     def _parse_retry_after(resp: requests.Response) -> float:
+        """Seconds to wait from a ``Retry-After`` header.
+
+        RFC 7231 allows either delta-seconds or an HTTP-date; parse both so a
+        date-form header yields the real wait rather than a fixed fallback.
+        """
         header = resp.headers.get("Retry-After", "")
-        try:
-            return float(header)
-        except (ValueError, TypeError):
+        if not header:
             return 1.0
+        try:
+            return max(0.0, float(header))
+        except (ValueError, TypeError):
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
+
+            dt = parsedate_to_datetime(header)
+            if dt is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+        except (ValueError, TypeError, OverflowError):
+            pass
+        return 1.0
 
     @staticmethod
     def _sleep_backoff(attempt: int) -> None:

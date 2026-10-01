@@ -568,3 +568,31 @@ class TestPageCap:
             _call("search_chembl_similarity", smiles="CC", limit=9999)
         params = mock_get.call_args[1]["params"]
         assert params["limit"] <= 100
+
+    def test_negative_limit_clamped_to_at_least_one(self):
+        """A negative limit must not be forwarded to ChEMBL (reviewer: no lower bound)."""
+        payload = {"molecules": [], "page_meta": {"total_count": 0, "next": None}}
+        with patch("requests.get", return_value=_mock_json(payload)) as mock_get:
+            _call("search_chembl_molecules", query="test", limit=-5)
+        params = mock_get.call_args[1]["params"]
+        assert params["limit"] >= 1
+
+
+class TestParseRetryAfter:
+    """Retry-After may be delta-seconds OR an HTTP-date (RFC 7231)."""
+
+    def test_numeric_seconds(self):
+        assert chembl._parse_retry_after("12", fallback=2.0) == 12.0
+
+    def test_blank_uses_fallback(self):
+        assert chembl._parse_retry_after("", fallback=3.0) == 3.0
+        assert chembl._parse_retry_after(None, fallback=3.0) == 3.0
+
+    def test_http_date_does_not_crash(self):
+        # A future HTTP-date must parse to a non-negative wait, never raise.
+        val = chembl._parse_retry_after("Wed, 21 Oct 2099 07:28:00 GMT", fallback=2.0)
+        assert val >= 0.0
+
+    def test_garbage_uses_fallback(self):
+        assert chembl._parse_retry_after("not-a-date", fallback=7.0) == 7.0
+
