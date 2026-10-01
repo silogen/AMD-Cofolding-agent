@@ -1,14 +1,21 @@
 """Conformational strain computation — Lai 2026 MMFF94 method.
 
-strain = MMFF94_energy(bound_coordinates) − MMFF94_energy(isolated_optimized_coordinates)
+strain = MMFF94_energy(bound_pose) − MMFF94_energy(isolated_optimized_pose)
 
-The bound energy is evaluated on the ligand heavy atoms exactly as
-deposited (crystal / Boltz / docking / generated poses).  For the
-optimised reference, a deep copy is stripped of explicit hydrogens
-(whose crystallographic positions are poorly determined), re-sanitised,
-and minimised in isolation with MMFF94 to convergence.  The difference
-measures only the strain imposed by the receptor environment, not
-artefacts from H placement.
+Both energies are evaluated on the **same all-atom system**.  MMFF94 is an
+all-atom force field, so the bound and reference energies must contain the
+identical set of atoms — otherwise the difference is dominated by the
+hydrogen-term bookkeeping offset (tens of kcal/mol that scale with H count)
+rather than by the conformational distortion we want to measure.
+
+To that end the molecule is first given explicit hydrogens (added with
+coordinates when absent).  The bound energy is then evaluated with the heavy
+atoms held exactly as deposited (crystal / Boltz / docking / generated poses)
+while only the hydrogens are relaxed — this removes artefacts from poorly
+determined crystallographic H positions without moving the heavy-atom pose.
+The reference is a deep copy, fully minimised with MMFF94 to convergence
+(hydrogens included).  The difference therefore isolates the heavy-atom
+conformational strain imposed by the receptor environment.
 
 Public API
 ----------
@@ -48,13 +55,52 @@ def _rdkit_version() -> str | None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _mmff94_bound_energy(mol: Any) -> tuple[float, str | None]:
-    """Compute the MMFF94 energy of *mol* without moving any atoms.
+def _ensure_explicit_hs(mol: Any) -> tuple[Any, bool]:
+    """Return *mol* with explicit hydrogens, adding them (with coordinates) if absent.
+
+    MMFF94 strain requires the bound and reference energies to be computed on the
+    identical atom set.  If the molecule has no explicit hydrogens, add them with
+    3D coordinates so both energies are all-atom and directly comparable.
 
     Parameters
     ----------
     mol:
         RDKit ``Mol`` with at least one conformer.
+
+    Returns
+    -------
+    (mol, added):
+        *mol* with explicit Hs; *added* is ``True`` when hydrogens were added.
+    """
+    from rdkit import Chem  # noqa: PLC0415
+
+    has_h = any(atom.GetAtomicNum() == 1 for atom in mol.GetAtoms())
+    if has_h:
+        return mol, False
+    # addCoords places hydrogens using the existing heavy-atom conformer.
+    return Chem.AddHs(mol, addCoords=True), True
+
+
+def _mmff94_bound_energy(
+    mol: Any,
+    relax_hydrogens: bool = True,
+    max_iters: int = 500,
+) -> tuple[float, str | None]:
+    """Compute the MMFF94 energy of *mol* at its bound pose.
+
+    The heavy atoms are held exactly as deposited; only hydrogens are relaxed
+    (when ``relax_hydrogens`` is True) so that poorly-positioned crystallographic
+    H atoms do not distort the energy.  Crucially the atom set is left unchanged,
+    so this energy is directly comparable to the fully-minimised reference.
+
+    Parameters
+    ----------
+    mol:
+        RDKit ``Mol`` with at least one conformer (ideally with explicit H).
+    relax_hydrogens:
+        When True, minimise only hydrogen positions with every heavy atom fixed.
+    max_iters:
+        Maximum minimisation steps for the hydrogen-only relaxation.
 
     Returns
     -------
@@ -71,21 +117,32 @@ def _mmff94_bound_energy(mol: Any) -> tuple[float, str | None]:
     ff = AllChem.MMFFGetMoleculeForceField(mol, mp)
     if ff is None:
         return 0.0, "MMFF94 force field could not be constructed"
+
+    if relax_hydrogens:
+        n_atoms = mol.GetNumAtoms()
+        n_fixed = 0
+        for atom in mol.GetAtoms():
+            if atom.GetAtomicNum() != 1:
+                ff.AddFixedPoint(atom.GetIdx())
+                n_fixed += 1
+        # Only worth minimising if some hydrogens are free to move.
+        if 0 < n_fixed < n_atoms:
+            ff.Minimize(maxIts=max_iters)
+
     return ff.CalcEnergy(), None
 
 
 def _mmff94_minimized_energy(mol: Any, max_iters: int = 2000) -> tuple[float, str | None]:
-    """Return the MMFF94 energy of *mol* after in-place minimisation.
+    """Return the MMFF94 energy of *mol* after full in-place minimisation.
 
-    A deep copy is created internally so the caller's molecule is never
-    mutated.  Explicit hydrogens are removed before minimisation so that
-    poorly-positioned crystallographic H atoms do not distort the energy;
-    MMFF94 accounts for their contribution through implicit-H parameters.
+    A deep copy is created internally so the caller's molecule is never mutated.
+    All atoms — including hydrogens — are retained and minimised, so this energy
+    uses the same atomic system as :func:`_mmff94_bound_energy`.
 
     Parameters
     ----------
     mol:
-        RDKit ``Mol`` with a conformer.
+        RDKit ``Mol`` with a conformer (ideally with explicit H).
     max_iters:
         Maximum number of minimisation steps (default 2000).
 
@@ -96,25 +153,16 @@ def _mmff94_minimized_energy(mol: Any, max_iters: int = 2000) -> tuple[float, st
     error:
         ``None`` on success, error string otherwise.
     """
-    from rdkit import Chem  # noqa: PLC0415
-    from rdkit.Chem import AllChem
+    from rdkit.Chem import AllChem  # noqa: PLC0415
 
     opt_mol = copy.deepcopy(mol)
 
-    # Strip explicit Hs so that crystallographic H positions don't
-    # inject systematic errors into the reference energy.
-    opt_mol = Chem.RemoveHs(opt_mol, sanitize=False)
-    try:
-        Chem.SanitizeMol(opt_mol)
-    except Exception as exc:  # noqa: BLE001
-        return 0.0, f"Sanitisation of H-stripped copy failed: {exc}"
-
     mp_opt = AllChem.MMFFGetMoleculeProperties(opt_mol, mmffVariant="MMFF94")
     if mp_opt is None:
-        return 0.0, "MMFF94 properties unavailable on H-stripped copy"
+        return 0.0, "MMFF94 properties unavailable on optimised copy"
     ff_opt = AllChem.MMFFGetMoleculeForceField(opt_mol, mp_opt)
     if ff_opt is None:
-        return 0.0, "MMFF94 force field could not be constructed for H-stripped copy"
+        return 0.0, "MMFF94 force field could not be constructed for optimised copy"
 
     converged = ff_opt.Minimize(maxIts=max_iters)
     if converged != 0:
@@ -163,9 +211,10 @@ def compute_strain_from_mol(
     * All heavy atoms must have an assigned MMFF94 atom type.  Molecules
       with exotic functionality (e.g. rare metals, unusual valence) may
       fail MMFF parameterisation, in which case ``error`` is set.
-    * The optimised reference uses the same heavy-atom topology but
-      re-derives H positions implicitly via MMFF94 so crystallographic
-      H placement does not inflate the reference energy.
+    * Explicit hydrogens are added when absent so the bound and reference
+      energies share the same all-atom system.  On the bound pose only the
+      hydrogens are relaxed (heavy atoms fixed), so poorly determined
+      crystallographic H placement does not inflate the strain.
     """
     from interaction_profiler.schemas import StrainResult  # noqa: PLC0415
 
@@ -196,7 +245,21 @@ def compute_strain_from_mol(
     try:
         n_heavy = mol.GetNumHeavyAtoms()
 
-        # --- Bound energy (no atomic movement) ---
+        # Ensure the molecule carries explicit hydrogens so that the bound and
+        # reference energies are computed on the identical all-atom system.
+        # (MMFF94 is all-atom; comparing an H-containing energy to an H-free one
+        # yields a meaningless H-count offset rather than true strain.)
+        try:
+            mol, _added_h = _ensure_explicit_hs(mol)
+        except Exception as exc:  # noqa: BLE001
+            return StrainResult(
+                error=f"Could not add explicit hydrogens: {exc}",
+                coordinate_source=coordinate_source,
+                rdkit_version=rdkit_ver,
+                n_heavy_atoms=n_heavy,
+            )
+
+        # --- Bound energy (heavy atoms fixed; only H relaxed) ---
         bound_energy, err_bound = _mmff94_bound_energy(mol)
         if err_bound is not None:
             return StrainResult(
@@ -206,7 +269,7 @@ def compute_strain_from_mol(
                 n_heavy_atoms=n_heavy,
             )
 
-        # --- Optimised energy (copy, strip Hs, minimise) ---
+        # --- Optimised energy (copy, full minimisation, same atom set) ---
         opt_energy, err_opt = _mmff94_minimized_energy(mol)
         if err_opt is not None:
             return StrainResult(

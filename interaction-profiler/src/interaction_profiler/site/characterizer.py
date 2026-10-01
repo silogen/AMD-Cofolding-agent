@@ -354,38 +354,49 @@ def _fetch_uniprot_overlay(
     uniprot_seq = _get_uniprot_sequence(uniprot_acc, warnings)
 
     feature_map: dict = {}
+    idx_to_label: dict[int, str] = {}
     active_site_residues: list[str] = []
     binding_site_residues: list[str] = []
 
+    # Single pass so feature_map keys and idx_to_label share ONE global index
+    # space.  map_uniprot_features_to_residues() returns keys that are 0-based
+    # indices into *that chain's* residue list; previously they were merged with
+    # feature_map.update() (chain A res 5 and chain B res 5 collided) while
+    # idx_to_label used a global running offset — so the two schemes disagreed for
+    # every chain after the first and labels came out wrong.  Here each chain's
+    # feature keys are shifted by the same running offset used to build
+    # idx_to_label, so keys never collide and every key resolves to its label.
+    offset = 0
     for ch in chains:
+        try:
+            residues = struct.u.select_atoms(
+                f"(chainID {ch} or segid {ch}) and protein"
+            ).residues
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Could not select residues for chain {ch}: {exc}")
+            continue
+
+        # Label every residue of this chain at its global index.
+        for i, r in enumerate(residues):
+            chain_id = getattr(r, "chainID", None) or getattr(r, "segid", ch)
+            idx_to_label[offset + i] = f"{r.resname}:{r.resid}.{chain_id}"
+
+        # Map UniProt features for this chain and shift keys into the same space.
         try:
             ch_seq = _get_chain_sequence(struct, ch)
             if ch_seq and uniprot_seq:
                 ch_map = map_uniprot_features_to_residues(
                     features, ch, ch_seq, uniprot_seq,
                 )
-                feature_map.update(ch_map)
-        except Exception as exc:
+                for local_idx, feat in ch_map.items():
+                    key = offset + local_idx if isinstance(local_idx, int) else local_idx
+                    feature_map[key] = feat
+        except Exception as exc:  # noqa: BLE001
             warnings.append(f"UniProt feature mapping chain {ch}: {exc}")
 
-    # Build a lookup from 0-based residue index → "RESNAME:RESNUM.CHAIN"
-    # feature_map keys are integer indices from map_uniprot_features_to_residues;
-    # SiteProfile expects string labels so site-type classification works correctly.
-    idx_to_label: dict[int, str] = {}
-    for ch in chains:
-        try:
-            residues = struct.u.select_atoms(
-                f"(chainID {ch} or segid {ch}) and protein"
-            ).residues
-            # Running offset: earlier chains have already consumed indices
-            offset = len(idx_to_label)
-            for i, r in enumerate(residues):
-                chain_id = getattr(r, "chainID", None) or getattr(r, "segid", ch)
-                idx_to_label[offset + i] = f"{r.resname}:{r.resid}.{chain_id}"
-        except Exception as exc:
-            warnings.append(f"Could not build residue label map for chain {ch}: {exc}")
+        offset += len(residues)
 
-    # Extract active/binding site residue labels using the index→label map
+    # Extract active/binding site residue labels using the shared index→label map
     for res_key, feat in feature_map.items():
         ftype = feat.get("feature_type", "")
         # Convert integer index to label string; fall back to str(index) if not found

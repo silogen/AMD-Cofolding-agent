@@ -41,31 +41,29 @@ _VALID_BINDER_ROLES: frozenset[str] = frozenset({
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _chain_length(struct: "LoadedStructure", chain_id: str) -> int:
-    """Return the number of protein residues in *chain_id*.
+def _validate_chains(
+    requested: list[str],
+    ct: dict[str, str],
+    *,
+    role_label: str,
+    warnings: list[str],
+) -> list[str]:
+    """Return the subset of *requested* chains that actually exist in the structure.
 
-    Uses MDAnalysis selection ``(chainID {ch} or segid {ch}) and protein`` so
-    it works regardless of whether the topology stores chain information as
-    ``chainID`` or ``segid``.  Returns 0 on any selection error.
+    Caller-supplied chain IDs are checked against the structure's chain-type map.
+    A chain that is absent (typo, wrong case, stripped on load) is dropped with a
+    warning rather than silently resolved via ``ct.get(ch, "protein")`` — which
+    would emit a confident, wrongly-typed Entity pointing at a chain that is not
+    present.  Preserves the caller's ordering.
     """
-    try:
-        sel = struct.u.select_atoms(
-            f"(chainID {chain_id} or segid {chain_id}) and protein"
+    present = [ch for ch in requested if ch in ct]
+    missing = [ch for ch in requested if ch not in ct]
+    if missing:
+        warnings.append(
+            f"{role_label} chain(s) {missing} not found in structure "
+            f"(available chains: {sorted(ct)}). These chains are ignored."
         )
-        return int(sel.n_residues)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("chain_length failed for chain %r: %s", chain_id, exc)
-        return 0
-
-
-def _classify_protein_by_length(n_residues: int) -> EntityRole:
-    """Retained for backward compatibility — no longer called internally.
-
-    Use the explicit ``binder_role`` parameter on :func:`resolve_entities`
-    instead of length-based guessing.  This function is deprecated and will
-    be removed in a future release.
-    """
-    return EntityRole.protein
+    return present
 
 
 def _resolve_protein_binder_role(
@@ -126,13 +124,22 @@ def _resolve_protein_binder_role(
     return EntityRole.protein
 
 
-def _infer_entity_role_from_chain_type(chain_type: str) -> EntityRole:
+def _infer_entity_role_from_chain_type(
+    chain_type: str,
+    warnings: list[str] | None = None,
+    context: str = "",
+) -> EntityRole:
     """Convert a :meth:`~interaction_profiler.io.structure.LoadedStructure.chain_types`
     string into an :class:`~interaction_profiler.schemas.EntityRole`.
 
     The protein sub-type (peptide / nanobody / antibody) requires length data and
     is NOT handled here; callers must use :func:`_resolve_protein_binder_role`
     for binder proteins.
+
+    Every label produced by ``chain_types()`` (protein, dna, rna, ligand,
+    cofactor, ion, buffer, water, hetero) is mapped explicitly.  A label outside
+    that vocabulary is mapped to ``protein`` as a last resort **and recorded as a
+    warning** (when *warnings* is provided) rather than defaulting silently.
     """
     mapping: dict[str, EntityRole] = {
         "protein":  EntityRole.protein,
@@ -141,9 +148,21 @@ def _infer_entity_role_from_chain_type(chain_type: str) -> EntityRole:
         "ligand":   EntityRole.small_molecule,
         "cofactor": EntityRole.cofactor,
         "ion":      EntityRole.metal,
+        # Crystallisation additives / unclassified heteros are small molecules,
+        # not proteins — kept in sync with chain_types()'s vocabulary.
+        "buffer":   EntityRole.small_molecule,
+        "hetero":   EntityRole.small_molecule,
         "water":    EntityRole.water,
     }
-    return mapping.get(chain_type, EntityRole.protein)
+    role = mapping.get(chain_type)
+    if role is None:
+        if warnings is not None:
+            ctx = f" for {context}" if context else ""
+            warnings.append(
+                f"Unrecognised chain type {chain_type!r}{ctx}; defaulting to role 'protein'."
+            )
+        return EntityRole.protein
+    return role
 
 
 def _dominant_chain_type(types: list[str]) -> str:
@@ -243,9 +262,14 @@ def resolve_entities(
         )
         return [], warnings
 
-    # Build chain-type map once (cheap)
+    # Build chain-type map once (cheap). Normalise values to lower-case so the
+    # lowercase comparisons throughout this module hold even if chain_types()
+    # ever returns mixed-case labels.
     try:
-        ct: dict[str, str] = struct.chain_types()
+        raw_ct = struct.chain_types()
+        ct: dict[str, str] = {
+            k: (v.lower() if isinstance(v, str) else v) for k, v in raw_ct.items()
+        }
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"chain_types() failed: {exc}. Entity resolution may be incomplete.")
         ct = {}
@@ -334,29 +358,37 @@ def _resolve_ligand_target(
             "Binder entity will be absent from the result."
         )
     else:
-        sel = detected[0]  # best-ranked candidate
-        if len(detected) > 1:
-            extras = ", ".join(
-                f"{s.resname}{s.resnum}.{s.chain}" for s in detected[1:4]
+        try:
+            sel = detected[0]  # best-ranked candidate
+            if len(detected) > 1:
+                extras = ", ".join(
+                    f"{s.resname}{s.resnum}.{s.chain}" for s in detected[1:4]
+                )
+                warnings.append(
+                    f"Multiple ligand candidates detected; using "
+                    f"{sel.resname}{sel.resnum}.{sel.chain} (best-ranked by contacts). "
+                    f"Other candidates: {extras}{'...' if len(detected) > 4 else ''}."
+                )
+            entities.append(
+                Entity(
+                    entity_id="binder",
+                    role=EntityRole.small_molecule,
+                    chain_ids=[sel.chain],
+                    label=f"{sel.resname}{sel.resnum}.{sel.chain}",
+                    uniprot_accession=binder_uniprot,
+                )
             )
+        except Exception as exc:  # noqa: BLE001
             warnings.append(
-                f"Multiple ligand candidates detected; using "
-                f"{sel.resname}{sel.resnum}.{sel.chain} (best-ranked by contacts). "
-                f"Other candidates: {extras}{'...' if len(detected) > 4 else ''}."
+                f"Could not build binder entity from detected ligand candidate: {exc}. "
+                "Binder entity will be absent."
             )
-        entities.append(
-            Entity(
-                entity_id="binder",
-                role=EntityRole.small_molecule,
-                chain_ids=[sel.chain],
-                label=f"{sel.resname}{sel.resnum}.{sel.chain}",
-                uniprot_accession=binder_uniprot,
-            )
-        )
 
     # --- Determine target chains ---
     if target_chains:
-        tgt_chains = list(target_chains)
+        tgt_chains = _validate_chains(
+            list(target_chains), ct, role_label="target", warnings=warnings,
+        )
     else:
         tgt_chains = [ch for ch, tp in ct.items() if tp in _POLYMER_TYPES]
         protein_chains = [ch for ch, tp in ct.items() if tp == "protein"]
@@ -369,18 +401,27 @@ def _resolve_ligand_target(
             )
 
     if tgt_chains:
-        tgt_types = [ct.get(ch, "protein") for ch in tgt_chains]
+        # All chains in tgt_chains are present in ct (validated above, or derived
+        # from ct directly), so no silent "protein" default is needed.
+        tgt_types = [ct[ch] for ch in tgt_chains]
         dominant = _dominant_chain_type(tgt_types)
-        target_role = _infer_entity_role_from_chain_type(dominant)
-        entities.append(
-            Entity(
-                entity_id="target",
-                role=target_role,
-                chain_ids=tgt_chains,
-                label="receptor",
-                uniprot_accession=target_uniprot,
-            )
+        target_role = _infer_entity_role_from_chain_type(
+            dominant, warnings=warnings, context="target receptor",
         )
+        try:
+            entities.append(
+                Entity(
+                    entity_id="target",
+                    role=target_role,
+                    chain_ids=tgt_chains,
+                    label="receptor",
+                    uniprot_accession=target_uniprot,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"Could not build target entity: {exc}. Target entity will be absent."
+            )
     else:
         warnings.append(
             "Could not identify any protein/nucleic target chains in the structure. "
@@ -414,25 +455,41 @@ def _resolve_binder_target(
             "Binder entity will be absent."
         )
     else:
-        binder_chain_types = [ct.get(ch, "protein") for ch in binder_chains]
-        dominant_binder_type = _dominant_chain_type(binder_chain_types)
-
-        if dominant_binder_type == "protein":
-            resolved_binder_role = _resolve_protein_binder_role(
-                struct, binder_chains, warnings, binder_role=binder_role,
+        valid_binder_chains = _validate_chains(
+            list(binder_chains), ct, role_label="binder", warnings=warnings,
+        )
+        if not valid_binder_chains:
+            warnings.append(
+                "None of the supplied binder chains exist in the structure. "
+                "Binder entity will be absent."
             )
         else:
-            resolved_binder_role = _infer_entity_role_from_chain_type(dominant_binder_type)
+            binder_chain_types = [ct[ch] for ch in valid_binder_chains]
+            dominant_binder_type = _dominant_chain_type(binder_chain_types)
 
-        entities.append(
-            Entity(
-                entity_id="binder_" + "_".join(binder_chains),
-                role=resolved_binder_role,
-                chain_ids=list(binder_chains),
-                label="binder",
-                uniprot_accession=binder_uniprot,
-            )
-        )
+            if dominant_binder_type == "protein":
+                resolved_binder_role = _resolve_protein_binder_role(
+                    struct, valid_binder_chains, warnings, binder_role=binder_role,
+                )
+            else:
+                resolved_binder_role = _infer_entity_role_from_chain_type(
+                    dominant_binder_type, warnings=warnings, context="binder",
+                )
+
+            try:
+                entities.append(
+                    Entity(
+                        entity_id="binder_" + "_".join(valid_binder_chains),
+                        role=resolved_binder_role,
+                        chain_ids=list(valid_binder_chains),
+                        label="binder",
+                        uniprot_accession=binder_uniprot,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(
+                    f"Could not build binder entity: {exc}. Binder entity will be absent."
+                )
 
     # --- Target ---
     if not target_chains:
@@ -441,19 +498,35 @@ def _resolve_binder_target(
             "Target entity will be absent."
         )
     else:
-        tgt_types = [ct.get(ch, "protein") for ch in target_chains]
-        dominant_tgt = _dominant_chain_type(tgt_types)
-        target_role = _infer_entity_role_from_chain_type(dominant_tgt)
-
-        entities.append(
-            Entity(
-                entity_id="target_" + "_".join(target_chains),
-                role=target_role,
-                chain_ids=list(target_chains),
-                label="target",
-                uniprot_accession=target_uniprot,
-            )
+        valid_target_chains = _validate_chains(
+            list(target_chains), ct, role_label="target", warnings=warnings,
         )
+        if not valid_target_chains:
+            warnings.append(
+                "None of the supplied target chains exist in the structure. "
+                "Target entity will be absent."
+            )
+        else:
+            tgt_types = [ct[ch] for ch in valid_target_chains]
+            dominant_tgt = _dominant_chain_type(tgt_types)
+            target_role = _infer_entity_role_from_chain_type(
+                dominant_tgt, warnings=warnings, context="target",
+            )
+
+            try:
+                entities.append(
+                    Entity(
+                        entity_id="target_" + "_".join(valid_target_chains),
+                        role=target_role,
+                        chain_ids=list(valid_target_chains),
+                        label="target",
+                        uniprot_accession=target_uniprot,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(
+                    f"Could not build target entity: {exc}. Target entity will be absent."
+                )
 
     return entities, warnings
 

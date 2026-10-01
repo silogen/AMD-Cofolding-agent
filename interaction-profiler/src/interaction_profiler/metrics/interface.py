@@ -108,6 +108,14 @@ def _write_temp_pdb(atom_group: object, suffix: str = ".pdb") -> str:
 
     The caller is responsible for deleting the file.
 
+    .. warning::
+        PDB is a fixed-column format: atom serials are capped at 99,999,
+        residue numbers at 9,999, and chain IDs at a single character.  For
+        very large assemblies these overflow and FreeSASA may read back
+        corrupted records.  Call :func:`_detect_pdb_overflow` first to surface
+        the risk; MDAnalysis 2.x cannot write mmCIF, so this is the only
+        available intermediate format here.
+
     Parameters
     ----------
     atom_group:
@@ -124,6 +132,54 @@ def _write_temp_pdb(atom_group: object, suffix: str = ".pdb") -> str:
     os.close(fd)
     atom_group.write(path)  # type: ignore[attr-defined]
     return path
+
+
+def _detect_pdb_overflow(atom_group: object, label: str) -> list[str]:
+    """Return warnings when writing *atom_group* to fixed-column PDB would overflow.
+
+    The SASA inputs are written as temporary PDB files (MDAnalysis 2.x cannot
+    write mmCIF).  PDB's fixed columns cannot represent more than 99,999 atoms,
+    residue numbers above 9,999, or multi-character chain IDs — exactly the
+    cases that arise in large multi-chain assemblies.  When any hold, FreeSASA
+    can read back corrupted atom/residue/chain records, so per-residue interface
+    assignments (and, in the extreme, BSA) become unreliable.  We report this
+    rather than returning silently wrong numbers.
+    """
+    warns: list[str] = []
+    try:
+        n_atoms = len(atom_group)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        return warns
+
+    if n_atoms > 99_999:
+        warns.append(
+            f"{label}: {n_atoms} atoms exceeds the PDB 5-column atom-serial limit "
+            "(99,999); interface residue assignments may be unreliable."
+        )
+
+    try:
+        resids = atom_group.residues.resids  # type: ignore[attr-defined]
+        if len(resids):
+            maxr, minr = int(max(resids)), int(min(resids))
+            if maxr > 9_999 or minr < -999:
+                warns.append(
+                    f"{label}: residue numbers out of PDB 4-column range "
+                    f"({minr}..{maxr}); interface residue assignments may be unreliable."
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        chain_ids = set(getattr(atom_group.atoms, "chainIDs", []))  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        chain_ids = set()
+    multichar = sorted(c for c in chain_ids if isinstance(c, str) and len(c.strip()) > 1)
+    if multichar:
+        warns.append(
+            f"{label}: multi-character chain IDs {multichar} are truncated to one "
+            "column in PDB; interface residues for these chains may be lost."
+        )
+    return warns
 
 
 def _freesasa_total(path: str, probe_radius: float) -> float:
@@ -390,6 +446,15 @@ def compute_interface_geometry(
                 probe_radius_A=probe_radius,
             )
 
+        # Surface fixed-column PDB overflow risks (big assemblies) rather than
+        # letting FreeSASA read back silently corrupted records.
+        overflow_warnings = (
+            _detect_pdb_overflow(binder_ag, "binder")
+            + _detect_pdb_overflow(target_ag, "target")
+        )
+        for _w in overflow_warnings:
+            logger.warning("compute_interface_geometry: %s", _w)
+
         # ------------------------------------------------------------------ #
         # 2.  Write temporary PDB files for isolated chains
         # ------------------------------------------------------------------ #
@@ -487,6 +552,7 @@ def compute_interface_geometry(
             method_bsa=_FREESASA_ALGORITHM_NAME,
             probe_radius_A=probe_radius,
             method_sc=sc_method,
+            warnings=overflow_warnings,
         )
 
     except (ImportError, FileNotFoundError, ValueError) as exc:

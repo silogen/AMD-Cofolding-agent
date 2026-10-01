@@ -601,6 +601,15 @@ class InterfaceGeometry(BaseModel):
     method_bsa: str = "freesasa_shrake_rupley"
     probe_radius_A: float = 1.4
     method_sc: str | None = None
+    warnings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-fatal quality warnings, e.g. when the binder/target selection "
+            "would overflow fixed-column PDB limits (>99,999 atoms, residue "
+            "numbers >9,999, or multi-character chain IDs) so per-residue "
+            "interface assignments may be unreliable."
+        ),
+    )
     error: str | None = None
 
 

@@ -13,7 +13,6 @@ Pipeline position:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from interaction_profiler.schemas import (
     EnrichedInteraction,
@@ -23,11 +22,34 @@ from interaction_profiler.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _lookup_annotation(
+    amap: dict | None,
+    chain: str,
+    resnum: int | None,
+) -> dict | None:
+    """Look up a per-residue annotation, preferring a chain-aware key.
+
+    Annotation maps may be keyed either chain-aware as ``(chain, resnum)`` or
+    by ``resnum`` alone (single-chain callers).  Secondary-structure maps are
+    always chain-aware, so this helper keeps feature/InterPro lookups symmetric
+    with them: it tries ``(chain, resnum)`` first and falls back to ``resnum``.
+    Without this, residue *n* of chain A and residue *n* of chain B collide in a
+    resnum-only lookup, silently attaching the wrong annotation in multi-chain
+    complexes.
+    """
+    if amap is None or resnum is None:
+        return None
+    entry = amap.get((chain, resnum))
+    if entry is None:
+        entry = amap.get(resnum)
+    return entry
+
+
 def enrich_interactions(
     interactions: list[Interaction],
     ss_map: dict[tuple[str, int], str] | None = None,
-    feature_map: dict[int, dict[str, Any]] | None = None,
-    interpro_map: dict[int, dict[str, Any]] | None = None,
+    feature_map: dict | None = None,
+    interpro_map: dict | None = None,
     binder_entity_id: str | None = None,
     target_entity_id: str | None = None,
     binder_is_small_molecule: bool = True,
@@ -39,12 +61,13 @@ def enrich_interactions(
         ss_map: ``{(chain_id, resnum): ss_state}`` from
             ``taxonomy.secondary_structure.assign_secondary_structure()``.
             ``None`` means no secondary structure data available.
-        feature_map: ``{resnum: {feature_type, description, mapped, ...}}`` from
+        feature_map: UniProt per-residue annotations from
             ``taxonomy.annotation_mapper.map_uniprot_features_to_residues()``.
+            Keyed either chain-aware as ``{(chain, resnum): {...}}`` or by
+            ``{resnum: {...}}`` (single-chain); both are looked up correctly.
             ``None`` means no UniProt annotations available.
-        interpro_map: ``{resnum: {domain_name, accession, db, ...}}`` from
-            ``taxonomy.annotation_mapper.map_interpro_to_residues()``.
-            ``None`` means no InterPro annotations available.
+        interpro_map: InterPro per-residue annotations, keyed the same way as
+            ``feature_map``.  ``None`` means no InterPro annotations available.
         binder_entity_id: Entity ID for the binder side (e.g. ``"binder_A"``).
         target_entity_id: Entity ID for the target side (e.g. ``"target_B"``).
         binder_is_small_molecule: When ``True`` the ``binder_feature`` is set
@@ -88,10 +111,8 @@ def enrich_interactions(
             base["target_ss_state"] = None
 
         # ── UniProt feature at target residue ───────────────────────────────
-        uniprot_entry: dict[str, Any] | None = None
-        if target_resnum is not None:
-            uniprot_entry = feature_map.get(target_resnum)
-        if uniprot_entry and uniprot_entry.get("mapped"):
+        uniprot_entry = _lookup_annotation(feature_map, target_chain, target_resnum)
+        if uniprot_entry and uniprot_entry.get("mapped", True):
             base["target_uniprot_feature"]     = uniprot_entry.get("feature_type")
             base["target_uniprot_description"] = uniprot_entry.get("description")
             n_uniprot_hits += 1
@@ -100,10 +121,10 @@ def enrich_interactions(
             base["target_uniprot_description"] = None
 
         # ── InterPro domain at target residue ───────────────────────────────
-        interpro_entry: dict[str, Any] | None = None
-        if target_resnum is not None:
-            interpro_entry = interpro_map.get(target_resnum)
-        if interpro_entry:
+        # Same attach rule as UniProt (consistent): present and mapped (default
+        # True when the source map carries no explicit 'mapped' flag).
+        interpro_entry = _lookup_annotation(interpro_map, target_chain, target_resnum)
+        if interpro_entry and interpro_entry.get("mapped", True):
             base["target_interpro_domain"]    = interpro_entry.get("domain_name")
             base["target_interpro_accession"] = interpro_entry.get("accession")
             n_interpro_hits += 1
@@ -118,9 +139,12 @@ def enrich_interactions(
         else:
             # Protein / peptide binder: construct a residue label.
             # The ligand fields encode the binder residue in this path.
+            # ligand_atom_idx may be None (not just a negative sentinel), so
+            # check the type before the >= 0 comparison.
+            lig_idx = ix.ligand_atom_idx
             base["binder_feature"] = (
-                f"{ix.ligand_atom_name or 'UNK'}:{ix.ligand_atom_idx}"
-                if ix.ligand_atom_idx >= 0
+                f"{ix.ligand_atom_name or 'UNK'}:{lig_idx}"
+                if isinstance(lig_idx, int) and lig_idx >= 0
                 else None
             )
 
