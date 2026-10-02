@@ -53,6 +53,7 @@ services:
     - REINVENT4_AGENT_MULTI_AGENT=${REINVENT4_AGENT_MULTI_AGENT:-true}
     - REINVENT4_AGENT_LOG_DIR=/logs
     - REINVENT4_AGENT_LOG_TIMESTAMPS=${REINVENT4_AGENT_LOG_TIMESTAMPS:-}
+    - ANNOTATION_SERVICE_URL=http://annotation:8080
     depends_on:
       boltz:
         condition: service_healthy
@@ -63,6 +64,8 @@ services:
       retrodmta-predictor:
         condition: service_healthy
       interaction-profiler:
+        condition: service_healthy
+      annotation:
         condition: service_healthy
   boltz:
     ipc: host
@@ -138,3 +141,26 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    environment:
+    - ANNOTATION_SERVICE_URL=http://annotation:8080
+    depends_on:
+      annotation:
+        condition: service_healthy
+  annotation:
+    build:
+      context: services/annotation
+      dockerfile: Dockerfile
+    ports:
+    - 127.0.0.1:8088:8080
+    volumes:
+    - ${DATA_DIR:-./data}/shared:/shared
+    environment:
+    - ANNOTATION_CACHE_DIR=/shared/annotations
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
