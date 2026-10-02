@@ -1,0 +1,43 @@
+{
+  "query_id": "c3d4e5f6-0003-4061-abcd-ef0123456789",
+  "result_type": "non_polymer_entity",
+  "total_count": 4821,
+  "result_list": [
+    {"identifier": "1ATP_2", "score": 1.0, "services": null},
+    {"identifier": "1E2F_2", "score": 1.0, "services": null},
+    {"identifier": "3PXY_3", "score": 1.0, "services": null},
+    {"identifier": "2JDK_2", "score": 1.0, "services": null},
+    {"identifier": "4EK4_2", "score": 1.0, "services": null},
+    {"identifier": "1BX6_2", "score": 1.0, "services": null},
+    {"identifier": "2C4K_2", "score": 1.0, "services": null},
+    {"identifier": "1CSN_2", "score": 1.0, "services": null},
+    {"identifier": "3IQ5_2", "score": 1.0, "services": null},
+    {"identifier": "4DFX_2", "score": 1.0, "services": null},
+    {"identifier": "2G9X_3", "score": 1.0, "services": null},
+    {"identifier": "1E8X_2", "score": 1.0, "services": null},
+    {"identifier": "3R7G_2", "score": 1.0, "services": null},
+    {"identifier": "5HQ0_2", "score": 1.0, "services": null},
+    {"identifier": "2VTM_2", "score": 1.0, "services": null},
+    {"identifier": "1OGU_3", "score": 1.0, "services": null},
+    {"identifier": "4KD1_3", "score": 1.0, "services": null},
+    {"identifier": "2A0C_2", "score": 1.0, "services": null},
+    {"identifier": "3DDQ_2", "score": 1.0, "services": null},
+    {"identifier": "1QMZ_2", "score": 1.0, "services": null},
+    {"identifier": "2DUV_2", "score": 1.0, "services": null},
+    {"identifier": "4BCK_3", "score": 1.0, "services": null},
+    {"identifier": "5K4J_2", "score": 1.0, "services": null},
+    {"identifier": "3QTI_2", "score": 1.0, "services": null},
+    {"identifier": "1GIH_2", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 4200},
+        {"key": "ELECTRON MICROSCOPY", "count": 580},
+        {"key": "SOLUTION NMR", "count": 41}
+      ]
+    }
+  ]
+}

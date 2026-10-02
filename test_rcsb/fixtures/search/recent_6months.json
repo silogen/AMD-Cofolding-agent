@@ -1,0 +1,53 @@
+{
+  "query_id": "d2e3f4a5-0022-4374-3456-789012345678",
+  "result_type": "entry",
+  "total_count": 3241,
+  "result_list": [
+    {"identifier": "8A7B", "score": 1.0, "services": null},
+    {"identifier": "8C3D", "score": 1.0, "services": null},
+    {"identifier": "8E5F", "score": 1.0, "services": null},
+    {"identifier": "8G7H", "score": 1.0, "services": null},
+    {"identifier": "8I9J", "score": 1.0, "services": null},
+    {"identifier": "8K1L", "score": 1.0, "services": null},
+    {"identifier": "8M3N", "score": 1.0, "services": null},
+    {"identifier": "8O5P", "score": 1.0, "services": null},
+    {"identifier": "8Q7R", "score": 1.0, "services": null},
+    {"identifier": "8S9T", "score": 1.0, "services": null},
+    {"identifier": "8U1V", "score": 1.0, "services": null},
+    {"identifier": "8W3X", "score": 1.0, "services": null},
+    {"identifier": "8Y5Z", "score": 1.0, "services": null},
+    {"identifier": "9A7B", "score": 1.0, "services": null},
+    {"identifier": "9C3D", "score": 1.0, "services": null},
+    {"identifier": "9E5F", "score": 1.0, "services": null},
+    {"identifier": "9G7H", "score": 1.0, "services": null},
+    {"identifier": "9I9J", "score": 1.0, "services": null},
+    {"identifier": "9K1L", "score": 1.0, "services": null},
+    {"identifier": "9M3N", "score": 1.0, "services": null},
+    {"identifier": "9O5P", "score": 1.0, "services": null},
+    {"identifier": "9Q7R", "score": 1.0, "services": null},
+    {"identifier": "9S9T", "score": 1.0, "services": null},
+    {"identifier": "9U1V", "score": 1.0, "services": null},
+    {"identifier": "9W3X", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 1823},
+        {"key": "ELECTRON MICROSCOPY", "count": 1187},
+        {"key": "SOLUTION NMR", "count": 231}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 1543},
+        {"key": "SARS-CoV-2", "count": 487},
+        {"key": "Mus musculus", "count": 341},
+        {"key": "Influenza A virus", "count": 212}
+      ]
+    }
+  ]
+}

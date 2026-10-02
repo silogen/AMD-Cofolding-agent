@@ -1,0 +1,51 @@
+{
+  "query_id": "c5d6e7f8-0015-4c6d-6789-012345678901",
+  "result_type": "assembly",
+  "total_count": 89,
+  "result_list": [
+    {"identifier": "4HHB-1", "score": 1.0, "services": null},
+    {"identifier": "1FDH-1", "score": 0.98, "services": null},
+    {"identifier": "2HBS-1", "score": 0.97, "services": null},
+    {"identifier": "1CBL-1", "score": 0.96, "services": null},
+    {"identifier": "3HHB-1", "score": 0.95, "services": null},
+    {"identifier": "2MHB-1", "score": 0.94, "services": null},
+    {"identifier": "1HGA-1", "score": 0.93, "services": null},
+    {"identifier": "4MQJ-1", "score": 0.92, "services": null},
+    {"identifier": "1HB0-1", "score": 0.91, "services": null},
+    {"identifier": "2HHB-1", "score": 0.90, "services": null},
+    {"identifier": "1GZX-1", "score": 0.89, "services": null},
+    {"identifier": "3OO4-1", "score": 0.88, "services": null},
+    {"identifier": "4L7Y-1", "score": 0.87, "services": null},
+    {"identifier": "1HDB-1", "score": 0.86, "services": null},
+    {"identifier": "5EWV-1", "score": 0.85, "services": null},
+    {"identifier": "2DN3-1", "score": 0.84, "services": null},
+    {"identifier": "6MV4-1", "score": 0.83, "services": null},
+    {"identifier": "1YHR-1", "score": 0.82, "services": null},
+    {"identifier": "3NMM-1", "score": 0.81, "services": null},
+    {"identifier": "1RQA-1", "score": 0.80, "services": null},
+    {"identifier": "4N7N-1", "score": 0.79, "services": null},
+    {"identifier": "2H35-1", "score": 0.78, "services": null},
+    {"identifier": "1A3N-1", "score": 0.77, "services": null},
+    {"identifier": "3R5I-1", "score": 0.76, "services": null},
+    {"identifier": "2DN1-1", "score": 0.75, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 72},
+        {"key": "ELECTRON MICROSCOPY", "count": 14},
+        {"key": "SOLUTION NMR", "count": 3}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 81},
+        {"key": "Mus musculus", "count": 8}
+      ]
+    }
+  ]
+}

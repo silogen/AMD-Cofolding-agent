@@ -39,16 +39,57 @@ _ACTIVE_JOB_STATES = frozenset({"running", "queued"})
 # Reviewer physically cannot mutate the campaign.
 REVIEWER_READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
+        # Campaign results and status
         "read_results",
         "get_top_candidates",
+        "get_optimization_status",
+        "get_job_alerts",
+        "list_jobs",
+        # TTP and capability discovery
         "get_ttp",
         "list_ttps",
-        "get_optimization_status",
-        "list_jobs",
         "list_scoring_components",
         "list_available_models",
         "list_transforms",
         "list_external_services",
+        "list_shared_assets",
+        "list_generation_models",
+        "validate_generation_campaign",
+        # Target and compound evidence
+        "fetch_target_info",
+        "fetch_compound",
+        "fetch_uniprot_features",
+        "fetch_interpro_annotations",
+        "fetch_nucleic_annotation",
+        # RCSB
+        "rcsb_search",
+        "rcsb_count",
+        "rcsb_get_entries",
+        "rcsb_fetch_files",
+        # ChEMBL
+        "search_chembl_molecules",
+        "get_chembl_molecule",
+        "search_chembl_targets",
+        "get_chembl_target",
+        "search_chembl_activities",
+        "fetch_all_activities",
+        "search_chembl_assays",
+        "get_chembl_mechanisms",
+        "get_chembl_indications",
+        "get_chembl_documents",
+        "search_chembl_similarity",
+        "search_chembl_substructure",
+        # Structure and interaction inspection
+        "validate_structure",
+        "extract_ligand_sdf",
+        "get_preparation_status",
+        "profile_complex_interaction",
+        "get_interaction_profiler_schema",
+        "characterize_site_profile",
+        # Synthesis inspection (job submission intentionally excluded)
+        "plan_synthesis",
+        "check_building_block_availability",
+        "get_synthesis_job_status",
     }
 )
 

@@ -1136,6 +1136,12 @@ def main() -> None:
     except RuntimeError as exc:
         logger.warning(f"REINVENT4 not found at startup: {exc}")
 
+    # Load all extension tool modules (blocks 01-10).
+    # Each module must export register_tools(mcp) -> None.
+    # A failure in one extension is logged and isolated; others still load.
+    from reinvent4_mcp.registry import load_extensions  # noqa: PLC0415
+    load_extensions(mcp)
+
     mcp.run(transport="stdio")
 
 

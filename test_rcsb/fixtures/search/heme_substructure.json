@@ -1,0 +1,53 @@
+{
+  "query_id": "f6a7b8c9-0006-4364-def0-123456789012",
+  "result_type": "entry",
+  "total_count": 312,
+  "result_list": [
+    {"identifier": "1HHO", "score": 1.0, "services": null},
+    {"identifier": "2ZCQ", "score": 0.99, "services": null},
+    {"identifier": "3P3W", "score": 0.98, "services": null},
+    {"identifier": "1OIT", "score": 0.97, "services": null},
+    {"identifier": "4WUK", "score": 0.96, "services": null},
+    {"identifier": "2YGM", "score": 0.95, "services": null},
+    {"identifier": "5MHZ", "score": 0.94, "services": null},
+    {"identifier": "3NBS", "score": 0.93, "services": null},
+    {"identifier": "1X8Q", "score": 0.92, "services": null},
+    {"identifier": "4GYT", "score": 0.91, "services": null},
+    {"identifier": "2CHQ", "score": 0.90, "services": null},
+    {"identifier": "3TWR", "score": 0.89, "services": null},
+    {"identifier": "1B5Q", "score": 0.88, "services": null},
+    {"identifier": "4MXB", "score": 0.87, "services": null},
+    {"identifier": "2R8Q", "score": 0.86, "services": null},
+    {"identifier": "5TRR", "score": 0.85, "services": null},
+    {"identifier": "3VXQ", "score": 0.84, "services": null},
+    {"identifier": "1EIJ", "score": 0.83, "services": null},
+    {"identifier": "4NBN", "score": 0.82, "services": null},
+    {"identifier": "2MQO", "score": 0.81, "services": null},
+    {"identifier": "6C3P", "score": 0.80, "services": null},
+    {"identifier": "1YZX", "score": 0.79, "services": null},
+    {"identifier": "3NR6", "score": 0.78, "services": null},
+    {"identifier": "2H9R", "score": 0.77, "services": null},
+    {"identifier": "4ETP", "score": 0.76, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 248},
+        {"key": "ELECTRON MICROSCOPY", "count": 52},
+        {"key": "SOLUTION NMR", "count": 12}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 187},
+        {"key": "Equus caballus", "count": 44},
+        {"key": "Gallus gallus", "count": 28},
+        {"key": "Mus musculus", "count": 21}
+      ]
+    }
+  ]
+}

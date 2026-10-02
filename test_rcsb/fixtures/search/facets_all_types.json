@@ -1,0 +1,90 @@
+{
+  "query_id": "a5b6c7d8-0025-4677-6789-012345678901",
+  "result_type": "entry",
+  "total_count": 638,
+  "result_list": [
+    {"identifier": "3PXY", "score": 1.0, "services": null},
+    {"identifier": "1HCK", "score": 1.0, "services": null},
+    {"identifier": "2R3I", "score": 1.0, "services": null},
+    {"identifier": "1FIN", "score": 1.0, "services": null},
+    {"identifier": "3QTI", "score": 1.0, "services": null},
+    {"identifier": "1GIH", "score": 1.0, "services": null},
+    {"identifier": "2A0C", "score": 1.0, "services": null},
+    {"identifier": "4KD1", "score": 1.0, "services": null},
+    {"identifier": "5HQ0", "score": 1.0, "services": null},
+    {"identifier": "1PXL", "score": 1.0, "services": null},
+    {"identifier": "3DDQ", "score": 1.0, "services": null},
+    {"identifier": "2DUV", "score": 1.0, "services": null},
+    {"identifier": "1OGU", "score": 1.0, "services": null},
+    {"identifier": "4BCK", "score": 1.0, "services": null},
+    {"identifier": "5K4J", "score": 1.0, "services": null},
+    {"identifier": "3PXF", "score": 1.0, "services": null},
+    {"identifier": "1QMZ", "score": 1.0, "services": null},
+    {"identifier": "2VTM", "score": 1.0, "services": null},
+    {"identifier": "1W8L", "score": 1.0, "services": null},
+    {"identifier": "4EOO", "score": 1.0, "services": null},
+    {"identifier": "3R7G", "score": 1.0, "services": null},
+    {"identifier": "1GY3", "score": 1.0, "services": null},
+    {"identifier": "2B54", "score": 1.0, "services": null},
+    {"identifier": "4ACM", "score": 1.0, "services": null},
+    {"identifier": "5A14", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 618},
+        {"key": "Bos taurus", "count": 46},
+        {"key": "Mus musculus", "count": 31}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 568},
+        {"key": "ELECTRON MICROSCOPY", "count": 67},
+        {"key": "SOLUTION NMR", "count": 3}
+      ]
+    },
+    {
+      "name": "Resolution",
+      "aggregation_type": "range",
+      "buckets": [
+        {"key": "0-1.5", "count": 48},
+        {"key": "1.5-2.0", "count": 225},
+        {"key": "2.0-2.5", "count": 194},
+        {"key": "2.5-3.0", "count": 115},
+        {"key": "3.0+", "count": 56}
+      ]
+    },
+    {
+      "name": "ReleaseYear",
+      "aggregation_type": "histogram",
+      "buckets": [
+        {"key": "2000", "count": 12},
+        {"key": "2005", "count": 48},
+        {"key": "2010", "count": 97},
+        {"key": "2015", "count": 143},
+        {"key": "2020", "count": 187},
+        {"key": "2025", "count": 88},
+        {"key": "2026", "count": 63}
+      ]
+    },
+    {
+      "name": "UniqueChainCount",
+      "aggregation_type": "cardinality",
+      "value": 842
+    },
+    {
+      "name": "HighResOnly",
+      "aggregation_type": "filter",
+      "count": 273,
+      "filter": {
+        "attribute": "rcsb_entry_info.resolution_combined",
+        "max": 2.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "query_id": "c1d2e3f4-0021-4273-2345-678901234567",
+  "result_type": "entry",
+  "total_count": 24831,
+  "result_list": [
+    {"identifier": "5Y5A", "score": 1.0, "services": null},
+    {"identifier": "6M17", "score": 1.0, "services": null},
+    {"identifier": "7NHM", "score": 1.0, "services": null},
+    {"identifier": "6VXX", "score": 1.0, "services": null},
+    {"identifier": "5FTJ", "score": 1.0, "services": null},
+    {"identifier": "6WPW", "score": 1.0, "services": null},
+    {"identifier": "7K8Z", "score": 1.0, "services": null},
+    {"identifier": "5O9Z", "score": 1.0, "services": null},
+    {"identifier": "6Q8Y", "score": 1.0, "services": null},
+    {"identifier": "7LYJ", "score": 1.0, "services": null},
+    {"identifier": "5ZYK", "score": 1.0, "services": null},
+    {"identifier": "6JR8", "score": 1.0, "services": null},
+    {"identifier": "7BXP", "score": 1.0, "services": null},
+    {"identifier": "5MRC", "score": 1.0, "services": null},
+    {"identifier": "6GX5", "score": 1.0, "services": null},
+    {"identifier": "7O7Y", "score": 1.0, "services": null},
+    {"identifier": "5IQR", "score": 1.0, "services": null},
+    {"identifier": "6H4V", "score": 1.0, "services": null},
+    {"identifier": "7AWO", "score": 1.0, "services": null},
+    {"identifier": "5NP0", "score": 1.0, "services": null},
+    {"identifier": "6GZX", "score": 1.0, "services": null},
+    {"identifier": "7CPQ", "score": 1.0, "services": null},
+    {"identifier": "5TBW", "score": 1.0, "services": null},
+    {"identifier": "6OXA", "score": 1.0, "services": null},
+    {"identifier": "7EAZ", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "ELECTRON MICROSCOPY", "count": 24831}
+      ]
+    },
+    {
+      "name": "Resolution",
+      "aggregation_type": "range",
+      "buckets": [
+        {"key": "0-2.0", "count": 4218},
+        {"key": "2.0-3.0", "count": 9312},
+        {"key": "3.0-4.0", "count": 7841},
+        {"key": "4.0+", "count": 3460}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 9843},
+        {"key": "Mus musculus", "count": 3214},
+        {"key": "SARS-CoV-2", "count": 1432},
+        {"key": "Saccharomyces cerevisiae", "count": 1187}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "query_id": "a3b4c5d6-0013-4a6b-4567-890123456789",
+  "result_type": "polymer_entity",
+  "total_count": 1243,
+  "result_list": [
+    {"identifier": "1ZAA_1", "score": 1.0, "services": null},
+    {"identifier": "2I13_1", "score": 1.0, "services": null},
+    {"identifier": "3W7O_1", "score": 1.0, "services": null},
+    {"identifier": "1MEY_1", "score": 1.0, "services": null},
+    {"identifier": "4GH5_1", "score": 1.0, "services": null},
+    {"identifier": "1SP2_1", "score": 1.0, "services": null},
+    {"identifier": "3RGQ_1", "score": 1.0, "services": null},
+    {"identifier": "2FAZ_1", "score": 1.0, "services": null},
+    {"identifier": "4LX4_1", "score": 1.0, "services": null},
+    {"identifier": "1YUI_1", "score": 1.0, "services": null},
+    {"identifier": "3JRS_1", "score": 1.0, "services": null},
+    {"identifier": "2KMT_1", "score": 1.0, "services": null},
+    {"identifier": "4R10_1", "score": 1.0, "services": null},
+    {"identifier": "1DU1_1", "score": 1.0, "services": null},
+    {"identifier": "3VKH_1", "score": 1.0, "services": null},
+    {"identifier": "2LTP_1", "score": 1.0, "services": null},
+    {"identifier": "4MZ0_1", "score": 1.0, "services": null},
+    {"identifier": "1G2Y_1", "score": 1.0, "services": null},
+    {"identifier": "3WKQ_1", "score": 1.0, "services": null},
+    {"identifier": "2MQ0_1", "score": 1.0, "services": null},
+    {"identifier": "4P9R_1", "score": 1.0, "services": null},
+    {"identifier": "1Q0R_1", "score": 1.0, "services": null},
+    {"identifier": "3YWS_1", "score": 1.0, "services": null},
+    {"identifier": "2L9Z_1", "score": 1.0, "services": null},
+    {"identifier": "4UPD_1", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 876},
+        {"key": "SOLUTION NMR", "count": 298},
+        {"key": "ELECTRON MICROSCOPY", "count": 69}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 712},
+        {"key": "Mus musculus", "count": 187},
+        {"key": "Danio rerio", "count": 98}
+      ]
+    }
+  ]
+}
