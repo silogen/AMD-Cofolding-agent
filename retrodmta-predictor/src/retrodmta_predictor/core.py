@@ -91,6 +91,24 @@ def _featurize(smiles):
     return X
 
 
+def _featurize_contract(smiles, avalon_bits: int, desc_cols: list[str]):
+    """Feature matrix for newly exported project XGBoost models.
+
+    Their training pipeline used Avalon bits followed by zero-filled descriptor
+    columns; preserve that exact representation.
+    """
+    X = np.zeros((len(smiles), avalon_bits + len(desc_cols)), dtype=np.float32)
+    for i, smi in enumerate(smiles):
+        mol = Chem.MolFromSmiles(str(smi))
+        if mol is None:
+            continue
+        fp = pyAvalonTools.GetAvalonFP(mol, nBits=avalon_bits)
+        arr = np.zeros(avalon_bits, dtype=np.int8)
+        DataStructs.ConvertToNumpyArray(fp, arr)
+        X[i, :avalon_bits] = arr
+    return X
+
+
 # ---------------- device + GNN plumbing ----------------
 def _device():
     global _DEV
@@ -155,7 +173,17 @@ def _get_xgb(target, w, task):
     p = MODELS_DIR / target / f"w{w:02d}" / "xgb" / f"{task}.pkl"
     if not p.exists():
         return None
-    return _cache_get((target, w, f"xgb:{task}"), lambda: pickle.load(open(p, "rb")))
+    def load():
+        artifact = pickle.load(open(p, "rb"))
+        if isinstance(artifact, dict) and "model" in artifact:
+            return {
+                "model": artifact["model"],
+                "avalon_bits": int(artifact.get("avalon_bits", AVALON_NBITS)),
+                "desc_cols": list(artifact.get("desc_cols", [])),
+            }
+        return {"model": artifact, "avalon_bits": None, "desc_cols": None}
+
+    return _cache_get((target, w, f"xgb:{task}"), load)
 
 
 # ---------------- prediction ----------------
@@ -187,6 +215,9 @@ def _gnn_predict(model, smiles, endpoints):
     import torch
     n = len(smiles)
     padded = list(smiles)
+    # chemprop's BatchNorm fails on a batch of a single molecule, so pad the input
+    # to at least 2 rows and avoid a trailing batch of size 1 (len % BATCH_SIZE == 1)
+    # by repeating the last SMILES. The extra rows are trimmed off via [:n] below.
     while len(padded) < 2 or len(padded) % BATCH_SIZE == 1:
         padded.append(padded[-1])
     loader = _make_loader(padded)
@@ -255,12 +286,28 @@ def _predict_batch(target, w, endpoints, cut_date, smiles_list, method):
 
     per_method = {}   # method -> {endpoint: array}
     if "xgboost" in want:
-        X = _featurize(valid)
         xg = {}
+        feature_cache = {}
         for ep in endpoints:
-            mdl = _get_xgb(target, w, ep)
-            if mdl is not None:
-                xg[ep] = mdl.predict(X)
+            artifact = _get_xgb(target, w, ep)
+            if artifact is None:
+                continue
+            if artifact["avalon_bits"] is None:
+                key = ("legacy",)
+                if key not in feature_cache:
+                    feature_cache[key] = _featurize(valid)
+            else:
+                key = (
+                    artifact["avalon_bits"],
+                    tuple(artifact["desc_cols"]),
+                )
+                if key not in feature_cache:
+                    feature_cache[key] = _featurize_contract(
+                        valid,
+                        artifact["avalon_bits"],
+                        artifact["desc_cols"],
+                    )
+            xg[ep] = artifact["model"].predict(feature_cache[key])
         if xg:
             per_method["XGBoost"] = xg
     for comp, label in (("chemprop", "Chemprop-MTL"), ("chemeleon", "CheMeleon-MTL")):
@@ -283,7 +330,9 @@ def _predict_batch(target, w, endpoints, cut_date, smiles_list, method):
             arr = np.array(list(vals.values()), dtype=float)
             rec["predictions"][ep] = {
                 "mean": round(float(arr.mean()), 4) if len(arr) else None,
-                "std": round(float(arr.std(ddof=0)), 4) if len(arr) else None,
+                # std is a consensus signal only with >= 2 models; a single model
+                # yields 0.0 which would misread as perfect agreement. Report None.
+                "std": round(float(arr.std(ddof=0)), 4) if len(arr) >= 2 else None,
                 "unit": ENDPOINT_META.get(ep, {}).get("unit"),
                 "n_models": int(len(arr)),
                 "per_model": {k: round(v, 4) for k, v in vals.items()},

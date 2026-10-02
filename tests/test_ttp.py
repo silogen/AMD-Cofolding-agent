@@ -325,6 +325,27 @@ class TestScoringSection:
                 ]
             )
 
+    def test_circular_dependency_rejected(self):
+        with pytest.raises(ValidationError, match="[Cc]ircular"):
+            ScoringSection(
+                objectives=[
+                    ScoringObjective(
+                        name="A",
+                        type="external",
+                        service="boltz",
+                        service_url="http://boltz:8080/score",
+                        depends_on="B",
+                    ),
+                    ScoringObjective(
+                        name="B",
+                        type="external",
+                        service="posebusters",
+                        service_url="http://pb:8080/score",
+                        depends_on="A",
+                    ),
+                ]
+            )
+
     def test_duplicate_objective_names_rejected(self):
         with pytest.raises(ValidationError, match="Duplicate"):
             ScoringSection(

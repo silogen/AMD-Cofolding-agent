@@ -44,6 +44,7 @@ scoring:
   admet:
     enabled: true
     service_url: "http://admet-predictor:8084/score"
+    model_set: "drug"
   retrodmta:
     enabled: true
     service_url: "http://retrodmta-predictor:8085/score"

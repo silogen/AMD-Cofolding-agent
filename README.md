@@ -19,28 +19,38 @@ The stack runs either under **Docker Compose** or, on clusters with no Docker da
 │            └──────────────┬────────────────────┘                      │
 │                           ▼  stdio / MCP                              │
 │                    ┌─────────────┐                                    │
-│                    │   dd-mcp    │  REINVENT4 scoring, TTPs, RL jobs  │
+│                    │   dd-mcp    │  59 tools                          │
+│                    │ REINVENT4   │  scoring · TTPs · campaigns · jobs │
 │                    └──────┬──────┘                                    │
 └───────────────────────────┼───────────────────────────────────────────┘
-                            │  POST /score  (HTTP)
-      ┌──────────┬──────────┼───────────┬──────────────┐
-      ▼          ▼          ▼           ▼              ▼
- ┌─────────┐ ┌─────────┐ ┌───────┐ ┌───────────┐ ┌─────────────┐
- │ Boltz2  │ │  Pose-  │ │ ADMET │ │ RetroDMTA │ │ Interaction │
- │  :8091  │ │ busters │ │ :8084 │ │   :8085   │ │  Profiler   │
- │   GPU   │ │  :8082  │ │  CPU  │ │    CPU    │ │    :8083    │
- └────┬────┘ └────┬────┘ └───────┘ └───────────┘ └──────┬──────┘
-      │           │                                     │
-      └───────────┴──────────────┬──────────────────────┘
-                                 ▼
-                       ┌───────────────────┐
-                       │  /shared volume   │  structures, MSAs, poses
-                       └───────────────────┘
+                            │
+          ┌─────────────────┼───────────────────────┐
+          │                 │                       │
+          │ POST /score     │ task-specific REST    │ HTTPS data access
+          ▼                 ▼                       ▼
+┌───────────────────┐ ┌───────────────────┐ ┌──────────────────────────┐
+│ Scoring services  │ │ Support services  │ │ Public scientific APIs   │
+│                   │ │                   │ │                          │
+│ Boltz2       :8091│ │ Synthesis    :8086│ │ RCSB PDB                 │
+│ PoseBusters  :8082│ │ StructPrep   :8087│ │ ChEMBL                   │
+│ Interaction  :8083│ │ Annotation   :8088│ │ UniProt / InterPro       │
+│ ADMET        :8084│ │                   │ │ PubChem                  │
+│ RetroDMTA    :8085│ │                   │ │                          │
+└─────────┬─────────┘ └─────────┬─────────┘ └──────────────────────────┘
+          │                     │
+          └──────────┬──────────┘
+                     ▼
+           ┌───────────────────────┐
+           │    /shared volume     │
+           │ structures · MSAs     │
+           │ poses · annotations   │
+           │ preparation artifacts│
+           └───────────────────────┘
 ```
 
-The agent spawns the MCP server as a subprocess over stdio. The server imports REINVENT4 for native scoring (QED, molecular weight, LogP, TPSA, SA score, Tanimoto similarity, custom alerts, etc.) and manages TTPs — JSON documents that fully specify multi-property optimization objectives.
+The agent spawns the MCP server as a subprocess over stdio. The server imports REINVENT4 for native scoring and Reinvent/LibInvent/LinkInvent/Mol2Mol campaigns, manages TTPs and background jobs, and exposes the structure, synthesis, annotation, and public-data tools through one 59-tool MCP catalog.
 
-External scoring services run as separate containers, each exposing a uniform `POST /score` REST API. The MCP server calls them through the `ExternalRESTScorer` REINVENT4 plugin when a TTP includes external objectives. A `PipelineAwareScorer` handles artifact passing: Boltz2 writes predicted structures to the shared volume, and PoseBusters and the Interaction Profiler read them downstream.
+The five scoring services expose the uniform `POST /score` contract used by REINVENT's `ExternalRESTScorer`. The three support services expose task-specific preparation, retrosynthesis, availability, and annotation endpoints. A `PipelineAwareScorer` passes artifacts between objectives: Structure Preparation emits validated receptors/complexes, Boltz2 can cofold from sequence or condition on an input structure, and PoseBusters plus the Interaction Profiler consume the resulting `/shared` structures. The MCP fetchers call RCSB PDB, ChEMBL, UniProt, InterPro, and PubChem directly and cache reusable artifacts or annotations where appropriate.
 
 ## Current Status
 
@@ -55,8 +65,14 @@ External scoring services run as separate containers, each exposing a uniform `P
 | 6 | ADMET, RetroDMTA, and Interaction Profiler services | Done |
 | 7 | Multi-agent Driver + Reviewer (handoff protocol, `/review`, campaign monitor) | Done |
 | 8 | Apptainer/Singularity stack (AMD + NVIDIA) | Done |
-| 9 | Per-molecule evaluation detail tools for the Reviewer (`get_evaluation_detail`, `read_structure_file`) | Planned |
-| 10 | OpenTelemetry tracing of agent turns + tool calls | Planned |
+| 9 | Structure-conditioned Boltz cofolding from a prepared input structure | Done |
+| 10 | AiZynthFinder retrosynthesis prediction and building-block availability | Done |
+| 11 | Structure Preparation service + expanded protein/fragment Interaction Profiler | Done |
+| 12 | RCSB PDB, ChEMBL, UniProt, InterPro, PubChem, and nucleic-acid annotation fetchers | Done |
+| 13 | Expanded ADMET and RetroDMTA ML endpoints for off-target, distribution, metabolism, elimination, and toxicity | Done |
+| 14 | REINVENT LibInvent/LinkInvent transformer support and unified Mol2Mol campaigns | Done |
+| 15 | Per-molecule evaluation detail tools for the Reviewer (`get_evaluation_detail`, `read_structure_file`) | Planned |
+| 16 | OpenTelemetry tracing of agent turns + tool calls | Planned |
 
 ## Prerequisites
 
@@ -69,96 +85,93 @@ Everything runs inside containers. No local Python environment, venv, or pip ins
 ## Repository Layout
 
 ```
-dd_agentic/
-├── reinvent4_mcp/                  # MCP server package (dd-mcp)
-│   ├── server.py                   # FastMCP entry point (stdio transport), 24 tools
-│   ├── config.py                   # Process config loading (reinvent4_mcp_config.yaml)
-│   ├── utils.py                    # REINVENT4 path discovery, device detection
-│   ├── scoring_pipeline.py         # PipelineAwareScorer (artifact passing between services)
+AMD-Cofolding-agent/
+├── reinvent4_mcp/                       # MCP server package (dd-mcp), 59 tools
+│   ├── server.py                        # FastMCP entry point (stdio transport)
+│   ├── registry.py                      # Extension registration (blocks 01–03, 06–10)
+│   ├── config.py                        # Process/service configuration
+│   ├── scoring_pipeline.py              # Artifact-aware external-scoring pipeline
 │   ├── tools/
-│   │   ├── discovery.py            # list_scoring_components / _available_models / _transforms
-│   │   ├── scoring.py              # score_molecules (direct + TTP modes)
-│   │   ├── optimization.py         # run_optimization, stop_optimization, run_transfer_learning
-│   │   ├── results.py              # get_optimization_status, get_top_candidates, read_results
-│   │   ├── external.py             # service health, list_shared_assets, predict_admet,
-│   │   │                           #   predict_retrodmta, profile_interactions
-│   │   ├── ttp.py                  # create/update/get/list/delete TTP
-│   │   ├── uniprot.py              # fetch_target_info (UniProt sequence lookup)
-│   │   └── pubchem.py              # fetch_compound (compound name -> real SMILES)
-│   ├── _plugins/reinvent_plugins/components/
-│   │   └── comp_external_rest.py   # ExternalRESTScorer plugin (HTTP -> ComponentResults)
+│   │   ├── discovery.py                 # Components, models, transforms, model manifests
+│   │   ├── scoring.py                   # Direct and TTP-based molecular scoring
+│   │   ├── optimization.py              # RL and transfer-learning launch paths
+│   │   ├── results.py                   # Status, trajectories, alerts, candidates, CSV results
+│   │   ├── ttp.py                       # TTP create/update/get/list/delete
+│   │   ├── external.py                  # ADMET, RetroDMTA, profiler, assets, service discovery
+│   │   ├── rcsb.py                      # RCSB PDB search, metadata, and structure download
+│   │   ├── chembl.py                    # ChEMBL molecules, targets, assays, and activities
+│   │   ├── uniprot.py                   # Core UniProt target/sequence lookup
+│   │   ├── uniprot_features.py          # Extended UniProt feature annotations
+│   │   ├── interpro.py                  # InterPro domains + nucleic-acid annotations
+│   │   ├── pubchem.py                   # PubChem compound name -> canonical SMILES
+│   │   ├── structure_prep.py            # Validate/prepare structures and extract ligands
+│   │   ├── interaction_profiler.py      # Complex interfaces, sites, fragments, interactions
+│   │   ├── boltz_structure.py           # Structure-conditioned Boltz cofolding
+│   │   ├── synthesis.py                 # AiZynthFinder planning and availability tools
+│   │   └── generation.py                # Reinvent/LibInvent/LinkInvent/Mol2Mol campaigns
 │   ├── jobs/
-│   │   ├── manager.py              # JobManager: subprocess tracking, CSV parsing, diagnostics
-│   │   ├── toml_generator.py       # TOML generation (staged_learning + transfer_learning)
-│   │   └── _run_worker.py          # Subprocess entry point (registers plugins, runs reinvent)
+│   │   ├── manager.py                   # Serialized GPU jobs, persistence, monitoring
+│   │   ├── toml_generator.py            # Reinvent, LibInvent, LinkInvent, Mol2Mol, TL TOML
+│   │   └── _run_worker.py               # REINVENT subprocess entry point
 │   ├── ttp/
-│   │   ├── schema.py               # Pydantic models + validation
-│   │   ├── store.py                # JSON file persistence + version history
-│   │   └── mapper.py               # TTP -> REINVENT4 scorer config translation
+│   │   ├── schema.py                    # TTP + generation campaign contracts
+│   │   ├── store.py                     # JSON persistence and version history
+│   │   └── mapper.py                    # TTP -> scorer/generation configuration
+│   ├── _plugins/reinvent_plugins/components/
+│   │   └── comp_external_rest.py        # ExternalRESTScorer implementation
 │   └── pyproject.toml
-├── reinvent4_agent/                # CLI agent package (dd-agent, dd-coscientist)
-│   ├── cli.py                      # Entry points, arg parsing, interactive loop, /review
-│   ├── agent.py                    # Agentic loop, tool scoping, background job monitoring
-│   ├── coordinator.py              # Driver <-> Reviewer handoff protocol + campaign monitor
-│   ├── system_prompt.py            # MEDCHEM_KNOWLEDGE + Driver / Reviewer system prompts
-│   ├── mcp_client.py               # MCP stdio client wrapper
-│   ├── display.py                  # Rich formatting with per-agent attribution
-│   ├── backends/
-│   │   ├── anthropic_backend.py
-│   │   └── openai_backend.py
-│   └── pyproject.toml
-├── admet-predictor/                # ADMET consensus regression package (+ README, SERVICE.md)
-├── retrodmta-predictor/            # RetroDMTA per-target potency/ADME package
-├── interaction-profiler/           # Fragment taxonomy + protein-ligand interaction package
+├── reinvent4_agent/                     # Driver/Reviewer CLI (dd-agent, dd-coscientist)
+│   ├── cli.py
+│   ├── agent.py                         # Tool loop and background monitoring
+│   ├── coordinator.py                   # Driver/Reviewer handoff and campaign monitor
+│   ├── system_prompt.py                 # Medchem + operational tool guidance
+│   ├── mcp_client.py
+│   ├── display.py
+│   └── backends/                        # Anthropic and OpenAI-compatible backends
+├── admet-predictor/                     # Drug (17) + agro (25) endpoint ensembles
+├── retrodmta-predictor/                 # Legacy + Mpro/CHIKV/EV-A71/FatA target models
+├── interaction-profiler/                # Protein/fragment taxonomy and interface metrics
 ├── services/
-│   ├── env.sh                      # Environment template -- copy to env.local.sh
-│   ├── dd-agent/
-│   │   ├── Dockerfile              # ROCm + REINVENT4 + dd-mcp + dd-agent
-│   │   └── entrypoint.sh           # Timestamps captured (non-TTY) output
-│   ├── boltz2/                     # Cofolding + affinity   (Dockerfile, app.py, requirements)
-│   ├── posebusters/                # Pose validation        (Dockerfile, app.py, requirements)
-│   ├── admet-predictor/            # ADMET REST wrapper     (Dockerfile, app.py)
-│   ├── retrodmta-predictor/        # RetroDMTA REST wrapper (Dockerfile, app.py)
-│   ├── interaction-profiler/       # Interaction wrapper    (Dockerfile, app.py)
-│   ├── singularity/                # Apptainer stack -- no Docker daemon needed
-│   │   ├── README.md               # Full Apptainer guide
-│   │   ├── dd-agent.def            # GPU images, vendor-templated via build args
-│   │   ├── boltz.def
-│   │   ├── admet-predictor.def
-│   │   ├── posebusters.def         # CPU images, vendor-neutral
-│   │   ├── retrodmta-predictor.def
-│   │   ├── interaction-profiler.def
-│   │   ├── vendors.sh              # AMD/NVIDIA base image + torch index matrix
-│   │   ├── build.sh                # apptainer build --fakeroot driver
-│   │   ├── run.sh                  # start instances, health-gate, run agent, stop on exit
-│   │   └── reinvent4_mcp_config.singularity.yaml   # localhost service URLs
+│   ├── env.sh
+│   ├── dd-agent/                        # Agent image, pinned REINVENT4, compatibility patch
+│   ├── boltz2/                          # Cofolding, affinity, structure conditioning
+│   ├── posebusters/                     # Pose validation
+│   ├── admet-predictor/                 # ADMET REST service
+│   ├── retrodmta-predictor/             # RetroDMTA REST service
+│   ├── interaction-profiler/            # Interaction/interface REST service
+│   ├── structure-prep/                  # Structure preparation REST service + Compose overlay
+│   ├── synthesis-planner/               # AiZynthFinder routes, stock checks, async jobs
+│   ├── annotation/                      # Cached UniProt/InterPro annotation proxy
+│   ├── singularity/                     # Apptainer/Singularity definitions and runner
 │   └── slurm/
-│       ├── run_interactive.sh      # Agent-only interactive Docker run
-│       ├── agent.sbatch            # Batch job submission
-│       ├── setup.sh                # Bare-metal venv install (no containers)
-│       └── llm_tunnel_relay.py     # Docker bridge -> host loopback relay for the SSH tunnel
-├── docker-compose.yml              # 6-service compose stack
-├── reinvent4_mcp_config.yaml       # Process config (service URLs, RL defaults, storage paths)
-├── TENSORWAVE_INSTRUCTIONS.md      # SSH-tunnel recipe for reaching the AMD LLM gateway
-├── TESTING.md                      # Manual and scripted test scenarios
-├── tests/                          # ~316 unit tests (REINVENT4 imports mocked, no GPU needed)
-│   ├── test_scoring.py             # Native + TTP scoring paths
-│   ├── test_ttp.py                 # Schema, store, mapper
-│   ├── test_optimization.py        # Job manager, TOML gen, diagnostics, transfer learning
-│   ├── test_boltz_wrapper.py       # Boltz2 FastAPI app
-│   ├── test_posebusters_wrapper.py # PoseBusters FastAPI app
-│   ├── test_external_scoring.py    # ExternalRESTScorer + pipeline integration
-│   ├── test_agent_tool_repair.py   # Orphaned tool-call repair in the agent loop
-│   └── conftest.py
+│       ├── run_interactive.sh           # Canonical complete-stack interactive launcher
+│       ├── llm_tunnel_relay.py          # Docker bridge -> host reverse-tunnel relay
+│       ├── agent.sbatch
+│       └── setup.sh
+├── scripts/
+│   └── generate_admet_training_ranges.py # Endpoint p01–p99 response-domain metadata
+├── tests/                               # 525 integrated unit/contract tests
+│   ├── test_admet_model_sets.py
+│   ├── test_admet_response_domain.py
+│   ├── test_boltz_structure_conditioned.py
+│   ├── test_campaign_contracts.py
+│   ├── test_generation_campaign_runtime.py
+│   ├── test_generation_mapping.py
+│   ├── test_synthesis_mcp.py
+│   └── ...                              # Existing scoring, TTP, jobs, wrappers, agent tests
+├── docker-compose.yml                   # Integrated scoring/support-service stack
+├── docker-compose.tunnel.yml            # Optional AMD gateway reverse-tunnel overlay
+├── reinvent4_mcp_config.yaml
+├── TENSORWAVE_INSTRUCTIONS.md
+├── TESTING.md
+├── STACK_MANIFEST.json
 │
-│  # --- Gitignored: restore manually before building ---
-├── REINVENT4/                      # REINVENT4 source tree
-├── boltz2/                         # Boltz2 source
-├── posebusters/                    # PoseBusters source
-├── models/                         # ADMET + RetroDMTA weights (from the SharePoint zip)
-├── data/                           # Runtime state bind-mounted into the containers
-│                                   #   shared/ ttps/ jobs/ logs/ tb_logs/ agent_logs/
-└── services/env.local.sh           # Your keys and cluster-specific overrides
+│  # --- Gitignored runtime/build inputs ---
+├── REINVENT4/                           # Pinned source restored by run_interactive.sh
+├── boltz2/                              # Pinned source restored by run_interactive.sh
+├── models/                              # ADMET + RetroDMTA model bundle and checksums
+├── data/                                # Shared assets, TTPs, jobs, logs, caches
+└── services/env.local.sh                # Local credentials and cluster overrides
 ```
 
 ## Setup
@@ -678,18 +691,16 @@ A global turn and token budget guarantees termination. The terminal shows per-ag
 
 ## MCP Tools
 
-24 tools are exposed to the Driver. The 10 marked read-only are also available to the Reviewer.
+59 tools are exposed to the Driver. Tools marked read-only are also available to the Reviewer.
 
 | Tool | Read-only | Description |
 |------|:---------:|-------------|
 | `list_scoring_components` | ✓ | Discover all native REINVENT4 scoring components |
 | `list_available_models` | ✓ | Check which generative model priors are available |
 | `list_transforms` | ✓ | List score transform types (sigmoid, step, etc.) |
-| `list_external_services` | ✓ | Health-check the five external scoring services |
-| `list_shared_assets` | | List real files on `/shared` (structures, MSAs, cofold outputs) |
-| `fetch_target_info` | | Resolve a UniProt accession or free text to a protein sequence |
-| `fetch_compound` | | Resolve a compound name to a real SMILES via PubChem |
-| `score_molecules` | | Score SMILES with components directly or via a TTP |
+| `list_external_services` | ✓ | Discover and health-check configured scoring services |
+| `list_shared_assets` | ✓ | List real files on `/shared` (structures, MSAs, cofold outputs) |
+| `score_molecules` | | Score SMILES directly or through a TTP |
 | `predict_admet` | | ADMET consensus predictions with applicability-domain flags |
 | `predict_retrodmta` | | Per-target potency / ADME predictions |
 | `profile_interactions` | | Fragment taxonomy and protein-ligand interaction profiling |
@@ -698,32 +709,74 @@ A global turn and token budget guarantees termination. The terminal shows per-ag
 | `get_ttp` | ✓ | Retrieve a TTP by ID, optionally at a specific version |
 | `list_ttps` | ✓ | List all stored TTPs |
 | `delete_ttp` | | Delete a TTP and its version history |
-| `run_optimization` | | Launch an RL campaign with full TTP scoring |
+| `run_optimization` | | Launch a standard REINVENT or Mol2Mol RL campaign |
 | `get_optimization_status` | ✓ | Trajectories, per-component stats, convergence diagnostics |
 | `stop_optimization` | | Stop a running job and save a checkpoint |
 | `run_transfer_learning` | | Fine-tune a generative model on a SMILES dataset |
 | `get_top_candidates` | ✓ | Extract the best molecules from a run |
 | `read_results` | ✓ | Parse a REINVENT4 output CSV into summary statistics |
 | `list_jobs` | ✓ | List all tracked jobs and their states |
-| `get_job_alerts` | | Check running jobs for problems needing intervention |
+| `get_job_alerts` | ✓ | Check tracked jobs for actionable warnings |
+| `fetch_target_info` | ✓ | Resolve a UniProt accession or free text to a protein sequence |
+| `fetch_compound` | ✓ | Resolve a compound name to a real SMILES via PubChem |
+| `rcsb_search` | ✓ | Search RCSB PDB with structured queries and facets |
+| `rcsb_count` | ✓ | Count matching RCSB PDB entries |
+| `rcsb_get_entries` | ✓ | Retrieve enriched PDB entry/entity metadata |
+| `rcsb_fetch_files` | ✓ | Download selected PDB/mmCIF structures into `/shared` |
+| `search_chembl_molecules` | ✓ | Search ChEMBL molecules |
+| `get_chembl_molecule` | ✓ | Retrieve one ChEMBL molecule record |
+| `search_chembl_targets` | ✓ | Search ChEMBL biological targets |
+| `get_chembl_target` | ✓ | Retrieve one ChEMBL target record |
+| `search_chembl_activities` | ✓ | Query filtered ChEMBL bioactivities |
+| `fetch_all_activities` | ✓ | Fetch paginated activities for a target or assay |
+| `search_chembl_assays` | ✓ | Search ChEMBL assay records |
+| `get_chembl_mechanisms` | ✓ | Retrieve drug mechanism records |
+| `get_chembl_indications` | ✓ | Retrieve indication records |
+| `get_chembl_documents` | ✓ | Retrieve source publication metadata |
+| `search_chembl_similarity` | ✓ | Search ChEMBL by molecular similarity |
+| `search_chembl_substructure` | ✓ | Search ChEMBL by substructure |
+| `validate_structure` | ✓ | Inspect a PDB/mmCIF and propose a preparation profile |
+| `prepare_structure` | | Run the structure-preparation pipeline |
+| `get_preparation_status` | ✓ | Poll preparation status and retrieve artifact paths |
+| `extract_ligand_sdf` | ✓ | Extract a selected ligand into an SDF artifact |
+| `profile_complex_interaction` | ✓ | Profile protein-ligand or protein-protein interfaces |
+| `get_interaction_profiler_schema` | ✓ | Retrieve interaction-profiler response schemas |
+| `characterize_site_profile` | ✓ | Characterize pocket geometry and interaction features |
+| `plan_synthesis` | ✓ | Predict retrosynthetic routes with AiZynthFinder |
+| `check_building_block_availability` | ✓ | Query configured synthesis-stock availability |
+| `submit_synthesis_job` | | Submit an asynchronous retrosynthesis batch |
+| `get_synthesis_job_status` | ✓ | Poll an asynchronous synthesis job |
+| `list_generation_models` | ✓ | Discover Reinvent, LibInvent, LinkInvent, and Mol2Mol priors |
+| `validate_generation_campaign` | ✓ | Validate a generation campaign without launching |
+| `create_generation_campaign` | | Persist a generation-capable TTP |
+| `run_generation_campaign` | | Run Reinvent, LibInvent, LinkInvent, or Mol2Mol campaigns |
+| `predict_structure_conditioned` | | Cofold a ligand while conditioning on an input structure |
+| `fetch_uniprot_features` | ✓ | Retrieve detailed UniProt residue and sequence features |
+| `fetch_interpro_annotations` | ✓ | Retrieve InterPro family/domain annotations |
+| `fetch_nucleic_annotation` | ✓ | Retrieve nucleic-acid feature annotations |
+
+Generation campaigns support the RNN and PubChem-trained transformer variants of LibInvent and LinkInvent (`.libinvent_transformer`, `.linkinvent_transformer`) as well as seed-conditioned Mol2Mol models (`.m2m_*`). The campaign tools validate mode-specific scaffold, fragment, or seed inputs, generate the required auxiliary files, and expose one tracked submission/status/results lifecycle.
 
 ---
 
 ## External Scoring Services
 
-Five services wrap domain-specific tools behind a uniform REST API.
+Five external scoring services and three MCP support services provide the scientific runtime.
 
 | Service | Purpose | GPU | Host port |
 |---------|---------|:---:|-----------|
-| **Boltz2** | Protein-ligand cofolding + binding affinity prediction | Yes | 8091 |
+| **Boltz2** | Protein-ligand cofolding, affinity, and input-structure conditioning | Yes | 8091 |
 | **PoseBusters** | Geometric and chemical quality checks on predicted poses | No | 8082 |
-| **Interaction Profiler** | Fragment taxonomy + typed protein-ligand interactions | No | 8083 |
-| **ADMET Predictor** | Consensus ADMET regression with applicability domain | No | 8084 |
-| **RetroDMTA Predictor** | Per-target, per-window potency and ADME endpoints | No | 8085 |
+| **Interaction Profiler** | Fragment taxonomy, protein interfaces, sites, and typed interactions | No | 8083 |
+| **ADMET Predictor** | Drug/agro ADMET ensembles with chemical/response-domain flags | No | 8084 |
+| **RetroDMTA Predictor** | Legacy and FBDD target potency/ADME endpoints | No | 8085 |
+| **Synthesis Planner** | AiZynthFinder routes, stock availability, and async planning | No | 8086 |
+| **Structure Preparation** | PDB/mmCIF validation, repair, protonation, and ligand extraction | No | 8087 |
+| **Annotation Service** | Cached UniProt/InterPro annotations for profiler enrichment | No | 8088 |
 
 ### REST API contract
 
-Every service implements the same interface. `GET /health` returns `{"status": "ok"}` when ready, and `POST /score` takes:
+The five scoring services implement the shared scorer interface. `GET /health` reports readiness, and `POST /score` takes:
 
 ```json
 { "smiles": ["CCO", "c1ccccc1"], "params": { } }
@@ -739,7 +792,7 @@ returning:
 - `metadata` — per-molecule detail (sub-scores, confidence, per-check booleans), as lists aligned to `smiles`.
 - `artifacts` — file references produced by this service, consumed by downstream services.
 
-ADMET, RetroDMTA, and the Interaction Profiler additionally expose richer out-of-band endpoints (`/predict`, `/predict_csv`, `/targets`, `/analyze`, `/profile`, `/schema`) that the agent calls directly through `predict_admet`, `predict_retrodmta`, and `profile_interactions`.
+ADMET, RetroDMTA, and the Interaction Profiler additionally expose richer out-of-band prediction/profile endpoints. Structure Preparation, Synthesis Planner, and Annotation are MCP support services with task-specific validation, job, preparation, route, availability, and annotation endpoints rather than REINVENT scalar-scoring contracts.
 
 ### How the scoring pipeline fits together
 
@@ -757,6 +810,8 @@ When a TTP includes external objectives:
 ### Boltz2
 
 Wraps the `boltz predict` CLI. For each batch it generates one Boltz YAML per molecule, runs prediction as a subprocess, then parses affinity JSONs, confidence JSONs, and structure files from the output directory.
+
+`predict_structure_conditioned` adds the prepared protein structure as a Boltz template and places the ligand while preserving the selected receptor chain geometry. It accepts `/shared` PDB/mmCIF paths from the Structure Preparation service, optional template-chain mapping and SHA-256 verification, soft or forced backbone conditioning, multiple diffusion samples ranked by confidence, and optional PoseBusters validation of the best result.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -784,7 +839,7 @@ Validates predicted ligand poses against geometric and chemical checks (bond len
 
 ### Interaction Profiler
 
-Builds a hierarchical medchem fragment taxonomy from SMILES, and — when a structure is supplied — detects typed protein-ligand interactions (H-bonds, hydrophobic contacts, π-stacking, ionic, halogen, metal) grouped into `(fragment, residue, interaction)` triples. `POST /score` returns the interaction count for a chosen family, so it can be chained after a structure producer as an RL objective.
+Builds a hierarchical medchem fragment taxonomy from SMILES and profiles prepared complexes in ligand-target, binder-target, or generalized biomolecular-interface modes. Structure-aware analysis includes typed interactions (H-bonds, hydrophobic, π-stacking, ionic, halogen, metal), `(fragment, residue, interaction)` triples, site characterization, interface metrics, ligand strain/efficiency, secondary structure, and UniProt/InterPro enrichment. `POST /score` still returns an interaction-family count for use after a structure-producing RL objective.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -793,22 +848,36 @@ Builds a hierarchical medchem fragment taxonomy from SMILES, and — when a stru
 | `ph` | `7.4` | Protonation pH |
 | `radius` | `8.0` | Pocket crop radius (Å) |
 
+### Structure Preparation
+
+Validates raw PDB/mmCIF inputs before any cofolding or interaction analysis, inventories chains/ligands/additives/missing residues, and proposes a preparation profile. Asynchronous preparation can curate entities, resolve alternate locations, repair atoms, protonate with PDB2PQR/PROPKA, parameterize ligands, optionally minimize, and emit prepared complexes, receptors, ligand SDFs, FASTA sequences, and provenance under `/shared`.
+
+### Synthesis Planner
+
+Wraps AiZynthFinder for synchronous route prediction, asynchronous batch planning, and building-block availability checks. `plan_synthesis` returns ranked reaction trees and leaf reactants; `submit_synthesis_job` / `get_synthesis_job_status` handle larger batches. Stock-dependent conclusions are reported separately so an unavailable stock catalog does not masquerade as verified purchasability.
+
+### Annotation and Data Fetchers
+
+RCSB PDB and ChEMBL tools provide structures, targets, assays, activities, mechanisms, indications, and similarity/substructure search. UniProt, InterPro, PubChem, and nucleic-acid annotation tools provide canonical sequences, residue/domain features, compound SMILES, and biological context. The annotation service caches UniProt/InterPro responses for reuse by the Interaction Profiler.
+
 ### ADMET Predictor
 
-Consensus regression over XGBoost, Chemprop-MTL, and CheMeleon-MTL for seven endpoints — `logp`, `logd`, `aqueous_solubility`, `kinetic_solubility`, `caco2_permeability`, `efflux_mdck`, `efflux_caco2` — reported as mean ± std on standardized SMILES, with a double applicability-domain flag. `POST /score` takes `endpoint` (default `"logp"`) and returns the ensemble mean per molecule, with `std` and `ad_pass` in metadata. Weights come from `models/admet/`.
+Manifest-driven XGBoost + Chemprop-MTL ensembles with selectable `model_set="drug"` (17 endpoints) or `model_set="agro"` (25 endpoints). The expanded endpoints cover physicochemical properties, distribution/permeability and efflux, CYP/hERG off-target liabilities, microsomal/plasma metabolism and elimination, protein binding, and agrochemical bioaccumulation, environmental fate, volatility, and acute toxicity.
+
+Each result reports accepted model members, consensus mean ± std, Avalon chemical-space applicability, physical-bound member exclusions, and a per-endpoint p01–p99 training-response-domain flag. `POST /score` returns the selected endpoint for REINVENT objectives; `/predict` returns the complete self-describing profile. Weights and endpoint manifests come from `models/admet/{drug,agro}/`.
 
 ### RetroDMTA Predictor
 
-Per-target, per-temporal-window project-endpoint predictions using the same three-model ensemble. Targets are FXA (pKi, logD, logS), MMP8 (pIC50), PPARD (pEC50), and RENIN (pIC50); `GET /targets` lists them.
+Per-target, per-temporal-window project predictions for the legacy `FXA`, `MMP8`, `PPARD`, and `RENIN` models plus the new `Mpro`, `CHIKV_Mac`, `EV-A71_2A`, and `FatA` FBDD targets. Legacy bundles retain their available XGBoost/Chemprop/CheMeleon members; current FBDD bundles use their exported XGBoost endpoints and ensemble fallback policy. `GET /targets` exposes the exact endpoint, window, method, unit, and model availability contract for each target.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `target` | (required) | `FXA`, `MMP8`, `PPARD`, or `RENIN` |
-| `endpoint` | first endpoint of the target | e.g. `FXA_pKi`; required when a target has several |
+| `target` | (required) | `FXA`, `MMP8`, `PPARD`, `RENIN`, `Mpro`, `CHIKV_Mac`, `EV-A71_2A`, or `FatA` |
+| `endpoint` | first endpoint of the target | Target-specific pKi/pIC50/pEC50/pKd or auxiliary endpoint |
 | `window` | `"latest"` | Temporal window index, or `"latest"` |
 | `method` | `"ensemble"` | `ensemble`, `xgboost`, `chemprop`, or `chemeleon` |
 
-Weights come from `models/retrodmta/`. Unlike ADMET, no applicability domain is reported.
+Weights and target/window manifests come from `models/retrodmta/`. Unlike ADMET, no applicability domain is currently reported.
 
 ### Service configuration
 

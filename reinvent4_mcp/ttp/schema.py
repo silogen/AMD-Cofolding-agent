@@ -283,7 +283,8 @@ class ScoringObjective(BaseModel):
         default=None,
         description=(
             "Service-specific parameters forwarded in the request body. "
-            "admet: {'endpoint': 'logp'} (one objective per endpoint). "
+            "admet: {'model_set': 'drug'|'agro', 'endpoint': 'logp'} "
+            "(one objective per endpoint). "
             "retrodmta: {'target': 'FXA', 'endpoint': 'FXA_pKi', 'window': 'latest', 'method': 'ensemble'}. "
             "interaction_profiler: {'interaction_type': 'hbond'} (counts that interaction "
             "type; needs a structure, so chain after a producer like boltz via depends_on)."
@@ -383,6 +384,7 @@ class ScoringSection(BaseModel):
     @model_validator(mode="after")
     def _validate_depends_on(self) -> "ScoringSection":
         objective_names = {o.name for o in self.objectives}
+        dep_of: dict[str, str] = {}
         for obj in self.objectives:
             if obj.depends_on and obj.depends_on not in objective_names:
                 raise ValueError(
@@ -394,6 +396,24 @@ class ScoringSection(BaseModel):
                 raise ValueError(
                     f"Objective '{obj.name}' cannot depend on itself"
                 )
+            if obj.depends_on:
+                dep_of[obj.name] = obj.depends_on
+
+        # Detect cycles in the depends_on graph (e.g. A->B->A): without a cycle
+        # check the pipeline has no valid starting point. Each objective has at
+        # most one dependency, so follow each chain and flag any revisit.
+        for start in dep_of:
+            seen: set[str] = set()
+            node: str | None = start
+            while node in dep_of:
+                if node in seen:
+                    chain = " -> ".join([*seen, node])
+                    raise ValueError(
+                        f"Circular depends_on detected involving objective "
+                        f"'{start}' (cycle through: {chain})"
+                    )
+                seen.add(node)
+                node = dep_of[node]
         return self
 
 
@@ -483,6 +503,13 @@ class TTP(BaseModel):
         default=None,
         description="Structural constraints (SMARTS filters, etc.)",
     )
+    generation: Optional[GenerationSection] = Field(
+        default=None,
+        description=(
+            "Generation campaign configuration (mode, model, batch size, etc.). "
+            "None = use existing run_optimization defaults (backward compat)."
+        ),
+    )
 
     @field_validator("id")
     @classmethod
@@ -553,3 +580,340 @@ class TTP(BaseModel):
             for o in self.scoring.objectives
             if o.type == "external"
         ]
+
+
+# ===========================================================================
+# Generation contract — block 08 additions
+# ---------------------------------------------------------------------------
+# All models below are ADDITIVE. The TTP class above gains one new optional
+# field (``generation``) which defaults to ``None`` so every existing TTP
+# continues to load and validate without changes.
+# ===========================================================================
+
+from enum import Enum  # noqa: E402  (after existing imports)
+
+
+# ---------------------------------------------------------------------------
+# SMILES helper validators (module-level so generation.py can import them)
+# ---------------------------------------------------------------------------
+
+def _validate_linkinvent_fragment(smiles: str, frag_idx: int) -> list[str]:
+    """Return a list of error strings (empty = valid) for one LinkInvent fragment.
+
+    Checks:
+    - RDKit can parse the SMILES.
+    - Exactly one attachment point atom (atomic num 0) is present.
+    - That atom carries a map number (e.g. [*:1], not bare [*]).
+    """
+    errors: list[str] = []
+    try:
+        from rdkit import Chem  # noqa: PLC0415
+    except ImportError:
+        # RDKit unavailable — the structural checks below need it, so skip them
+        # rather than report a false "cannot parse" error (matches
+        # _validate_seed_smiles, which treats a missing RDKit as "cannot check").
+        return errors
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return [f"Fragment {frag_idx}: cannot parse SMILES {smiles!r}"]
+
+    dummy_atoms = [a for a in mol.GetAtoms() if a.GetAtomicNum() == 0]
+    if len(dummy_atoms) != 1:
+        errors.append(
+            f"Fragment {frag_idx}: must have exactly 1 attachment point [*:n], "
+            f"found {len(dummy_atoms)}"
+        )
+    map_nums = [a.GetAtomMapNum() for a in dummy_atoms]
+    if any(m == 0 for m in map_nums):
+        errors.append(
+            f"Fragment {frag_idx}: attachment atom must carry a map number, "
+            "e.g. [*:1] not [*]"
+        )
+    return errors
+
+
+def _validate_libinvent_scaffold(smiles: str) -> list[str]:
+    """Return a list of error strings (empty = valid) for a LibInvent scaffold.
+
+    Checks:
+    - RDKit can parse the SMILES.
+    - At least one attachment point atom (atomic num 0) is present.
+    - All attachment atoms carry map numbers.
+    - Map numbers are unique (no duplicates).
+    """
+    try:
+        from rdkit import Chem  # noqa: PLC0415
+    except ImportError:
+        # RDKit unavailable — skip structural checks rather than report a false
+        # parse error (consistent with _validate_seed_smiles / linkinvent).
+        return []
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return [f"Scaffold: cannot parse SMILES {smiles!r}"]
+
+    dummy_atoms = [a for a in mol.GetAtoms() if a.GetAtomicNum() == 0]
+    if not dummy_atoms:
+        return [
+            "Scaffold: no attachment points [*:n] found — LibInvent needs "
+            "at least one R-group position"
+        ]
+
+    map_nums = [a.GetAtomMapNum() for a in dummy_atoms]
+    errors: list[str] = []
+    if any(m == 0 for m in map_nums):
+        errors.append(
+            "Scaffold: all attachment points must carry map numbers, "
+            "e.g. [*:1], [*:2] — not bare [*]"
+        )
+    if len(set(map_nums)) != len(map_nums):
+        errors.append(
+            f"Scaffold: duplicate attachment-point map numbers {map_nums}"
+        )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Generation models
+# ---------------------------------------------------------------------------
+
+class GenerationMode(str, Enum):
+    """Supported REINVENT generation algorithms."""
+    reinvent   = "reinvent"
+    libinvent  = "libinvent"
+    linkinvent = "linkinvent"
+    mol2mol    = "mol2mol"
+
+
+class LinkInventInput(BaseModel):
+    """Fragment pair (and optional linker constraints) for LinkInvent.
+
+    Each fragment SMILES must contain exactly one attachment-point atom
+    ([*:n]) with a unique map number across the pair.  The SMILES are
+    validated by RDKit at model-construction time.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    fragments: list[str] = Field(
+        description=(
+            "Exactly 2+ fragment SMILES, each with one [*:n] attachment point "
+            "and distinct map numbers, e.g. ['[*:1]CC', '[*:2]OC']."
+        ),
+    )
+    allowed_atom_types: Optional[list[str]] = Field(
+        default=None,
+        description="Atom symbols allowed in the generated linker, e.g. ['C','N','O','S'].",
+    )
+    max_linker_length: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of heavy atoms in the linker.",
+    )
+    min_linker_length: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Minimum number of heavy atoms in the linker.",
+    )
+
+    @field_validator("fragments")
+    @classmethod
+    def _validate_fragments(cls, v: list[str]) -> list[str]:
+        if len(v) < 2:
+            raise ValueError(
+                "linkinvent requires at least 2 fragment SMILES "
+                "(one per side of the linker)."
+            )
+        errors: list[str] = []
+        map_nums_seen: set[int] = set()
+
+        for i, smi in enumerate(v):
+            frag_errors = _validate_linkinvent_fragment(smi, i)
+            errors.extend(frag_errors)
+
+            # Cross-fragment map-number uniqueness
+            try:
+                from rdkit import Chem  # noqa: PLC0415
+                mol = Chem.MolFromSmiles(smi)
+            except ImportError:
+                mol = None
+            if mol is not None:
+                for atom in mol.GetAtoms():
+                    if atom.GetAtomicNum() == 0 and atom.GetAtomMapNum():
+                        mn = atom.GetAtomMapNum()
+                        if mn in map_nums_seen:
+                            errors.append(
+                                f"Fragment {i}: map number :{mn} is already used "
+                                "in another fragment — each must be unique"
+                            )
+                        map_nums_seen.add(mn)
+
+        if errors:
+            raise ValueError("\n".join(errors))
+        return v
+
+
+class LibInventInput(BaseModel):
+    """Scaffold (and optional R-group constraints) for LibInvent.
+
+    The scaffold SMILES must contain at least one attachment-point atom
+    ([*:n]) with a unique map number per position.  Validated by RDKit
+    at model-construction time.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    scaffold: str = Field(
+        description=(
+            "Scaffold SMILES with [*:n] attachment points at every R-group "
+            "position, e.g. 'c1ccc([*:1])cc1[*:2]'."
+        ),
+    )
+    decoration_positions: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "Map numbers to decorate (subset of attachment points in scaffold). "
+            "None = decorate all positions."
+        ),
+    )
+
+    @field_validator("scaffold")
+    @classmethod
+    def _validate_scaffold(cls, v: str) -> str:
+        errors = _validate_libinvent_scaffold(v)
+        if errors:
+            raise ValueError("\n".join(errors))
+        return v
+
+
+class Mol2MolInput(BaseModel):
+    """Seed molecules for Mol2Mol lead optimization."""
+
+    model_config = {"extra": "forbid"}
+
+    seed_smiles: list[str] = Field(
+        min_length=1,
+        max_length=4096,
+        description=(
+            "One or more valid seed SMILES that Mol2Mol conditions generation on."
+        ),
+    )
+
+    @field_validator("seed_smiles")
+    @classmethod
+    def _validate_seed_smiles(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        invalid: list[str] = []
+        try:
+            from rdkit import Chem  # noqa: PLC0415
+        except ImportError:
+            Chem = None  # type: ignore[assignment]
+
+        for value in values:
+            smiles = (value or "").strip()
+            if not smiles or (Chem is not None and Chem.MolFromSmiles(smiles) is None):
+                invalid.append(value)
+            else:
+                cleaned.append(smiles)
+
+        if invalid:
+            raise ValueError(f"Invalid Mol2Mol seed SMILES: {invalid}")
+        return cleaned
+
+
+class GenerationSection(BaseModel):
+    """Explicit campaign generation contract.
+
+    Attached to a TTP to specify which REINVENT algorithm to use and
+    how to configure the generation job.  All fields have safe defaults
+    so a minimal ``GenerationSection(mode='reinvent')`` is valid.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    mode: GenerationMode = Field(
+        default=GenerationMode.reinvent,
+        description=(
+            "Generation algorithm: 'reinvent' | 'libinvent' | 'linkinvent' | "
+            "'mol2mol'."
+        ),
+    )
+    model: str = Field(
+        default=".reinvent",
+        description=(
+            "Prior/model registry key such as '.reinvent', '.libinvent', "
+            "'.linkinvent', or '.m2m_medium'; alternatively a host-specific "
+            "model path. Resolved via the model manifest."
+        ),
+    )
+    batch_size: int = Field(
+        default=128, ge=1, le=4096,
+        description="Number of molecules generated per step.",
+    )
+    n_steps: int = Field(
+        default=100, ge=1,
+        description="Total number of RL steps.",
+    )
+    checkpoint_every_n: int = Field(
+        default=50, ge=1,
+        description="Save a checkpoint every N steps.",
+    )
+    seed: Optional[int] = Field(
+        default=None,
+        description="Random seed for reproducibility.  None = non-deterministic.",
+    )
+    device: str = Field(
+        default="cuda",
+        description="Compute device: 'cuda' or 'cpu'.",
+    )
+
+    # Mode-specific inputs — validated against mode before job launch
+    linkinvent_input: Optional[LinkInventInput] = Field(
+        default=None,
+        description="Required for mode='linkinvent'.",
+    )
+    libinvent_input: Optional[LibInventInput] = Field(
+        default=None,
+        description="Required for mode='libinvent'.",
+    )
+    mol2mol_input: Optional[Mol2MolInput] = Field(
+        default=None,
+        description="Required for mode='mol2mol'.",
+    )
+
+    # Design-context artifact references
+    target_artifact_ids: list[str] = Field(
+        default_factory=list,
+        description="Campaign-level target record artifact IDs.",
+    )
+    prepared_structure_artifact_ids: list[str] = Field(
+        default_factory=list,
+        description="Prepared structure artifact IDs (from structure preparator).",
+    )
+    site_artifact_ids: list[str] = Field(
+        default_factory=list,
+        description="Binding-site or interface artifact IDs.",
+    )
+
+    @model_validator(mode="after")
+    def _check_mode_inputs(self) -> "GenerationSection":
+        if self.mode == GenerationMode.linkinvent:
+            if self.linkinvent_input is None:
+                raise ValueError(
+                    "linkinvent mode requires linkinvent_input "
+                    "(fragment SMILES with attachment points)."
+                )
+        if self.mode == GenerationMode.libinvent:
+            if self.libinvent_input is None:
+                raise ValueError(
+                    "libinvent mode requires libinvent_input "
+                    "(scaffold SMILES with [*:n] attachment points)."
+                )
+        if self.mode == GenerationMode.mol2mol:
+            if self.mol2mol_input is None:
+                raise ValueError(
+                    "mol2mol mode requires mol2mol_input "
+                    "(one or more seed SMILES)."
+                )
+        return self

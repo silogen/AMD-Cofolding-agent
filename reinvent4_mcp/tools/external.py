@@ -199,11 +199,14 @@ def list_external_services() -> dict[str, Any]:
 
         # Surface the required selector(s) so the agent authors valid calls.
         if name == "admet":
-            entry["selector"] = "endpoint"
+            entry["selector"] = "model_set + endpoint"
             entry["endpoints"] = health.get("endpoints", [])
+            entry["default_model_set"] = health.get("default_model_set", "drug")
+            entry["model_sets"] = health.get("model_sets", {})
             entry["usage"] = (
-                "Direct: predict_admet(smiles, endpoints=[...]). "
-                "RL objective: service_params={'endpoint': '<one of endpoints>'}."
+                "Direct: predict_admet(smiles, model_set='drug'|'agro', "
+                "endpoints=[...]). RL objective: "
+                "service_params={'model_set': '<set>', 'endpoint': '<name>'}."
             )
         elif name == "retrodmta":
             entry["selector"] = "target (+ optional endpoint)"
@@ -239,18 +242,25 @@ def list_external_services() -> dict[str, Any]:
 def predict_admet(
     smiles: list[str],
     endpoints: Optional[list[str]] = None,
+    model_set: str = "drug",
     batch_size: Optional[int] = None,
 ) -> dict[str, Any]:
     """Predict ADMET properties for a list of SMILES (direct, out-of-band).
 
     Calls the ADMET service ``/predict`` (all endpoints), then filters to the
-    requested ``endpoints`` if given. Returns per-molecule mean/std plus the
-    applicability-domain flag. Use this to answer property questions directly;
-    for RL scoring use a TTP external objective instead.
+    requested ``endpoints`` if given. Returns per-molecule mean/std, accepted
+    and physically excluded model members, the chemical-space applicability
+    domain, and each endpoint's p01-p99 training-response domain flag. Use this
+    to answer property questions directly; for RL scoring use a TTP external
+    objective instead.
     """
 
     base = _base_url(_get_service_url("admet"))
-    payload: dict[str, Any] = {"smiles": smiles, "format": "records"}
+    payload: dict[str, Any] = {
+        "smiles": smiles,
+        "model_set": model_set,
+        "format": "records",
+    }
     if batch_size:
         payload["batch_size"] = batch_size
     r = requests.post(f"{base}/predict", json=payload, timeout=_TIMEOUT)
@@ -263,7 +273,13 @@ def predict_admet(
             preds = rec.get("predictions", {})
             rec["predictions"] = {k: v for k, v in preds.items() if k in wanted}
 
-    return {"service": "admet", "endpoints": endpoints, "n": len(smiles), "results": records}
+    return {
+        "service": "admet",
+        "model_set": model_set,
+        "endpoints": endpoints,
+        "n": len(smiles),
+        "results": records,
+    }
 
 
 def predict_retrodmta(
