@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dd-agentic-config
+data:
+  REINVENT4_AGENT_BACKEND: openai
+  REINVENT4_AGENT_MODEL: "Qwen/Qwen3-32B-FP8"
+  REINVENT4_AGENT_BASE_URL: http://dd-agentic-aim/v1
+  REINVENT4_AGENT_NO_VERIFY_SSL: "false"
+  REINVENT4_AGENT_MULTI_AGENT: "true"
+  REINVENT4_AGENT_LOG_DIR: /logs
+  reinvent4_mcp_config.yaml: |
+    reinvent:
+      device: "cuda:0"
+      batch_size: 16
+      sigma: 128
+      learning_rate: 0.0001
+      unique_sequences: true
+      randomize_smiles: true
+      default_model: ".reinvent"
+      diversity_filter:
+        type: "IdenticalMurckoScaffold"
+        bucket_size: 25
+        minscore: 0.4
+
+    scoring:
+      aggregation: "geometric_mean"
+      pre_scoring:
+        enabled: true
+        components:
+          qed: true
+          molecular_weight: true
+          hbond_donors: true
+          hbond_acceptors: true
+          slogp: true
+          num_rot_bond: true
+      boltz:
+        enabled: true
+        service_url: "http://127.0.0.1:8091/score"
+        recycling_steps: 3
+        diffusion_samples: 1
+        sampling_steps_affinity: 200
+        affinity_mode: "pred_value"
+        cache_dir: "/cache"
+        use_msa_server: false
+        msa_server_url: "https://api.colabfold.com"
+      posebusters:
+        enabled: true
+        service_url: "http://127.0.0.1:8082/score"
+        mode: "dock"
+      admet:
+        enabled: true
+        service_url: "http://127.0.0.1:8084/score"
+      retrodmta:
+        enabled: true
+        service_url: "http://127.0.0.1:8085/score"
+        method: "ensemble"
+        window: "latest"
+      interaction_profiler:
+        enabled: true
+        service_url: "http://127.0.0.1:8083/score"
+        interaction_type: "all"
+        radius: 8.0
+        ph: 7.4
+
+    jobs:
+      working_dir: "/data/reinvent4_mcp/jobs"
+      max_concurrent_jobs: 2
+      checkpoint_on_stop: true
+
+    ttp:
+      storage_dir: "/root/.reinvent4_mcp/ttps"
+
+    logging:
+      level: "info"
+      tb_logdir: "/data/reinvent4_mcp/tb_logs"
+      log_dir: "/data/reinvent4_mcp/logs"

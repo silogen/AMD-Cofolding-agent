@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -64,6 +65,31 @@ _GATEWAY_OPENAI_PATH = "/openai/v1"
 
 #: Azure OpenAI resources, which are always addressed by deployment.
 _AZURE_HOST_SUFFIX = ".openai.azure.com"
+
+#: Token Mistral models emit ahead of a tool call.  It reaches the client
+#: only when the server's own tool-call parser gave up on the output:
+#: vLLM's ``mistral`` parser fails on Mistral Large 3 ("Error in
+#: extracting tool call from response") and returns the block as content.
+_MISTRAL_BOT_TOKEN = "[TOOL_CALLS]"
+
+#: Separates the tool name from its arguments on tokenizer v13.  Servers
+#: that decode without special tokens drop it, so treat it as optional.
+_MISTRAL_ARGS_TOKEN = "[ARGS]"
+
+#: Mistral validates tool-call ids as exactly nine alphanumerics and
+#: rejects the whole conversation otherwise, so ids for recovered calls
+#: have to match that shape rather than the usual ``call_*``.
+_MISTRAL_TOOL_CALL_ID_LEN = 9
+
+#: vLLM decodes tool-call arguments from the JSON text OpenAI clients send
+#: into a Python object before it renders the chat template, because that
+#: is what tool-use templates are expected to want.  DeepSeek-V3.1's own
+#: template instead concatenates the value straight onto a string, so the
+#: render raises and the whole conversation comes back as HTTP 400 as soon
+#: as the history holds one assistant tool call.
+_TEMPLATE_CONCAT_RE = re.compile(
+    r'can only concatenate str \(not "(?:dict|list|int|float|bool)"\) to str'
+)
 
 
 class OpenAIBackend(LLMBackend):
@@ -169,6 +195,9 @@ class OpenAIBackend(LLMBackend):
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]
+        # Set once an endpoint rejects a history that holds a tool call --
+        # see _TEMPLATE_CONCAT_RE.
+        self._quote_tool_arguments = False
 
     # ------------------------------------------------------------------
     # LLMBackend interface
@@ -178,26 +207,31 @@ class OpenAIBackend(LLMBackend):
         self,
         tools: list[dict[str, Any]],
         max_tokens: int,
+        *,
+        force_tool_use: bool = False,
     ) -> ChatResult:
         self.repair_dangling_tool_use()
         openai_tools = self._convert_tools(tools)
 
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": self._messages,
+            "messages": self._history_messages(),
             self._token_param: self._token_cap(max_tokens),
         }
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
         if openai_tools:
             kwargs["tools"] = openai_tools
-            kwargs["tool_choice"] = "auto"
+            # DeepSeek-V3.1 (and some other OpenAI-compatible servers)
+            # ignore tool_choice=auto and print a fake call as markdown.
+            # Those calls are recovered from the message text. Opt in to
+            # tool_choice=required only when the caller sets force_tool_use.
+            kwargs["tool_choice"] = "required" if force_tool_use else "auto"
 
         try:
             response = self._request(kwargs)
         except openai.BadRequestError as exc:
-            swapped = self._swap_token_param(exc)
-            if swapped is None:
+            if not self._adapt_to_rejection(exc, kwargs):
                 raise EndpointError(
                     rejected_request_report(
                         exc,
@@ -205,8 +239,6 @@ class OpenAIBackend(LLMBackend):
                         hints=self._route_hints(),
                     )
                 ) from exc
-            old, new = swapped
-            kwargs[new] = self._token_cap(kwargs.pop(old))
             try:
                 response = self._request(kwargs)
             except openai.BadRequestError as retry_exc:
@@ -223,18 +255,24 @@ class OpenAIBackend(LLMBackend):
 
         tool_calls: list[ToolCall] = []
         for tc in message.tool_calls or []:
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Malformed arguments for tool %s: %r",
-                    tc.function.name,
-                    tc.function.arguments,
-                )
-                args = {}
+            args = _parse_tool_arguments(tc.function.arguments)
             tool_calls.append(
                 ToolCall(id=tc.id, name=tc.function.name, arguments=args)
             )
+
+        text = _message_content_for_history(message.content)
+        recovered = False
+        if not tool_calls and _MISTRAL_BOT_TOKEN in (text or ""):
+            tool_calls, text = _recover_text_tool_calls(text or "")
+            recovered = bool(tool_calls)
+            if recovered:
+                logger.warning(
+                    "%s returned %d tool call(s) as text; the endpoint's "
+                    "tool-call parser did not convert them. Reading them "
+                    "from the message content.",
+                    self.model,
+                    len(tool_calls),
+                )
 
         # Go by the tool calls themselves rather than the finish reason:
         # proxies in front of a model do not all report "tool_calls", and
@@ -256,7 +294,7 @@ class OpenAIBackend(LLMBackend):
         # the agent loop would end the turn with nothing to show.  Leave
         # it out of the history too: a content-less assistant message
         # carries no information and some endpoints reject it.
-        if not (message.content or "").strip() and not tool_calls:
+        if not (text or "").strip() and not tool_calls:
             raise EndpointError(
                 self._empty_response_report(
                     choice.finish_reason,
@@ -274,10 +312,13 @@ class OpenAIBackend(LLMBackend):
                 kwargs.get(self._token_param),
             )
 
-        self._messages.append(_message_to_dict(message))
+        if recovered:
+            self._messages.append(_recovered_message_dict(text, tool_calls))
+        else:
+            self._messages.append(_message_to_dict(message))
 
         return ChatResult(
-            text=message.content,
+            text=text,
             tool_calls=tool_calls,
             thinking=None,
             needs_tool_response=needs_tool,
@@ -295,7 +336,7 @@ class OpenAIBackend(LLMBackend):
                 {
                     "role": "tool",
                     "tool_call_id": r.tool_call_id,
-                    "content": r.content,
+                    "content": _message_content_for_history(r.content) or "",
                 }
             )
 
@@ -347,6 +388,39 @@ class OpenAIBackend(LLMBackend):
             "path was read as a deployment name — check "
             "REINVENT4_AGENT_BASE_URL.",
         ]
+
+    def _history_messages(self) -> list[dict[str, Any]]:
+        """The conversation in the shape this endpoint has accepted so far."""
+        return [
+            _history_message(m, quote_tool_arguments=self._quote_tool_arguments)
+            for m in self._messages
+        ]
+
+    def _adapt_to_rejection(
+        self,
+        exc: openai.BadRequestError,
+        kwargs: dict[str, Any],
+    ) -> bool:
+        """Rewrite ``kwargs`` for a retry, or report that nothing applies."""
+
+        swapped = self._swap_token_param(exc)
+        if swapped is not None:
+            old, new = swapped
+            kwargs[new] = self._token_cap(kwargs.pop(old))
+            return True
+
+        if self._quote_tool_arguments or not _TEMPLATE_CONCAT_RE.search(str(exc)):
+            return False
+
+        logger.info(
+            "%s rejected a history containing a tool call because its chat "
+            "template concatenates the decoded arguments; sending them as a "
+            "JSON string instead.",
+            self._endpoint_label(),
+        )
+        self._quote_tool_arguments = True
+        kwargs["messages"] = self._history_messages()
+        return True
 
     def _request(self, kwargs: dict[str, Any]) -> Any:
         """Send one request, translating transport errors into hints."""
@@ -498,6 +572,114 @@ class OpenAIBackend(LLMBackend):
         ]
 
 
+def _recover_text_tool_calls(content: str) -> tuple[list[ToolCall], str | None]:
+    """Tool calls a server left in message text, plus the prose around them.
+
+    A server whose tool-call parser fails returns the model's raw
+    ``[TOOL_CALLS]`` block as content, so the turn arrives with no
+    structured calls and the agent has nothing to run.  The call itself
+    is well formed in that text, so read it instead of dropping the turn.
+    Both Mistral layouts are accepted::
+
+        [TOOL_CALLS]name{"arg": 1}          # tokenizer v11+
+        [TOOL_CALLS][{"name": ..., "arguments": {...}}]   # earlier
+
+    Returns no calls when nothing parses, leaving the text untouched for
+    the caller to show as-is.
+    """
+    prose, marker, rest = content.partition(_MISTRAL_BOT_TOKEN)
+    if not marker:
+        return [], content
+    tool_calls: list[ToolCall] = []
+    for chunk in rest.split(_MISTRAL_BOT_TOKEN):
+        tool_calls.extend(_chunk_tool_calls(chunk))
+    if not tool_calls:
+        return [], content
+    return tool_calls, prose.strip() or None
+
+
+def _chunk_tool_calls(chunk: str) -> list[ToolCall]:
+    """Tool calls from one ``[TOOL_CALLS]``-delimited chunk of text."""
+    decoded = _decode_json_prefix(chunk)
+    if decoded is not None:
+        entries = decoded if isinstance(decoded, list) else [decoded]
+        return [
+            call
+            for entry in entries
+            if (call := _entry_tool_call(entry)) is not None
+        ]
+
+    name, brace, arguments = chunk.partition("{")
+    if not brace:
+        return []
+    name = name.replace(_MISTRAL_ARGS_TOKEN, "").strip()
+    decoded = _decode_json_prefix(brace + arguments)
+    if not name or not isinstance(decoded, dict):
+        return []
+    return [ToolCall(id=_tool_call_id(), name=name, arguments=decoded)]
+
+
+def _entry_tool_call(entry: Any) -> ToolCall | None:
+    """One ``{"name": ..., "arguments": ...}`` entry as a tool call."""
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name")
+    arguments = entry.get("arguments")
+    if isinstance(arguments, str):
+        arguments = _decode_json_prefix(arguments)
+    if not isinstance(name, str) or not name or not isinstance(arguments, dict):
+        return None
+    return ToolCall(id=_tool_call_id(), name=name, arguments=arguments)
+
+
+def _decode_json_prefix(text: str) -> Any | None:
+    """The JSON object or array ``text`` starts with, else ``None``.
+
+    Decoding only the prefix keeps whatever follows the arguments — a
+    second call, a trailing sentence — from failing the parse.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith(("{", "[")):
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return None
+    return value
+
+
+def _tool_call_id() -> str:
+    """An id for a recovered call, in the shape Mistral requires."""
+    return uuid.uuid4().hex[:_MISTRAL_TOOL_CALL_ID_LEN]
+
+
+def _recovered_message_dict(
+    text: str | None,
+    tool_calls: list[ToolCall],
+) -> dict[str, Any]:
+    """History entry for tool calls recovered from message text.
+
+    The raw ``[TOOL_CALLS]`` text is replaced by the structured calls:
+    sending it back as content would have the model read its own
+    unparsed output as conversation.
+    """
+    return {
+        "role": "assistant",
+        "content": text,
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments),
+                },
+            }
+            for tc in tool_calls
+        ],
+    }
+
+
 def _is_reasoning_model(model: str) -> bool:
     """Whether ``model`` names a reasoning model (gpt-5, o-series)."""
     return bool(_REASONING_MODEL_RE.search(model))
@@ -539,9 +721,99 @@ def _deployment_url(base_url: str, model: str) -> str:
     return f"{url}{_DEPLOYMENTS_PATH}{model}"
 
 
+def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    """Decode tool-call arguments from a string or an already-parsed object."""
+    if isinstance(raw, dict):
+        return raw
+    if raw is None:
+        return {}
+    if not isinstance(raw, str):
+        raw = json.dumps(raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Malformed tool-call arguments: %r", raw)
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    logger.warning("Tool-call arguments were JSON %s, not an object", type(parsed).__name__)
+    return {}
+
+
+def _json_string(value: Any) -> str:
+    """JSON object the OpenAI chat template expects as a string."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def _message_content_for_history(content: Any) -> str | None:
+    """Coerce message content to a string.
+
+    OpenAI-compatible servers (vLLM / AIM / DeepSeek) concatenate content
+    into the chat template. A dict there raises
+    ``can only concatenate str (not "dict") to str`` as HTTP 400.
+    """
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if text is None:
+                    continue
+                parts.append(text if isinstance(text, str) else json.dumps(text))
+        return "".join(parts) or None
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text
+        return json.dumps(content)
+    return str(content)
+
+
+def _history_message(
+    message: dict[str, Any],
+    *,
+    quote_tool_arguments: bool = False,
+) -> dict[str, Any]:
+    """Copy one history entry with string content and tool arguments.
+
+    ``quote_tool_arguments`` encodes the arguments JSON as a JSON string,
+    so an endpoint that decodes them before rendering its chat template
+    (see :data:`_TEMPLATE_CONCAT_RE`) is left with a string to render.
+    """
+    out = dict(message)
+    if "content" in out:
+        out["content"] = _message_content_for_history(out["content"])
+    tool_calls = out.get("tool_calls")
+    if tool_calls:
+        coerced: list[dict[str, Any]] = []
+        for tc in tool_calls:
+            entry = dict(tc)
+            function = dict(entry.get("function") or {})
+            if "arguments" in function:
+                arguments = _json_string(function["arguments"])
+                function["arguments"] = (
+                    json.dumps(arguments) if quote_tool_arguments else arguments
+                )
+            entry["function"] = function
+            coerced.append(entry)
+        out["tool_calls"] = coerced
+    return out
+
+
 def _message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]:
     """Convert an SDK message object to a plain dict for the history."""
-    d: dict[str, Any] = {"role": message.role, "content": message.content}
+    d: dict[str, Any] = {
+        "role": message.role,
+        "content": _message_content_for_history(message.content),
+    }
     if message.tool_calls:
         d["tool_calls"] = [
             {
@@ -549,7 +821,7 @@ def _message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]:
                 "type": "function",
                 "function": {
                     "name": tc.function.name,
-                    "arguments": tc.function.arguments,
+                    "arguments": _json_string(tc.function.arguments),
                 },
             }
             for tc in message.tool_calls

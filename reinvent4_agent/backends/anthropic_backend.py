@@ -94,6 +94,8 @@ class AnthropicBackend(LLMBackend):
         self,
         tools: list[dict[str, Any]],
         max_tokens: int,
+        *,
+        force_tool_use: bool = False,
     ) -> ChatResult:
         self.repair_dangling_tool_use()
         anthropic_tools = self._convert_tools(tools)
@@ -106,6 +108,10 @@ class AnthropicBackend(LLMBackend):
         }
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
+            # Extended thinking rejects tool_choice any/tool; leave it unset
+            # (auto) so a first-round force_tool_use still runs.
+            if force_tool_use and self.thinking_budget is None:
+                kwargs["tool_choice"] = {"type": "any"}
         if self.thinking_budget is not None:
             kwargs["thinking"] = {
                 "type": "enabled",

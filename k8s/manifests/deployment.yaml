@@ -1,0 +1,322 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: initialize-data
+          image: dd-agent:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -ec
+            - |
+              mkdir -p \
+                /data/shared \
+                /data/ttps \
+                /data/jobs \
+                /data/logs \
+                /data/tb-logs \
+                /data/agent-logs \
+                /data/boltz-cache
+              chmod -R 0777 /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: dd-agent
+          image: dd-agent:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - sleep
+            - infinity
+          env:
+            - name: REINVENT4_MCP_CONFIG
+              value: /app/config/reinvent4_mcp_config.yaml
+            - name: REINVENT4_AGENT_BACKEND
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_BACKEND
+            - name: REINVENT4_AGENT_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_MODEL
+            - name: REINVENT4_AGENT_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_BASE_URL
+            - name: REINVENT4_AGENT_NO_VERIFY_SSL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_NO_VERIFY_SSL
+            - name: REINVENT4_AGENT_MULTI_AGENT
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_MULTI_AGENT
+            - name: REINVENT4_AGENT_LOG_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_LOG_DIR
+            - name: REINVENT4_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dd-agentic-llm
+                  key: REINVENT4_AGENT_API_KEY
+          resources:
+            requests:
+              amd.com/gpu: "1"
+              cpu: "4"
+              memory: 32Gi
+            limits:
+              amd.com/gpu: "1"
+              cpu: "8"
+              memory: 128Gi
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+            - name: data
+              mountPath: /root/.reinvent4_mcp/ttps
+              subPath: ttps
+            - name: data
+              mountPath: /data/reinvent4_mcp/jobs
+              subPath: jobs
+            - name: data
+              mountPath: /data/reinvent4_mcp/logs
+              subPath: logs
+            - name: data
+              mountPath: /data/reinvent4_mcp/tb_logs
+              subPath: tb-logs
+            - name: data
+              mountPath: /logs
+              subPath: agent-logs
+            - name: agent-config
+              mountPath: /app/config
+              readOnly: true
+            - name: agent-shm
+              mountPath: /dev/shm
+
+        - name: boltz
+          image: boltz2-wrapper:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8091"
+          ports:
+            - name: boltz-http
+              containerPort: 8091
+          resources:
+            requests:
+              amd.com/gpu: "1"
+              cpu: "4"
+              memory: 32Gi
+            limits:
+              amd.com/gpu: "1"
+              cpu: "8"
+              memory: 96Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: boltz-http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: boltz-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: boltz-http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+            - name: data
+              mountPath: /cache
+              subPath: boltz-cache
+            - name: boltz-shm
+              mountPath: /dev/shm
+
+        - name: posebusters
+          image: posebusters:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8082"
+          ports:
+            - name: pose-http
+              containerPort: 8082
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: pose-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: pose-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+
+        - name: interaction-profiler
+          image: interaction-profiler:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8083"
+          ports:
+            - name: profile-http
+              containerPort: 8083
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: profile-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: profile-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+
+        - name: admet-predictor
+          image: admet-predictor:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: admet-http
+              containerPort: 8084
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: admet-http
+            periodSeconds: 10
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: admet-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: admet-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+        - name: retrodmta-predictor
+          image: retrodmta-predictor:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: retro-http
+              containerPort: 8085
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: retro-http
+            periodSeconds: 10
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: retro-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: retro-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+        - name: agent-config
+          configMap:
+            name: dd-agentic-config
+            items:
+              - key: reinvent4_mcp_config.yaml
+                path: reinvent4_mcp_config.yaml
+        - name: agent-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi
+        - name: boltz-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi

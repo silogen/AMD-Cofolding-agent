@@ -1,0 +1,42 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: dd-agentic-aim
+spec:
+  # Replace model.name with the AIMClusterModel on the target cluster:
+  #   kubectl get aimclustermodel | grep -i qwen3-32b
+  # AIMService.spec.model.name is the cluster object name (e.g.
+  # amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-...), not a short alias.
+  model:
+    name: amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-31bb0f
+  profile:
+    # dd-agent is interactive (sequential Driver/Reviewer tool-call turns),
+    # not a batched multi-user server. Prefer latency. Set fp8 explicitly:
+    # Qwen3-32B on 1 GPU has both latency and throughput profiles; omitting
+    # precision can select a throughput or bf16/fp16 profile. Align
+    # REINVENT4_AGENT_MODEL with the served /v1/models id (often Qwen/Qwen3-32B-FP8).
+    selector:
+      acceleratorType: gpu
+      acceleratorCount: 1
+      precision: fp8
+      metric: latency
+      role: deployable
+  replicas: 1
+  caching:
+    mode: Shared
+---
+# AIM Engine creates a generated KServe Service name. This stable Service
+# selects the same predictor pod so the agent can use a repeatable base URL.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-aim
+spec:
+  selector:
+    aim.eai.amd.com/service.name: dd-agentic-aim
+    app.kubernetes.io/component: inference
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

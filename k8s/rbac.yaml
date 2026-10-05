@@ -1,0 +1,202 @@
+# Grants developers the permissions needed to deploy dd-agentic into the
+# demo-lux namespace on the internal staging environment.
+#
+# All apply.sh / switch-aim-model.sh objects land in demo-lux. No second
+# namespace is required for the manifests. Cluster-scoped reads (nodes,
+# AIM catalog, and pods/events for `kubectl describe node`) cannot be
+# granted by a RoleBinding, so they live on dd-agentic-cluster.
+#
+# Role dd-agentic-operator is namespaced (demo-lux only). Nodes, catalog
+# CRs, and describe-node pod lists cannot live on a Role.
+#
+# Not in manifests/kustomization.yaml — apply.sh must not rewrite these
+# objects into another --namespace.
+#
+#   kubectl apply --filename k8s/rbac.yaml
+---
+# Cluster-scoped reads used by the k8s/README.md commands and scripts.
+# pods + events list is cluster-wide so `kubectl describe node` can fill
+# Allocated resources and Events from workloads in every namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dd-agentic-cluster
+  labels:
+    app.kubernetes.io/part-of: dd-agentic
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    resourceNames:
+      - demo-lux
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - aim.eai.amd.com
+    resources:
+      - aimclustermodels
+      - aimclusterprofiles
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dd-agentic-cluster
+  labels:
+    app.kubernetes.io/part-of: dd-agentic
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dd-agentic-cluster
+subjects:
+  - kind: Group
+    name: oidcdemo-lux
+    apiGroup: rbac.authorization.k8s.io
+  - kind: Group
+    name: oidc:demo-lux
+    apiGroup: rbac.authorization.k8s.io
+---
+# Namespaced verbs for apply-from-scratch in demo-lux and every other
+# kubectl step in k8s/README.md (exec, logs, scale, rollout, wait, AIMService).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dd-agentic-operator
+  namespace: demo-lux
+  labels:
+    app.kubernetes.io/part-of: dd-agentic
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - secrets
+      - services
+      - persistentvolumeclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - pods/exec
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments/scale
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - aim.eai.amd.com
+    resources:
+      - aimservices
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dd-agentic-operator
+  namespace: demo-lux
+  labels:
+    app.kubernetes.io/part-of: dd-agentic
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dd-agentic-operator
+subjects:
+  - kind: Group
+    name: oidcdemo-lux
+    apiGroup: rbac.authorization.k8s.io
+  - kind: Group
+    name: oidc:demo-lux
+    apiGroup: rbac.authorization.k8s.io

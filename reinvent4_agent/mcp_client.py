@@ -17,6 +17,27 @@ from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
 
+#: Models invent nearby names for the discovery tools.  Map those onto
+#: the real MCP tools so a guessed name still runs.
+_TOOL_ALIASES = {
+    "list_components": "list_scoring_components",
+    "discover_components": "list_scoring_components",
+    "list_available_components": "list_scoring_components",
+    "get_components": "list_scoring_components",
+    "list_scorers": "list_scoring_components",
+    "list_scoring": "list_scoring_components",
+    "get_scoring_components": "list_scoring_components",
+    "list_transform": "list_transforms",
+    "get_transforms": "list_transforms",
+    "list_model": "list_available_models",
+    "list_models": "list_available_models",
+    "list_available_model": "list_available_models",
+}
+
+
+def _canonical_tool_name(name: str) -> str:
+    return name.strip().lower().replace("-", "_")
+
 
 class MCPClient:
     """Async context manager for communicating with the Drug Discovery MCP server.
@@ -132,6 +153,22 @@ class MCPClient:
         if self._tools is None:
             raise RuntimeError("MCPClient is not connected; use 'async with'")
         return list(self._tools)
+
+    def resolve_tool_name(self, name: str) -> str | None:
+        """The registered tool ``name`` refers to, or ``None`` if unknown."""
+        if self._tools is None:
+            raise RuntimeError("MCPClient is not connected; use 'async with'")
+        available = {t["name"]: t["name"] for t in self._tools}
+        if name in available:
+            return name
+        key = _canonical_tool_name(name)
+        by_canonical = {_canonical_tool_name(n): n for n in available}
+        if key in by_canonical:
+            return by_canonical[key]
+        alias = _TOOL_ALIASES.get(key)
+        if alias and alias in available:
+            return alias
+        return None
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any]

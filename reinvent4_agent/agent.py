@@ -108,6 +108,10 @@ class Agent:
             return tools
         return [t for t in tools if t["name"] in self._allowed_tools]
 
+    def _tool_allowed(self, name: str) -> bool:
+        """Whether this agent may execute the canonical tool ``name``."""
+        return self._allowed_tools is None or name in self._allowed_tools
+
     async def chat(self, user_message: str) -> str:
         """Process a user message and return the agent's text response.
 
@@ -123,6 +127,9 @@ class Agent:
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             t0 = time.monotonic()
+            # Leave tool_choice on auto. Forcing a call on round 0 of every
+            # user turn sends greetings and clarifying questions through an
+            # arbitrary MCP tool, including mutating ones.
             result = self.backend.complete(tools, self.max_tokens)
             elapsed = time.monotonic() - t0
 
@@ -214,7 +221,63 @@ class Agent:
 
             t0 = time.monotonic()
             try:
-                result_text = await self.mcp.call_tool(tc.name, tc.arguments)
+                resolved = self.mcp.resolve_tool_name(tc.name)
+                # Resolve against the full catalog, then refuse anything
+                # outside this agent's allow-list. An alias can name a
+                # mutating tool the model was never offered.
+                if resolved is not None and not self._tool_allowed(resolved):
+                    denied = resolved
+                    resolved = None
+                else:
+                    denied = None
+                if resolved is None:
+                    known = ", ".join(
+                        t["name"] for t in await self._scoped_tools()
+                    )
+                    if denied is not None:
+                        result_text = (
+                            f"Tool '{denied}' is not available to this "
+                            f"agent. Available tools: {known}."
+                        )
+                    else:
+                        result_text = (
+                            f"Unknown tool '{tc.name}'. Available tools: "
+                            f"{known}. Scoring components are listed by "
+                            "list_scoring_components."
+                        )
+                    elapsed = time.monotonic() - t0
+                    logger.warning(
+                        "Turn %d round %d — unknown tool %s (%.2fs)",
+                        self._turn,
+                        round_idx,
+                        tc.name,
+                        elapsed,
+                    )
+                    self._write_event("tool_result", {
+                        "name": tc.name,
+                        "content_length": len(result_text),
+                        "elapsed_s": round(elapsed, 3),
+                        "is_error": True,
+                        "round": round_idx,
+                    })
+                    self._events.on_tool_result(
+                        tc.name, result_text, is_error=True
+                    )
+                    results.append(ToolResult(
+                        tool_call_id=tc.id,
+                        content=result_text,
+                        is_error=True,
+                    ))
+                    continue
+                if resolved != tc.name:
+                    logger.info(
+                        "Turn %d round %d — aliasing tool %s -> %s",
+                        self._turn,
+                        round_idx,
+                        tc.name,
+                        resolved,
+                    )
+                result_text = await self.mcp.call_tool(resolved, tc.arguments)
                 elapsed = time.monotonic() - t0
 
                 logger.info(

@@ -430,7 +430,11 @@ def _summarize_args(args: dict[str, Any]) -> str:
     parts = []
     for key, val in args.items():
         if isinstance(val, list):
-            parts.append(f"{key}=[{len(val)} items]")
+            if val and all(isinstance(item, dict) for item in val):
+                keys = sorted({k for item in val for k in item})
+                parts.append(f"{key}=[{len(val)} items keys={keys}]")
+            else:
+                parts.append(f"{key}=[{len(val)} items]")
         elif isinstance(val, str) and len(val) > 60:
             parts.append(f"{key}='{val[:57]}...'")
         else:

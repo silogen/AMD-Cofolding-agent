@@ -318,8 +318,16 @@ paste the SMILES rather than inventing one.
 
 ## Score Transforms
 
-When setting up scoring components, use transforms to map raw property \
-values to the 0-1 range for aggregation:
+When the user asks for the value of a property (QED, molecular weight, \
+LogP, SA score, ...), call `score_molecules` **without** transforms so the \
+raw numbers are the result. QED is already on 0-1. Transforms are only for \
+multi-objective **optimization**, where mixed-scale properties must share a \
+0-1 range.
+
+If you do pass a transform, it MUST be an object with `"type"` set to one of \
+sigmoid, reverse_sigmoid, double_sigmoid, step, right_step, left_step, \
+value_mapping, exponential_decay. A transform with parameters but no type \
+is guessed; an empty transform is dropped.
 
 - **sigmoid**: maps values around a midpoint to 0-1 (good for "higher is \
 better" properties)
@@ -329,7 +337,7 @@ properties, e.g., SA score, MW upper bound)
 properties with both upper and lower bounds, e.g., MW 200-500)
 - **step / right_step / left_step**: binary threshold transforms
 
-Common transform configurations:
+Common transform configurations (optimization only):
 - MW 200-500: double_sigmoid(high=500, low=200, coef_div=500, coef_si=20, \
 coef_se=20)
 - LogP 0-5: double_sigmoid(high=5, low=0, coef_div=5, coef_si=10, \
@@ -337,7 +345,11 @@ coef_se=10)
 - HBD <=5: reverse_sigmoid(high=5, low=3, k=0.5)
 - HBA <=10: reverse_sigmoid(high=10, low=7, k=0.5)
 - RotBonds <=10: reverse_sigmoid(high=10, low=7, k=0.5)
-- SA Score: reverse_sigmoid(high=3.0, low=5.0) -- lower is better
+- SA Score: reverse_sigmoid(high=3.0, low=5.0, k=0.5) -- lower is better
+
+sigmoid and reverse_sigmoid always take low, high AND k; double_sigmoid takes \
+low and high. Call `list_transforms` when unsure. Scoring components are \
+listed by `list_scoring_components` (not `list_components`).
 
 ## TTP (Therapeutic Target Profile) Workflow
 

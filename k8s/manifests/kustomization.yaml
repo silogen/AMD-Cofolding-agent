@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace is set by apply.sh --namespace (do not hard-code an environment here).
+
+resources:
+  - configmap.yaml
+  - llm-secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - aim-service.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: dd-agentic
+      app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: dd-agent
+    newName: dd-agent
+    newTag: local
+  - name: boltz2-wrapper
+    newName: boltz2-wrapper
+    newTag: local
+  - name: posebusters
+    newName: posebusters
+    newTag: local
+  - name: admet-predictor
+    newName: admet-predictor
+    newTag: local
+  - name: retrodmta-predictor
+    newName: retrodmta-predictor
+    newTag: local
+  - name: interaction-profiler
+    newName: interaction-profiler
+    newTag: local

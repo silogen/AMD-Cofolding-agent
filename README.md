@@ -4,7 +4,26 @@ An LLM-powered drug design assistant built on [REINVENT4](https://github.com/Mol
 
 By default the agent runs as **two collaborating agents** — a Driver that does the work and an independent read-only Reviewer that vets it. This can be toggled off to run a single agent.
 
-The stack runs either under **Docker Compose** or, on clusters with no Docker daemon, under **Apptainer/Singularity** (AMD ROCm and NVIDIA CUDA image variants).
+The stack runs under **Docker Compose**, **Kubernetes**, or — on clusters with no Docker daemon — **Apptainer/Singularity** (AMD ROCm and NVIDIA CUDA image variants).
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Current Status](#current-status)
+- [Prerequisites](#prerequisites)
+- [Repository Layout](#repository-layout)
+- [Documentation](#documentation)
+- [Setup](#setup)
+- [Running with Docker Compose](#running-with-docker-compose)
+- [Running on Kubernetes](#running-on-kubernetes)
+- [Running with Apptainer/Singularity](#running-with-apptainersingularity)
+- [Usage](#usage)
+- [Multi-Agent Mode (Driver + Reviewer)](#multi-agent-mode-driver--reviewer)
+- [MCP Tools](#mcp-tools)
+- [External Scoring Services](#external-scoring-services)
+- [RL Optimization Workflows](#rl-optimization-workflows)
+- [Testing](#testing)
+- [Environment Variables Reference](#environment-variables-reference)
 
 ## Architecture
 
@@ -138,6 +157,10 @@ dd_agentic/
 │       ├── setup.sh                # Bare-metal venv install (no containers)
 │       └── llm_tunnel_relay.py     # Docker bridge -> host loopback relay for the SSH tunnel
 ├── docker-compose.yml              # 6-service compose stack
+├── k8s/                            # Kubernetes deploy — see [k8s/README.md](k8s/README.md)
+│   ├── apply.sh / build-images.sh / load-images.sh
+│   ├── manifests/                  # Deployment, AIMService, ConfigMap, Secret, PVC
+│   └── scripts/                    # switch-aim-model helpers
 ├── reinvent4_mcp_config.yaml       # Process config (service URLs, RL defaults, storage paths)
 ├── TENSORWAVE_INSTRUCTIONS.md      # SSH-tunnel recipe for reaching the AMD LLM gateway
 ├── TESTING.md                      # Manual and scripted test scenarios
@@ -161,6 +184,13 @@ dd_agentic/
 └── services/env.local.sh           # Your keys and cluster-specific overrides
 ```
 
+## Documentation
+
+- [Kubernetes](k8s/README.md) — in-cluster deploy, AIM pinning, image load, model switch
+- [TESTING.md](TESTING.md) — manual and scripted test scenarios
+- [TENSORWAVE_INSTRUCTIONS.md](TENSORWAVE_INSTRUCTIONS.md) — SSH-tunnel recipe for the AMD LLM gateway
+- [Apptainer/Singularity](services/singularity/README.md) — stack without a Docker daemon
+
 ## Setup
 
 ### 1. Restore the gitignored dependencies
@@ -175,10 +205,14 @@ git clone https://github.com/jwohlwend/boltz.git boltz2   # cofolding + affinity
 git clone https://github.com/maabuu/posebusters.git       # pose validation
 ```
 
-The ADMET and RetroDMTA services need trained model weights, distributed as a SharePoint zip rather than in git. Unzip it so that `models/admet/` and `models/retrodmta/` exist — the Dockerfiles bake them into the images at build time:
+The ADMET and RetroDMTA services need trained model weights. Those files are
+**not in git** and `dd_agentic_models.zip` is **not in this repository**. Ask
+Adrian Yijie Xu or Levent Güner for the SharePoint zip, then unzip it in this
+directory so that `models/admet/` and `models/retrodmta/` exist. The Dockerfiles
+bake those directories into the images at build time:
 
 ```bash
-unzip dd_agentic_models.zip          # provides ./models/
+unzip dd_agentic_models.zip          # provides ./models/  (from SharePoint, not git)
 ```
 
 ### 2. Sync the project to the cluster
@@ -204,7 +238,7 @@ rsync -avz --exclude '__pycache__' \
 
 ### 3. Configure credentials
 
-All configuration lives in `services/env.local.sh`, a gitignored copy of the `services/env.sh` template. Every launch path — Docker Compose, Apptainer, and the Slurm scripts — reads it.
+All configuration lives in `services/env.local.sh`, a gitignored copy of the `services/env.sh` template. Docker Compose, Apptainer, and the Slurm scripts source it. Kubernetes does not: the same knobs are a ConfigMap and Secret (see [k8s/README.md](k8s/README.md)).
 
 ```bash
 ssh cluster
@@ -392,6 +426,34 @@ Everything the stack writes lands under `${DATA_DIR:-./data}` on the host, so st
 | `data/tb_logs` | `/data/reinvent4_mcp/tb_logs` | TensorBoard logs |
 | `data/agent_logs` | `/logs` | Agent session `.log` + `.jsonl` transcripts |
 | `boltz_cache` (named volume) | `/cache` | Boltz2 model weights |
+
+---
+
+## Running on Kubernetes
+
+The Compose stack also deploys as one Kubernetes Deployment plus an in-cluster
+AIM endpoint. Manifests live under `k8s/manifests/`. Image build, load, and
+apply scripts stay at the `k8s/` root. `k8s/scripts/` holds AIM catalog
+switching and [`k8s/scripts/uat-scoring.sh`](k8s/scripts/uat-scoring.sh), which
+pipes two scoring prompts into a running `dd-agent` and checks the
+`score_molecules` tables.
+
+**Full guide:** [k8s/README.md](k8s/README.md)
+
+```bash
+cd examples/dd_agentic
+export PROJECT="<namespace>"
+export NODE="<gpu-node-for-dd-agentic>"
+./k8s/build-images.sh
+./k8s/load-images.sh --namespace "${PROJECT}" --node "${NODE}"
+./k8s/apply.sh --namespace "${PROJECT}" --node "${NODE}"
+```
+
+After the agent pod and AIM endpoint are up, the scoring check is:
+
+```bash
+./k8s/scripts/uat-scoring.sh --namespace "${PROJECT}"
+```
 
 ---
 
@@ -592,7 +654,7 @@ list_external_services
 Multi-agent mode is **on by default**. Three ways to control it, in increasing precedence:
 
 ```bash
-# 1. env.local.sh (applies to every launch path)
+# 1. env.local.sh (Compose, Apptainer, Slurm; Kubernetes uses the ConfigMap)
 export REINVENT4_AGENT_MULTI_AGENT="false"
 
 # 2. docker-compose.yml reads the same variable
@@ -982,7 +1044,7 @@ See [TESTING.md](TESTING.md) for end-to-end scenarios that exercise the live ser
 
 ## Environment Variables Reference
 
-All of these are set in `services/env.local.sh` and forwarded into the containers by `docker-compose.yml` and `services/singularity/run.sh`.
+On Compose and Apptainer these are set in `services/env.local.sh` and forwarded into the containers by `docker-compose.yml` and `services/singularity/run.sh`. On Kubernetes the same `REINVENT4_AGENT_*` keys live in `k8s/manifests/configmap.yaml` and `k8s/manifests/llm-secret.yaml`; `LLM_GATEWAY_KEY` is not used with the in-cluster AIM endpoint.
 
 **Credentials** — set exactly one of the first two.
 

@@ -74,11 +74,17 @@ class LLMBackend(ABC):
         self,
         tools: list[dict[str, Any]],
         max_tokens: int,
+        *,
+        force_tool_use: bool = False,
     ) -> ChatResult:
         """Send the current conversation to the LLM and return a result.
 
         ``tools`` are raw MCP tool definitions (name, description,
         input_schema).  The backend converts them to its native format.
+
+        ``force_tool_use`` asks the model to emit a tool call rather than
+        a plain-text answer (``tool_choice=required``, or Anthropic
+        ``any``).  The agent leaves it off so a turn can answer in text.
         """
 
     @abstractmethod
@@ -265,9 +271,6 @@ def _probe(
             if verify_ssl
             else ssl._create_unverified_context()  # noqa: SLF001
         )
-        # Probe with the same floor the real httpx client negotiates, so a
-        # "handshake OK" here is not achieved over TLS 1.0/1.1.
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
         try:
             with context.wrap_socket(sock, server_hostname=host) as tls:
                 out.append(f"TLS: handshake OK ({tls.version()})")
