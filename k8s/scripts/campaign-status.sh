@@ -77,6 +77,33 @@ import sys
 
 from reinvent4_agent.campaign_client import CampaignStoreClient
 from reinvent4_agent.conductor import format_status
+from reinvent4_agent.supervisor import job_for_ttp, variant_ttp_id
+from reinvent4_mcp.tools.results import get_optimization_status
+
+
+def rl_jobs(status):
+    """The RL job behind each in-flight task, and how far it has got.
+
+    The ledger knows which supervisor holds which task; it does not know the
+    job id, because the job lives in the runner. The task's TTP variant is
+    named after the task, so the two can be joined without either side
+    having to record the other.
+    """
+
+    base = status["campaign"]["base_ttp_id"]
+    for task in status["in_flight"]:
+        job_id = job_for_ttp(variant_ttp_id(base, task["task_id"]))
+        if not job_id:
+            print(f"    {task['task_id']}  no RL job yet (the agent is still setting up)")
+            continue
+        job = get_optimization_status(job_id)
+        step = (job.get("trajectory") or {}).get("current_step")
+        print(
+            f"    {task['task_id']}  job {job_id}  {job.get('state')}"
+            f"  step {step if step is not None else '-'}"
+            f"  on {task['owner']}"
+        )
+
 
 store = CampaignStoreClient()
 wanted = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
@@ -95,7 +122,11 @@ if not ids:
     print("  no live campaigns")
 else:
     for campaign_id in ids:
-        print(format_status(store.status(campaign_id)))
+        status = store.status(campaign_id)
+        print(format_status(status))
+        if status["in_flight"]:
+            print("  RL jobs:")
+            rl_jobs(status)
         print()
 PY
 }

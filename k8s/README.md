@@ -777,6 +777,68 @@ to `N` and the campaign would quietly run at `2N`. That is the one way to
 overcommit the GPUs the ledger cannot catch, because each individual dispatch
 is legitimate.
 
+### A pod stuck in `ContainerCreating` with a Multi-Attach error
+
+```
+Warning  FailedAttachVolume  Multi-Attach error for volume "pvc-..."
+         Volume is already used by pod(s) dd-agentic-boltz-..., dd-agentic-...
+```
+
+The pod landed on a node that cannot attach `dd-agentic-data`, because the
+claim is `ReadWriteOnce` and some other node already has it. It will never
+start — this is not a transient pull.
+
+It means the Deployment is missing its node pin. `apply.sh` stamps
+`nodeSelector[kubernetes.io/hostname]` onto **every** Deployment for exactly
+this reason, so the usual cause is a manifest applied directly with
+`kubectl apply` instead of through `apply.sh --node`. It bites the supervisor
+pool first and most visibly, because that is the only workload that scales past
+one replica, so it is the only one with a second pod for the scheduler to place
+somewhere else.
+
+Fix it in place without disturbing the rest of the fleet:
+
+```bash
+NODE=$(kubectl --namespace "${PROJECT}" get deployment dd-agentic-boltz \
+  --output jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}')
+
+for d in dd-agentic-campaign-store dd-agentic-supervisor dd-agentic-conductor; do
+  kubectl --namespace "${PROJECT}" patch deployment "$d" \
+    --patch "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${NODE}\"}}}}}"
+done
+```
+
+### Start and stop the fleet
+
+```bash
+k8s/scripts/fleet-up.sh --namespace "${PROJECT}" --supervisors 2
+k8s/scripts/fleet-up.sh --namespace "${PROJECT}" --down
+```
+
+Deployments are independent — scaling the supervisor pool does not start the
+scorers it needs, and `dd-agent` only starts a process in a pod that already
+exists. Nothing here has a dependency graph, so this script is it: it scales
+each tier in order and waits on `kubectl rollout status` between them, which is
+gated on the readiness probes and therefore on the services' own `/health`.
+
+Two reasons the order is load-bearing. A supervisor that starts before the
+runner is ready claims a task, cannot reach the runner, and burns one of its
+two attempts. And a **missing scorer is worse than a missing runner, because it
+is quiet**: the scoring component turns a connection error into NaN for every
+molecule, which is right for a flaky service mid-campaign, but with one down
+for a whole run you get a completed job full of NaN and a geometric mean built
+on them — a failure that produces results rather than an error.
+
+For that reason every CPU scorer is started regardless of which objectives the
+campaign uses. They hold no GPU, so starting one that is not needed costs
+nothing, while skipping one the TTP references costs a silently NaN-scored
+campaign.
+
+`--down` takes the runner with it, and RL jobs live in the runner's pod, so
+anything still running is killed rather than checkpointed — stop the jobs first
+if the work matters. AIM is left alone either way: it is reconciled by the
+`dd-agentic-aim` AIMService, so scaling its Deployment would simply be undone.
+
 ### Watch the fleet
 
 ```bash
