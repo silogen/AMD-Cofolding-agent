@@ -353,7 +353,16 @@ class JobsConfig(BaseModel):
     )
     checkpoint_on_stop: bool = Field(
         default=True,
-        description="Save checkpoint when stopping a running job",
+        description="Ask a stopping job to save a checkpoint before it exits, "
+                    "instead of terminating it straight away",
+    )
+    stop_grace_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        description="How long to let a stopping job finish its checkpoint. "
+                    "REINVENT can only act on the stop between scoring calls, "
+                    "so this has to exceed one RL step -- a step that folds "
+                    "every molecule takes several minutes",
     )
 
     @field_validator("working_dir")
@@ -428,6 +437,34 @@ _PRE_SCORING_COMPONENT_MAP: dict[str, str] = {
 }
 
 
+class RunnerConfig(BaseModel):
+    """Where to send RL/TL jobs and in-process scoring.
+
+    Disabled by default, so an unconfigured deployment keeps running REINVENT4
+    inside the MCP process exactly as before. Enabling it moves the GPU work to
+    ``reinvent-runner`` and leaves this process needing neither REINVENT4 nor a
+    GPU.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = Field(
+        default=False,
+        description="Send jobs and scoring to reinvent-runner over HTTP "
+                    "instead of running them in this process",
+    )
+    base_url: str = Field(
+        default="http://dd-agentic-reinvent-runner:8086",
+        description="Base URL of the reinvent-runner service",
+    )
+    timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description="HTTP timeout. Job calls return as soon as the subprocess "
+                    "is launched, but in-process scoring can be slow",
+    )
+
+
 class ProcessConfig(BaseModel):
     """Top-level process configuration for the Drug Discovery MCP server.
 
@@ -441,6 +478,7 @@ class ProcessConfig(BaseModel):
     reinvent: ReinventConfig = Field(default_factory=ReinventConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
+    runner: RunnerConfig = Field(default_factory=RunnerConfig)
     ttp: TTPStorageConfig = Field(default_factory=TTPStorageConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

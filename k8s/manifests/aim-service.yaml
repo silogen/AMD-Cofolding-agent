@@ -9,18 +9,16 @@ spec:
   # amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-...), not a short alias.
   model:
     name: amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-31bb0f
+  # profileOverrides require a named profile; name and selector are mutually
+  # exclusive. This is the 1-GPU fp8 latency profile (interactive Driver/Reviewer
+  # turns). Qwen3-32B is natively 32768 tokens; YaRN factor 2.0 extends it to
+  # 65536. vLLM 0.23 takes that scaling through hf-overrides, not rope-scaling.
   profile:
-    # dd-agent is interactive (sequential Driver/Reviewer tool-call turns),
-    # not a batched multi-user server. Prefer latency. Set fp8 explicitly:
-    # Qwen3-32B on 1 GPU has both latency and throughput profiles; omitting
-    # precision can select a throughput or bf16/fp16 profile. Align
-    # REINVENT4_AGENT_MODEL with the served /v1/models id (often Qwen/Qwen3-32B-FP8).
-    selector:
-      acceleratorType: gpu
-      acceleratorCount: 1
-      precision: fp8
-      metric: latency
-      role: deployable
+    name: amdenterpriseai-aim-qwen-q-vllm-mi300x-fp8-tp1-latency-5fa2c14c
+  profileOverrides:
+    engineArgs:
+      max-model-len: 65536
+      hf-overrides: '{"rope_parameters":{"rope_theta":1000000,"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}}'
   replicas: 1
   caching:
     mode: Shared

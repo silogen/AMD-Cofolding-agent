@@ -11,6 +11,9 @@ resources:
   - aim-service.yaml
   # One Deployment + ClusterIP Service each. The ConfigMap's scoring
   # service_urls are these Service names.
+  # REINVENT4 job lifecycle and scoring behind REST, so the agent needs
+  # neither REINVENT4 nor a GPU once runner.enabled is set.
+  - runner/reinvent-runner.yaml
   - scorers/boltz.yaml
   # Least-busy placement across the M boltz replicas.
   - scorers/boltz-proxy.yaml
@@ -40,6 +43,9 @@ images:
     newTag: local
   - name: boltz-gateway
     newName: boltz-gateway
+    newTag: local
+  - name: reinvent-runner
+    newName: reinvent-runner
     newTag: local
   - name: posebusters
     newName: posebusters

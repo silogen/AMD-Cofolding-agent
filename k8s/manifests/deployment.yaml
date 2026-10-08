@@ -8,7 +8,8 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # A surge pod would need a second amd.com/gpu and stay Pending.
+    # Kept after the GPU moved to the runner: the agent mounts the ReadWriteOnce
+    # claim, and a surge pod landing on another node could not attach it.
     type: Recreate
   selector:
     matchLabels:
@@ -91,14 +92,16 @@ spec:
                   name: dd-agentic-llm
                   key: REINVENT4_AGENT_API_KEY
           resources:
+            # No amd.com/gpu. REINVENT4 lives in dd-agentic-reinvent-runner
+            # now, so this pod holds the agent and the MCP server only and is
+            # freely schedulable -- which is what lets agent count and RL
+            # capacity scale independently.
             requests:
-              amd.com/gpu: "1"
-              cpu: "4"
-              memory: 32Gi
+              cpu: "1"
+              memory: 4Gi
             limits:
-              amd.com/gpu: "1"
-              cpu: "8"
-              memory: 128Gi
+              cpu: "4"
+              memory: 16Gi
           volumeMounts:
             - name: data
               mountPath: /shared
@@ -136,4 +139,5 @@ spec:
         - name: agent-shm
           emptyDir:
             medium: Memory
-            sizeLimit: 128Gi
+            # Was 128Gi for REINVENT's dataloaders, which run in the runner now.
+            sizeLimit: 2Gi

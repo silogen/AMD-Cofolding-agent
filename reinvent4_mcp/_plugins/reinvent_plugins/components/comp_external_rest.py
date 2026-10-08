@@ -35,6 +35,24 @@ from reinvent_plugins.components.component_results import ComponentResults
 
 logger = logging.getLogger("reinvent")
 
+# REINVENT relays a stop request to the running stage by raising one of these
+# from a signal handler, so they can surface from anywhere -- including from
+# inside the socket read below. They subclass Exception, so the broad handler
+# around the request has to let them through: swallowing one turns a stop into
+# a batch of NaN scores and the loop carries on to the next step, never
+# reaching the handler that writes the checkpoint. Empty when REINVENT4 is not
+# installed (the agent ships this plugin without it), and `except ()` never
+# matches, which is the behaviour we want there.
+try:
+    from reinvent.runmodes.handler import (
+        StageInterruptedControlled,
+        StageInterruptedUncontrolled,
+    )
+except ImportError:
+    STOP_REQUEST_EXCEPTIONS: tuple[type[BaseException], ...] = ()
+else:
+    STOP_REQUEST_EXCEPTIONS = (StageInterruptedControlled, StageInterruptedUncontrolled)
+
 _CALL_LOG_DIR = Path("/data/reinvent4_mcp/logs")
 _CALL_LOG_FILE = _CALL_LOG_DIR / "external_scoring.jsonl"
 
@@ -75,6 +93,8 @@ def _log_call(record: dict[str, Any]) -> None:
         _CALL_LOG_DIR.mkdir(parents=True, exist_ok=True)
         with open(_CALL_LOG_FILE, "a") as f:
             f.write(json.dumps(record, default=str) + "\n")
+    except STOP_REQUEST_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("Failed to write call log", exc_info=True)
 
@@ -346,7 +366,7 @@ class ExternalRESTScorer:
 
             try:
                 data = response.json()
-            except Exception:
+            except ValueError:
                 data = {"_raw_text": response.text[:2000]}
 
             record["response"] = data
@@ -360,6 +380,16 @@ class ExternalRESTScorer:
                 record["error"] = f"HTTP {response.status_code}"
                 _log_call(record)
                 response.raise_for_status()
+
+        except STOP_REQUEST_EXCEPTIONS:
+            record.setdefault("elapsed_seconds", round(time.monotonic() - t0, 2))
+            record.setdefault("error", "stop_requested")
+            _log_call(record)
+            logger.warning(
+                "Stop requested while waiting for %s; abandoning the call so the "
+                "stage can checkpoint", self.service,
+            )
+            raise
 
         except Exception:
             elapsed = time.monotonic() - t0

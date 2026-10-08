@@ -72,6 +72,14 @@ def list_scoring_components() -> list[dict[str, Any]]:
     and the parameter schema (field names + types) if available.
     """
 
+    from reinvent4_mcp.runner_client import (
+        remote_list_scoring_components,
+        runner_enabled,
+    )
+
+    if runner_enabled():
+        return remote_list_scoring_components()
+
     ensure_reinvent4_importable()
     from reinvent.scoring.importer import get_registry
 
@@ -102,6 +110,14 @@ def list_available_models() -> list[dict[str, Any]]:
     file path, and whether the file exists on disk.
     """
 
+    from reinvent4_mcp.runner_client import (
+        remote_list_available_models,
+        runner_enabled,
+    )
+
+    if runner_enabled():
+        return remote_list_available_models()
+
     ensure_reinvent4_importable()
     from reinvent.utils.prior_registry import prior_registry
 
@@ -131,6 +147,11 @@ def list_available_models() -> list[dict[str, Any]]:
 
 def list_transforms() -> list[dict[str, Any]]:
     """Return the available score transform types and their parameter schemas."""
+
+    from reinvent4_mcp.runner_client import remote_list_transforms, runner_enabled
+
+    if runner_enabled():
+        return remote_list_transforms()
 
     ensure_reinvent4_importable()
     from reinvent.scoring.transforms.transform import registry as transform_registry

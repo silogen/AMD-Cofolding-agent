@@ -22,6 +22,7 @@ IMAGES=(
     retrodmta-predictor
     interaction-profiler
     boltz-gateway
+    reinvent-runner
 )
 CONTAINERD_SOCK="${CONTAINERD_SOCK:-/run/k3s/containerd/containerd.sock}"
 

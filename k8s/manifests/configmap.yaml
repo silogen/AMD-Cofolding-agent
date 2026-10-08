@@ -71,8 +71,18 @@ data:
 
     jobs:
       working_dir: "/data/reinvent4_mcp/jobs"
+      # Several RL jobs per runner GPU: a step is mostly spent waiting on the
+      # scoring call, so memory is the limit rather than compute. Raise only on
+      # measured headroom.
       max_concurrent_jobs: 2
       checkpoint_on_stop: true
+
+    # Not optional in this deployment: dd-agent:local is CPU-only and carries no
+    # REINVENT4, so jobs, in-process scoring and the registries all have to come
+    # from the runner.
+    runner:
+      enabled: true
+      base_url: "http://dd-agentic-reinvent-runner:8086"
 
     ttp:
       storage_dir: "/root/.reinvent4_mcp/ttps"

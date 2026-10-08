@@ -436,9 +436,10 @@ Everything the stack writes lands under `${DATA_DIR:-./data}` on the host, so st
 
 ## Running on Kubernetes
 
-The Compose stack also deploys as eight Kubernetes Deployments — the agent, one
-per scorer, and two tiers in front of the Boltz replicas (a least-busy proxy and
-a caching, coalescing gateway) — with an in-cluster AIM endpoint. Manifests live under `k8s/manifests/`, the scorers in
+The Compose stack also deploys as eight Kubernetes Deployments — the CPU-only
+agent, `reinvent-runner` holding REINVENT4, one per scorer, and two tiers in
+front of the Boltz replicas (a least-busy proxy and a caching, coalescing
+gateway) — with an in-cluster AIM endpoint. Manifests live under `k8s/manifests/`, the scorers in
 `k8s/manifests/scorers/`. Image build, load, and
 apply scripts stay at the `k8s/` root. `k8s/scripts/` holds AIM catalog
 switching and [`k8s/scripts/uat-scoring.sh`](k8s/scripts/uat-scoring.sh), which
@@ -464,7 +465,10 @@ coalesces concurrent batches into single predictions.
 `--node` pins every Deployment: the `*:local` images live in one node's
 kubelet store, and on a single-node cluster the `ReadWriteOnce` claim is
 writable only from the node that mounts it, so the pods that hand each other
-`/shared` structure paths have to stay together.
+`/shared` structure paths have to stay together. GPUs are needed by
+`reinvent-runner` (one) and each `boltz` replica (two by default); the agent
+container is CPU-only at 164 MB, since REINVENT4 and the Zenodo priors live in
+the runner image.
 
 ```bash
 cd examples/dd_agentic
@@ -1023,7 +1027,7 @@ In multi-agent mode steps 3-6 also happen without prompting: the Reviewer monito
 
 ### Background job management
 
-Jobs run as background subprocesses of the MCP server. The `JobManager` tracks job states (`queued` → `running` → `completed`/`failed`/`stopped`), subprocess lifecycle (PID tracking, graceful SIGINT for checkpoint saves, SIGTERM fallback), and metadata as JSON files in each job's working directory, so jobs survive a server restart. Concurrency is capped by `jobs.max_concurrent_jobs` in the process config.
+Jobs run as background subprocesses of the MCP server. The `JobManager` tracks job states (`queued` → `running` → `completed`/`failed`/`stopped`), subprocess lifecycle (PID tracking, graceful SIGINT for checkpoint saves, SIGTERM fallback), and metadata as JSON files in each job's working directory, so jobs survive a server restart. Concurrency is capped by `jobs.max_concurrent_jobs` in the process config — a real slot limit: a job past the cap is refused with the ids of the jobs to stop, rather than the previous behaviour of stopping every running job to make room. `queued` counts as occupying a slot, and a restart frees slots held by jobs that cannot still be running.
 
 ### Transfer learning
 

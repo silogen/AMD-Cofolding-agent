@@ -11,7 +11,10 @@ Covers:
 
 from __future__ import annotations
 
+import inspect
+import re
 import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +24,7 @@ import pytest
 # The REINVENT4 plugin namespace + leaf stubs are set up in conftest.py so this
 # imports the SAME ExternalRESTScorer that runs in production (the module under
 # reinvent4_mcp/_plugins/reinvent_plugins/components/), not a divergent copy.
+from reinvent_plugins.components import comp_external_rest
 from reinvent_plugins.components.comp_external_rest import (
     ExternalRESTScorer,
     Parameters,
@@ -179,6 +183,51 @@ class TestExternalRESTScorer:
 
         assert len(result.scores[0]) == 2
         assert all(np.isnan(s) for s in result.scores[0])
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_stop_request_is_not_swallowed(self, mock_post):
+        """A stop request has to reach REINVENT's checkpoint-writing handler.
+
+        REINVENT asks a running stage to stop by raising StageInterrupted*
+        from a signal handler, so it surfaces from inside this component's
+        socket read. Those are plain Exceptions: if the failure handler here
+        catches one, the stop becomes a batch of NaN scores, the RL loop runs
+        on to the next step, and the job is eventually killed with no
+        checkpoint to resume from.
+        """
+        class StageInterruptedUncontrolled(Exception):
+            pass
+
+        mock_post.side_effect = StageInterruptedUncontrolled("Signal 15")
+        scorer = ExternalRESTScorer(_make_params())
+
+        with patch.object(
+            comp_external_rest,
+            "STOP_REQUEST_EXCEPTIONS",
+            (StageInterruptedUncontrolled,),
+        ):
+            with pytest.raises(StageInterruptedUncontrolled):
+                scorer(["CCO", "c1ccccc1"])
+
+    def test_stop_request_exceptions_match_reinvents(self):
+        """The names resolved at import time are the ones REINVENT raises."""
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "REINVENT4" / "reinvent" / "runmodes" / "handler.py"
+        )
+        if not source.exists():
+            pytest.skip("REINVENT4 source not checked out")
+
+        raised = set(re.findall(r"raise (StageInterrupted\w+)", source.read_text()))
+        assert raised, "REINVENT's handler no longer raises StageInterrupted*"
+
+        declared = set(
+            re.findall(
+                r"(StageInterrupted\w+)",
+                inspect.getsource(comp_external_rest).split("_CALL_LOG_DIR")[0],
+            )
+        )
+        assert raised <= declared
 
     @patch("reinvent_plugins.components.comp_external_rest.requests.post")
     def test_http_call_payload(self, mock_post):

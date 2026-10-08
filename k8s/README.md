@@ -29,10 +29,11 @@ containers as its own Deployment:
 
 | Deployment | Service | GPU | `/shared` |
 |------------|---------|-----|-----------|
-| `dd-agentic` | — (reached by `kubectl exec`) | 1 | yes |
+| `dd-agentic` | — (reached by `kubectl exec`) | no | yes |
 | `dd-agentic-boltz` | `dd-agentic-boltz:8091` (headless) | 1 each | yes |
 | `dd-agentic-boltz-proxy` | `dd-agentic-boltz-proxy:8091` (internal) | no | no |
 | `dd-agentic-boltz-gateway` | `dd-agentic-boltz-gateway:8091` | no | yes |
+| `dd-agentic-reinvent-runner` | `dd-agentic-reinvent-runner:8086` | 1 | yes |
 | `dd-agentic-posebusters` | `dd-agentic-posebusters:8082` | no | yes |
 | `dd-agentic-interaction-profiler` | `dd-agentic-interaction-profiler:8083` | no | yes |
 | `dd-agentic-admet` | `dd-agentic-admet:8084` | no | no |
@@ -43,13 +44,14 @@ are those Service names, unqualified so they resolve in whichever namespace
 `apply.sh --namespace` deploys into. They were `http://127.0.0.1:<port>` while
 everything shared one pod.
 
-GPU demand is **one for REINVENT in `dd-agentic` plus one per Boltz replica**,
-so the default `replicas: 2` on `dd-agentic-boltz` needs three free
-`amd.com/gpu`. Neither GPU workload may surge during a rollout, since the extra
-pod would ask for another GPU and stay `Pending`: `dd-agentic` uses
-`strategy: Recreate`, and `dd-agentic-boltz` uses a rolling update pinned to
-`maxSurge: 0`, which replaces one replica at a time and keeps the others
-serving.
+GPU demand is **one per Boltz replica plus one for the runner**, so the
+shipped `replicas: 2` on `dd-agentic-boltz` needs three free `amd.com/gpu`. The
+agent holds none: REINVENT4 moved to `dd-agentic-reinvent-runner`, which is what
+lets agent count and RL capacity scale independently. No GPU workload may surge
+during a rollout, since the extra pod would ask for another GPU and stay
+`Pending`: the runner uses `strategy: Recreate`, and `dd-agentic-boltz` uses a
+rolling update pinned to `maxSurge: 0`, which replaces one replica at a time and
+keeps the others serving.
 
 Scoring traffic goes to **`dd-agentic-boltz-gateway`**, not to the replicas.
 See [Place batches on idle Boltz replicas](#place-batches-on-idle-boltz-replicas).
@@ -114,9 +116,11 @@ Bearer token.
   [RBAC](#rbac) for the developer grant that covers that namespace.
 - A Qwen3-32B `AIMClusterModel` (or another catalog model you will set in
   `manifests/aim-service.yaml`).
-- A GPU node with at least two free `amd.com/gpu` for the dd-agentic
-  Deployments, with the six `*:local` images in that node's kubelet store. AIM
-  needs `acceleratorCount` free GPUs on **one** node (1 for the Qwen3-32B
+- A GPU node with enough free `amd.com/gpu` for the GPU workloads: one per
+  `dd-agentic-boltz` replica (2 by default) plus one for
+  `dd-agentic-reinvent-runner`, so **three** as shipped. The agent itself needs
+  none any more. All the `*:local` images must be in that node's kubelet store.
+  AIM needs `acceleratorCount` free GPUs on **one** node (1 for the Qwen3-32B
   example, 8 for an 8-way profile). That can be a different node; see
   [Pin the Deployments and AIM](#pin-the-deployments-and-aim).
 - Gitignored build inputs from
@@ -515,6 +519,69 @@ is held open), `COALESCE_MAX_MOLECULES` (raise it to merge whole batches from
 several supervisors, at the cost of a later first result),
 `GATEWAY_MAX_INFLIGHT` (`0` = healthy replicas), and `GATEWAY_CACHE_ENABLED`.
 
+### Move RL off the agent: reinvent-runner
+
+`dd-agentic-reinvent-runner` owns REINVENT4 — the RL and transfer-learning job
+lifecycle, the in-process `Scorer` behind `score_molecules`, and the
+component/model/transform registries — behind REST. The agent becomes an HTTP
+client, so it needs neither REINVENT4 nor a GPU. That is what lets agent count
+and RL capacity scale independently: an RL step is mostly spent waiting on the
+scoring call, so one GPU hosts several jobs (`jobs.max_concurrent_jobs`),
+whereas one-GPU-per-agent would cap the fleet at the number of RL GPUs.
+
+Turn it on in the ConfigMap; it is **off by default**, so an unconfigured
+deployment keeps running REINVENT4 in the MCP process exactly as before:
+
+```yaml
+runner:
+  enabled: true
+  base_url: "http://dd-agentic-reinvent-runner:8086"
+```
+
+Nothing above the seam changes. `get_job_manager()` returns a `RemoteJobManager`
+speaking the same seven methods over HTTP, so no tool knows where REINVENT4
+runs. Application outcomes keep their shape too: a refusal like "Maximum
+concurrent jobs" or an unknown job id comes back as an `{"error": ...}` dict,
+the same as the local manager, and so does an unreachable runner — every caller
+treats a dict with `error` as the failure case and would crash on a raise.
+
+**TTPs stay with the agent.** `run_optimization` already resolves a TTP into a
+plain `scorer_config` before the job manager sees it, so only that mapped config
+crosses the wire and the runner needs no TTP store — note the deliberate absence
+of a `ttps` mount in its manifest. `/score` takes the TTP inline for the same
+reason.
+
+Two things are deliberate and easy to get wrong. The runner runs **one uvicorn
+worker**: the job table and the concurrency slots live in process memory, so a
+second worker would keep its own copy and double the effective
+`max_concurrent_jobs`. And it sets **`REINVENT_RUNNER_SELF=1`**, because it reads
+the same config file as the agent and would otherwise honour `runner.enabled`
+and forward every job to itself; the job endpoints additionally hold their own
+`JobManager` rather than going through the seam, so they cannot loop even if
+that env were lost.
+
+**Verified on `demo-lux`**: `reinvent_importable: true`, 61 scoring components,
+9 priors and 8 transforms served over HTTP; a real 2-step RL job created through
+`POST /jobs` ran to completion; and driving it through the client seam gave the
+same result, with the third concurrent job refused and naming the two to stop.
+
+```bash
+kubectl --namespace "${PROJECT}" exec deployment/dd-agentic --container dd-agent \
+  -- python -c "import json,urllib.request; print(urllib.request.urlopen('http://dd-agentic-reinvent-runner:8086/health').read().decode())"
+```
+
+The image split is done: `reinvent-runner:local` owns REINVENT4 and the priors
+and is built from its own ROCm base, and `dd-agent:local` is **164 MB** of agent
+plus MCP server on `python:3.12-slim` — down from 40.8 GB unpacked. The runner
+still *imports* `reinvent4_mcp` rather than owning a copy of the job lifecycle,
+which is deliberate: one source of truth for the code that spawns RL
+subprocesses.
+
+Because the agent image has no REINVENT4 at all, `runner.enabled` is **not
+optional** in this deployment — both the ConfigMap and the baked
+`reinvent4_mcp_config.yaml` set it, and the in-process code path only exists on
+the runner now.
+
 ### Prove the structure handoff across pods
 
 Boltz returns the *absolute path* of each structure it writes to `/shared`, and
@@ -659,26 +726,36 @@ jobs down is enough for the 2+8 split.
 
 ### Rebuild the dd-agent image
 
-`dd-agent:local` bakes `reinvent4_agent/` into the image, and after the pod
-split it is used only by `deployment/dd-agentic`. Docker and kubelet do not
-share an image store. `load-images.sh` replaces an existing containerd tag
-during import, and `apply.sh` restarts the Deployments after applying so pods
-load the newly imported image. For a single-image rebuild, use the focused
-workflow below because `load-images.sh` requires all six Compose images to
-exist in Docker.
+`dd-agent:local` carries `reinvent4_agent/` and `reinvent4_mcp/` and nothing
+else: **164 MB**, CPU-only, built on `python:3.12-slim`. It used to extend the
+REINVENT4 ROCm image with REINVENT4 and the Zenodo priors baked in — 40.8 GB
+unpacked, ~11 GiB as a tar — which every agent replica had to pull while also
+pinning a GPU it mostly did not use. All of that now lives in
+`reinvent-runner:local`, so **that** is the slow image to rebuild and ship, and
+the agent is a quick one.
+
+The agent build asserts REINVENT4 and torch are *absent*, so a dependency
+pulling them back in fails the build rather than quietly restoring a 40 GB
+image. The runner build keeps the opposite check: `import reinvent` works and
+`externalrestscorer` is registered.
+
+Docker and kubelet do not share an image store. `load-images.sh` replaces an
+existing containerd tag during import, and `apply.sh` restarts the Deployments
+after applying so pods load the newly imported image. For a single-image
+rebuild, use the focused workflow below because `load-images.sh` requires all
+Compose images to exist in Docker.
 
 Either build **on the GPU node** (same host as `kubernetes.io/hostname` on
 the Deployment) or build **elsewhere and copy the tar** onto that node.
 Both paths end the same way: remove the old kubelet tag, import the tar,
 restart the Deployment.
 
-The tar is about 11 GiB. Write it on a filesystem with enough free space
-that your user can create files on (not a tiny root `/tmp`). Confirm the
-build log shows **not CACHED** for
-`COPY reinvent4_agent/ /app/reinvent4_agent/` and the following
-`pip install ... /app/reinvent4_agent`. A cache hit means the image still
-has the previous agent. A BuildKit warning about undefined `$PYTHONPATH` on
-the `ENV PYTHONPATH=...` line is harmless.
+Substitute `reinvent-runner` for `dd-agent` below when it is the runner you are
+rebuilding — that tar is the big one, so write it on a filesystem with room (not
+a tiny root `/tmp`). Confirm the build log shows **not CACHED** for the `COPY`
+of whichever package you changed; a cache hit means the image still has the old
+code. A BuildKit warning about undefined `$PYTHONPATH` on the runner's
+`ENV PYTHONPATH=...` line is harmless.
 
 ```bash
 export PROJECT="demo-lux"

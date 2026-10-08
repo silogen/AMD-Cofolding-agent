@@ -260,10 +260,13 @@ def run_transfer_learning(
 def stop_optimization(job_id: str) -> dict[str, Any]:
     """Stop a running optimization job.
 
-    Sends SIGINT to the REINVENT4 process (which triggers a
-    checkpoint save if ``checkpoint_on_stop`` is enabled in the
-    process config).  Returns the checkpoint path for use with
-    ``resume_from`` in a subsequent ``run_optimization`` call.
+    With ``checkpoint_on_stop`` enabled in the process config, asks
+    REINVENT4 to save a checkpoint and exit, and waits up to
+    ``stop_grace_seconds`` for it: the job can only act on the request
+    once it abandons the scoring call it is in, which takes as long as
+    one RL step.  Returns the checkpoint path for use with
+    ``resume_from`` in a subsequent ``run_optimization`` call, or says
+    so in ``message`` when no checkpoint was written.
 
     Parameters
     ----------

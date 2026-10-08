@@ -554,9 +554,27 @@ Tests for Phase 4: background job manager, TOML config generation, score traject
 | 242 | TL requires SMILES | Error when neither `smiles` nor `smiles_file` provided | same class |
 | 243 | TL rejects both inputs | Error when both `smiles` and `smiles_file` provided | same class |
 | 244 | TL with validation SMILES | Validation file written and referenced in TOML | same class |
-| 245 | TL max concurrent enforced | Respects `max_concurrent_jobs` limit | same class |
+| 245 | TL max concurrent enforced | Respects `max_concurrent_jobs` limit. **Failed until 2026-10-08**: the cap was dead config and starting a job stopped every running one instead | same class |
 | 246 | TL job to_dict | `job_type = "transfer_learning"`, `num_epochs`, `output_model_file` present | same class |
 | 247 | TL metadata persistence | TL job restored correctly from disk on restart | same class |
+
+#### Job Concurrency Slots
+
+`max_concurrent_jobs` was defined in config and never read: `create_and_start`
+stopped every running job first, so one RL run was the hard ceiling. An RL step
+is mostly spent waiting on the scoring HTTP call, and placement/queueing is now
+the boltz gateway's job, so several runs share a GPU.
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 314 | Jobs run concurrently | A second job starts while the first keeps running, untouched and un-checkpointed | `pytest tests/test_optimization.py::TestJobManagerLifecycle -v` |
+| 315 | Cap enforced | The job past the limit is refused with "Maximum concurrent jobs", for RL and TL alike — they share the GPU so they share the slots | same class |
+| 316 | Queued holds a slot | A job registered but not yet reporting `running` still counts, closing the window where two callers both pass the check | same class |
+| 317 | Atomic claim | Four callers racing on two slots: exactly two start. The count and the registration share one lock acquisition | same class |
+| 318 | Slots free up | A completed, failed, or stopped job releases its slot | same class |
+| 319 | Refusal is actionable | The error lists the active job ids to stop, and names the setting to raise | same class |
+| 320 | No orphan on refusal | A refused job leaves no working directory behind | same class |
+| 321 | Restart frees slots | Both `queued` and `running` jobs are reset on restore, so an interrupted job cannot hold a slot forever | same class |
 
 #### Tools: run_transfer_learning
 
@@ -679,6 +697,41 @@ cluster, or service is needed.
 | 312 | Submit then poll | `?mode=async`, the result URL derived from the score URL, backoff between polls, and the overall deadline still bounding it | `pytest tests/test_external_scoring.py::TestSubmitThenPoll -v` |
 | 313 | Async misconfiguration is visible | A service that answers the submit normally instead of 202 is honoured as-is; a 202 with no `task_id` fails rather than hanging | same class |
 
+### REINVENT Runner (`tests/test_reinvent_runner.py`)
+
+Tests for `services/reinvent-runner/app.py` and the client that makes it a
+drop-in for the local `JobManager`. REINVENT4 is not installed in the test
+environment, so the manager and tool functions are patched out — which is also
+the point: nothing above the seam should need them.
+
+**Dependencies**: `fastapi`, `requests`, `PyYAML`
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 322 | Endpoints pass through | `/jobs`, `/tl-jobs`, status, stop, candidates, lists and the registries each delegate to the code that already exists, with `extra="forbid"` so a stale client cannot silently drop a parameter | `pytest tests/test_reinvent_runner.py::TestRunnerEndpoints -v` |
+| 323 | Refusals stay refusals | "Maximum concurrent jobs" comes back as `200` with an error dict, because that is the manager's own contract and preserving it keeps the client a drop-in; only unexpected failures are 5xx | same class |
+| 324 | Health names the real risk | Reports `reinvent_importable`, since a false there means the image is wrong rather than the service being down | same class |
+| 325 | TTPs stay agent-side | `/score` takes the TTP inline and has no `ttp_id` parameter at all | same class |
+| 326 | The client is a drop-in | Offers exactly the seven methods callers use, all of which exist on the local manager too | `pytest tests/test_reinvent_runner.py::TestRemoteJobManager -v` |
+| 327 | Failures keep their shape | An unreachable runner, a 5xx, and an unparseable body all become `{"error": ...}` rather than raising — callers would crash on a raise | same class |
+| 328 | List methods degrade safely | `list_jobs`/`get_alerts` return `[]` on failure, since an error dict would break every caller that iterates | same class |
+| 329 | Job ids are URL-encoded | A path-traversal-shaped id cannot escape its endpoint | same class |
+| 330 | The seam decides | `get_job_manager()` returns the local manager by default and the remote one when `runner.enabled`, with no restart needed; discovery and scoring follow the same switch | `pytest tests/test_reinvent_runner.py::TestSeam -v` |
+| 331 | A ttp_id is resolved first | Sent inline to the runner; an unresolvable id never reaches it | same class |
+| 332 | The runner never proxies to itself | `REINVENT_RUNNER_SELF` forces the local path, is set in both the image and the manifest, and the job endpoints hold their own manager so they cannot loop regardless | same class |
+
+#### Image Split
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 333 | Agent image is slim | No `COPY REINVENT4/`, no Zenodo download, no `REINVENT4_ROOT`, and not built on `rocm/pytorch` — 164 MB against 40.8 GB unpacked | `pytest tests/test_reinvent_runner.py::TestImageSplit -v` |
+| 334 | It stays slim | The build asserts `reinvent` and `torch` are **absent**, so a transitive dependency pulling them back fails the build instead of restoring a 40 GB image | same class |
+| 335 | Runner owns the heavy half | REINVENT4, the priors and the ROCm base are there, `externalrestscorer` is still verified as registered, and `reinvent4_agent` is not installed | same class |
+| 336 | No longer FROM dd-agent | The runner builds from its own base with the repo root as context, since it copies `REINVENT4/` and `reinvent4_mcp/` | same class |
+| 337 | Agent needs no GPU | `amd.com/gpu` is absent from the agent Deployment's requests and limits; only Boltz and the runner ask for one | same class, plus `pytest tests/test_k8s_manifests.py::TestPodSplit -v` |
+| 338 | The runner is mandatory | Both the ConfigMap and the baked `reinvent4_mcp_config.yaml` enable it, because a slim agent has no local REINVENT4 to fall back on | same class |
+| 339 | Compose moved the GPU too | The agent service drops the ROCm devices and the 128 g shm and waits on the runner, which has them; the runner still has no `ttps` mount | same class |
+
 ### Boltz Placement Harness (`tests/test_boltz_placement.py`)
 
 Tests for `k8s/scripts/verify-boltz-placement.py`, which proves concurrent
@@ -733,7 +786,7 @@ with the service modules under test)
 python -m pytest tests/ -v
 ```
 
-Expected: all 600+ tests pass in a few seconds.
+Expected: all 650+ tests pass in a few seconds.
 
 ---
 
@@ -1013,6 +1066,19 @@ on an idle one and queue the surplus. See
 | 72 | The RL path dials the gateway | `kubectl -n "${PROJECT}" exec deployment/dd-agentic -c dd-agent -- python -c "from reinvent4_mcp.tools.external import list_external_services as l; [print('%-22s %-10s %s' % (n, i['status'], i['url'])) for n, i in l().items()]"` | `boltz ok http://dd-agentic-boltz-gateway:8091/score` and the four CPU scorers direct — the ConfigMap path `ExternalRESTScorer` actually takes |
 | 73 | Scaling needs no proxy change | `kubectl -n "${PROJECT}" scale deployment/dd-agentic-boltz --replicas=3`, then watch the stats CSV | A third slot leaves `MAINT (resolution)` and turns `UP` **about 30 s after the pod is Ready** (10 s DNS hold + `rise 2 inter 10s`). Checking immediately shows the old count and looks like a failure |
 
+### REINVENT Runner (requires a cluster + GPU)
+
+The RL lifecycle can only really be exercised where REINVENT4 is installed. See
+[Move RL off the agent](k8s/README.md#move-rl-off-the-agent-reinvent-runner).
+
+| # | Test | How to run | Expected result |
+|---|------|-----------|-----------------|
+| 78 | Runner is healthy | `kubectl -n "${PROJECT}" exec deployment/dd-agentic -c dd-agent -- python -c "import urllib.request; print(urllib.request.urlopen('http://dd-agentic-reinvent-runner:8086/health').read().decode())"` | `reinvent_importable: true` and `max_concurrent_jobs` matching the config. A false there means the image lacks REINVENT4, which is a different problem from the service being down |
+| 79 | Registries over HTTP | `GET /components`, `/models`, `/transforms` | Measured: 61 scoring components, 9 priors, 8 transforms — the real registries, not stubs |
+| 80 | A real job over HTTP | `POST /jobs` with a QED-only scorer config and `max_steps: 2`, then poll `GET /jobs/{id}` | `running` then `completed`, and the job appears in `GET /jobs`. Proves REINVENT accepts the generated TOML and the subprocess lifecycle survives the move |
+| 81 | Images are split | `docker images dd-agent` after `build-images.sh` | **164 MB** on `python:3.12-slim`, and `docker run dd-agent:local python -c "import importlib.util as u; print(u.find_spec('reinvent'), u.find_spec('torch'))"` prints `None None`. The build fails outright if either is present |
+| 82 | The seam is invisible | Set `runner.enabled`, then drive the same job through `get_job_manager()` | Returns `RemoteJobManager`; same result as the direct call, and the third concurrent job is refused naming the two to stop — the slot limit holds across the HTTP boundary |
+
 ### Boltz Gateway: Cache and Coalescing (requires a cluster + GPU)
 
 The gateway reduces how much prediction is asked for at all. See
@@ -1031,9 +1097,9 @@ The gateway reduces how much prediction is asked for at all. See
 
 | Tier | Tests | Needs REINVENT4 | Needs LLM API | Needs Docker | Needs GPU | Needs Slurm |
 |------|-------|-----------------|---------------|--------------|-----------|-------------|
-| 1 - Unit | 600+ | No | No | No | No | No |
+| 1 - Unit | 650+ | No | No | No | No | No |
 | 2 - Integration | 39 | Yes | No | Partially | For RL/TL | No |
-| 3 - E2E | 77 | Yes | Yes | Partially | For RL/TL | Partially |
+| 3 - E2E | 82 | Yes | Yes | Partially | For RL/TL | Partially |
 
 ### Recommended Test Sequence
 

@@ -25,12 +25,12 @@ services:
     build:
       context: .
       dockerfile: services/dd-agent/Dockerfile
-    <<: *rocm-common
-    shm_size: "128g"
+    # CPU only: REINVENT4 and the priors live in reinvent-runner now, so this
+    # container needs no ROCm devices and no large shm. tty for the Rich UI.
+    tty: true
     labels:
       - "slurm.job.id=${SLURM_JOB_ID:-}"
       - "slurm.user=${SLURM_JOB_USER:-$USER}"
-      - "slurm.gpu=${REINVENT_GPU}"
     volumes:
       - ${DATA_DIR:-./data}/shared:/shared
       - ${DATA_DIR:-./data}/ttps:/root/.reinvent4_mcp/ttps
@@ -43,8 +43,6 @@ services:
       - LLM_GATEWAY_KEY=${LLM_GATEWAY_KEY:-}
       # Used instead of LLM_GATEWAY_KEY for non-AMD endpoints (Azure, Anthropic).
       - REINVENT4_AGENT_API_KEY=${REINVENT4_AGENT_API_KEY:-}
-      - AMD_VISIBLE_DEVICES=${REINVENT_GPU}
-      - HIP_VISIBLE_DEVICES=${REINVENT_GPU}
       - REINVENT4_AGENT_BACKEND=${REINVENT4_AGENT_BACKEND:-anthropic}
       - REINVENT4_AGENT_MODEL=${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}
       - REINVENT4_AGENT_BASE_URL=${REINVENT4_AGENT_BASE_URL:-https://llm-api.amd.com/Anthropic}
@@ -68,6 +66,8 @@ services:
     # cannot resolve/reach it need the SSH tunnel, which is opt-in via
     # `-f docker-compose.yml -f docker-compose.tunnel.yml`.
     depends_on:
+      reinvent-runner:
+        condition: service_healthy
       boltz:
         condition: service_healthy
       posebusters:
@@ -78,6 +78,38 @@ services:
         condition: service_healthy
       interaction-profiler:
         condition: service_healthy
+
+  # REINVENT4 lives here: RL/TL jobs, the in-process Scorer, the registries.
+  # This is the half that needs the GPU; the agent above does not.
+  reinvent-runner:
+    build:
+      context: .
+      dockerfile: services/reinvent-runner/Dockerfile
+    <<: *rocm-common
+    shm_size: "128g"
+    labels:
+      - "slurm.job.id=${SLURM_JOB_ID:-}"
+      - "slurm.user=${SLURM_JOB_USER:-$USER}"
+      - "slurm.gpu=${REINVENT_GPU}"
+    ports:
+      - "127.0.0.1:8086:8086"
+    volumes:
+      - ${DATA_DIR:-./data}/shared:/shared
+      - ${DATA_DIR:-./data}/jobs:/data/reinvent4_mcp/jobs
+      - ${DATA_DIR:-./data}/logs:/data/reinvent4_mcp/logs
+      - ${DATA_DIR:-./data}/tb_logs:/data/reinvent4_mcp/tb_logs
+      # Deliberately no ttps mount: TTPs are resolved agent-side and only the
+      # mapped scorer_config crosses the wire.
+    environment:
+      - AMD_VISIBLE_DEVICES=${REINVENT_GPU}
+      - HIP_VISIBLE_DEVICES=${REINVENT_GPU}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8086/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # First request imports torch and REINVENT4, which is slow.
+      start_period: 180s
 
   boltz:
     build:

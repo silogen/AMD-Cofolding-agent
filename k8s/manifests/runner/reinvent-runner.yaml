@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-reinvent-runner
+  labels:
+    app.kubernetes.io/name: dd-agentic-reinvent-runner
+    app.kubernetes.io/component: runner
+spec:
+  # One for now. Several runners need a runner-gateway to place jobs on the
+  # least-loaded one, which Phase 2 does not include; until then a second
+  # replica would just split the job table in two with no router in front.
+  replicas: 1
+  strategy:
+    # A surge pod would need a second amd.com/gpu and stay Pending.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-reinvent-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-reinvent-runner
+        app.kubernetes.io/component: runner
+    spec:
+      # An RL job is hours long and checkpoints on SIGINT, so give the job
+      # manager time to stop its subprocesses cleanly.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: reinvent-runner
+          image: reinvent-runner:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8086"
+            # One worker, always: the job table and the concurrency slots live
+            # in process memory, so a second would double the effective
+            # max_concurrent_jobs.
+            - --workers
+            - "1"
+          ports:
+            - name: runner-http
+              containerPort: 8086
+          env:
+            - name: REINVENT4_MCP_CONFIG
+              value: /app/config/reinvent4_mcp_config.yaml
+            # This process is the runner: never forward to itself.
+            - name: REINVENT_RUNNER_SELF
+              value: "1"
+          resources:
+            requests:
+              amd.com/gpu: "1"
+              cpu: "4"
+              memory: 32Gi
+            limits:
+              amd.com/gpu: "1"
+              cpu: "8"
+              memory: 128Gi
+          startupProbe:
+            # First request imports torch and REINVENT4, which is slow.
+            httpGet:
+              path: /health
+              port: runner-http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: runner-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: runner-http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            # Structures and MSAs it hands to the scorers, by path.
+            - name: data
+              mountPath: /shared
+              subPath: shared
+            # Job working dirs: TOML, checkpoints, the results CSV. On the
+            # volume so a job survives a restart of this pod.
+            - name: data
+              mountPath: /data/reinvent4_mcp/jobs
+              subPath: jobs
+            - name: data
+              mountPath: /data/reinvent4_mcp/logs
+              subPath: logs
+            - name: data
+              mountPath: /data/reinvent4_mcp/tb_logs
+              subPath: tb-logs
+            # Deliberately no ttps mount: TTPs are resolved agent-side and the
+            # mapped scorer_config is what crosses the wire, so the runner has
+            # no reason to read the store.
+            - name: agent-config
+              mountPath: /app/config
+              readOnly: true
+            - name: runner-shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+        - name: agent-config
+          configMap:
+            name: dd-agentic-config
+            items:
+              - key: reinvent4_mcp_config.yaml
+                path: reinvent4_mcp_config.yaml
+        - name: runner-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-reinvent-runner
+  labels:
+    app.kubernetes.io/name: dd-agentic-reinvent-runner
+    app.kubernetes.io/component: runner
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-reinvent-runner
+  ports:
+    - name: runner-http
+      port: 8086
+      targetPort: runner-http

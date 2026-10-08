@@ -11,8 +11,10 @@ Covers:
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pandas as pd
 import pytest
@@ -978,6 +980,193 @@ class TestJobManagerLifecycle:
             assert "error" in result
             assert "Maximum concurrent jobs" in result["error"]
 
+    def test_several_jobs_run_at_once(self, manager, tmp_path):
+        """The point of the slot limit: concurrent jobs, up to the cap.
+
+        Starting a job used to stop every running job first, so one RL run was
+        the hard ceiling however high ``max_concurrent_jobs`` was set. An RL
+        step is mostly spent waiting on the scoring HTTP call, so the GPU has
+        room for several.
+        """
+        with patch.object(manager, "_start_process"):
+            first = manager.create_and_start(
+                ttp_id="ttp-a", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+            manager._jobs[first["job_id"]].state = JobState.RUNNING
+            second = manager.create_and_start(
+                ttp_id="ttp-b", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+        assert "error" not in second
+        # The first is untouched: no auto-stop, no checkpoint, still running.
+        assert manager._jobs[first["job_id"]].state == JobState.RUNNING
+        assert "stopped_previous_jobs" not in second
+
+    def test_a_queued_job_holds_a_slot(self, manager):
+        """A job is registered before its subprocess reports RUNNING.
+
+        Counting only RUNNING would leave a window where two callers both pass
+        the capacity check.
+        """
+        with patch.object(manager, "_start_process"):
+            for i in range(manager._config.jobs.max_concurrent_jobs):
+                created = manager.create_and_start(
+                    ttp_id=f"ttp-{i}", ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )
+                # Left QUEUED on purpose -- _start_process is mocked.
+                assert manager._jobs[created["job_id"]].state == JobState.QUEUED
+
+            refused = manager.create_and_start(
+                ttp_id="ttp-excess", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+        assert "Maximum concurrent jobs" in refused["error"]
+
+    def test_the_refusal_says_what_to_stop(self, manager):
+        with patch.object(manager, "_start_process"):
+            held = [
+                manager.create_and_start(
+                    ttp_id=f"ttp-{i}", ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )["job_id"]
+                for i in range(manager._config.jobs.max_concurrent_jobs)
+            ]
+            refused = manager.create_and_start(
+                ttp_id="ttp-excess", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+        # An agent has to know which jobs to stop to make room.
+        assert sorted(refused["active_jobs"]) == sorted(held)
+        assert "jobs.max_concurrent_jobs" in refused["error"]
+
+    @pytest.mark.parametrize(
+        "freeing_state",
+        [JobState.COMPLETED, JobState.FAILED, JobState.STOPPED],
+    )
+    def test_a_finished_job_frees_its_slot(self, manager, freeing_state):
+        with patch.object(manager, "_start_process"):
+            jobs = [
+                manager.create_and_start(
+                    ttp_id=f"ttp-{i}", ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )["job_id"]
+                for i in range(manager._config.jobs.max_concurrent_jobs)
+            ]
+            manager._jobs[jobs[0]].state = freeing_state
+
+            allowed = manager.create_and_start(
+                ttp_id="ttp-next", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+        assert "error" not in allowed
+
+    def test_a_refused_job_leaves_nothing_behind(self, manager):
+        with patch.object(manager, "_start_process"):
+            for i in range(manager._config.jobs.max_concurrent_jobs):
+                manager.create_and_start(
+                    ttp_id=f"ttp-{i}", ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )
+            before = set(manager._working_root.glob("job_*"))
+
+            manager.create_and_start(
+                ttp_id="ttp-excess", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+        # No orphaned working dir for a job that never started.
+        assert set(manager._working_root.glob("job_*")) == before
+
+    def test_rl_and_tl_share_the_slots(self, manager):
+        # They share the GPU, so they have to share the cap.
+        with patch.object(manager, "_start_process"):
+            assert manager._config.jobs.max_concurrent_jobs == 2
+            manager.create_and_start(
+                ttp_id="ttp-a", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+            manager.create_and_start_tl(model="/model/prior.model", smiles=["CCO"])
+
+            refused = manager.create_and_start(
+                ttp_id="ttp-c", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+        assert "Maximum concurrent jobs" in refused["error"]
+
+    def test_a_restart_frees_slots_that_cannot_be_running(self, manager, config):
+        """Otherwise an interrupted job holds a slot forever.
+
+        Nothing survives the process that launched it, so both QUEUED and
+        RUNNING are reset on restore -- including QUEUED, which was previously
+        left alone because nothing counted it.
+        """
+        from reinvent4_mcp.jobs.manager import JobManager
+
+        with patch.object(manager, "_start_process"):
+            queued = manager.create_and_start(
+                ttp_id="ttp-a", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )["job_id"]
+            running = manager.create_and_start(
+                ttp_id="ttp-b", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )["job_id"]
+            manager._jobs[running].state = JobState.RUNNING
+            manager._save_metadata(manager._jobs[running])
+
+        revived = JobManager(config)
+
+        assert revived._jobs[queued].state == JobState.FAILED
+        assert revived._jobs[running].state == JobState.FAILED
+        with patch.object(revived, "_start_process"):
+            assert "error" not in revived.create_and_start(
+                ttp_id="ttp-c", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            )
+
+    def test_concurrent_callers_cannot_both_take_the_last_slot(self, manager):
+        """The count and the registration share one lock acquisition.
+
+        Checking first and registering later would let N supervisors driving
+        one runner all pass a check that only one of them should have.
+        """
+        import threading
+
+        results: list[dict] = []
+        barrier = threading.Barrier(4)
+
+        def _create(index: int) -> None:
+            barrier.wait()
+            results.append(manager.create_and_start(
+                ttp_id=f"ttp-{index}", ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG, model="/model/prior.model",
+            ))
+
+        with patch.object(manager, "_start_process"):
+            threads = [threading.Thread(target=_create, args=(i,)) for i in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+        started = [r for r in results if "error" not in r]
+        refused = [r for r in results if "error" in r]
+
+        assert len(started) == manager._config.jobs.max_concurrent_jobs
+        assert len(refused) == 4 - manager._config.jobs.max_concurrent_jobs
+        assert len(manager._active_job_ids()) == len(started)
+
     def test_get_status_unknown_job(self, manager):
         result = manager.get_status("nonexistent")
         assert "error" in result
@@ -1047,6 +1236,119 @@ class TestJobManagerStop:
 
         stop_result = manager.stop_job(job_id)
         assert "error" in stop_result
+
+    @staticmethod
+    def _running_job(manager, exits_after: int = 0):
+        """A RUNNING job whose process stops after `exits_after` signals."""
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+
+        job = manager._jobs[result["job_id"]]
+        job.state = JobState.RUNNING
+        job.pid = 4242
+
+        process = MagicMock()
+        process.poll.return_value = None
+        process.returncode = 0
+        remaining = {"waits": exits_after}
+
+        def wait(timeout=None):
+            if remaining["waits"] <= 0:
+                return 0
+            remaining["waits"] -= 1
+            raise subprocess.TimeoutExpired(cmd="reinvent", timeout=timeout)
+
+        process.wait.side_effect = wait
+        job._process = process
+        return job
+
+    def test_stop_asks_for_a_checkpoint_with_sigusr1(self, manager):
+        """SIGUSR1 is the only signal REINVENT treats as a controlled stop."""
+        job = self._running_job(manager)
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill") as kill:
+            manager.stop_job(job.job_id)
+
+        assert kill.call_args_list == [call(4242, signal.SIGUSR1)]
+        assert job.state == JobState.STOPPED
+
+    def test_stop_waits_a_whole_rl_step_for_the_checkpoint(self, manager):
+        """The grace period is configurable and spans more than one step."""
+        job = self._running_job(manager)
+        manager._config.jobs.stop_grace_seconds = 900.0
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill"):
+            manager.stop_job(job.job_id)
+
+        assert job._process.wait.call_args_list == [call(timeout=900.0)]
+
+    def test_stop_escalates_when_the_job_ignores_the_request(self, manager):
+        """A job that never checkpoints still gets terminated, then killed."""
+        job = self._running_job(manager, exits_after=2)
+        manager._config.jobs.stop_grace_seconds = 1.0
+        job.csv_path.write_text("Agent,Score\n26.4,0.92\n")
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill") as kill:
+            result = manager.stop_job(job.job_id)
+
+        assert [c.args[1] for c in kill.call_args_list] == [
+            signal.SIGUSR1, signal.SIGTERM, signal.SIGKILL,
+        ]
+        assert "no checkpoint" in result["message"]
+        assert "stop_grace_seconds" in result["message"]
+
+    def test_stop_before_the_first_step_is_not_reported_as_a_failure(self, manager):
+        """REINVENT has no agent to save until a step has updated the weights.
+
+        The empty results CSV is the signal: blaming the grace period here
+        would send an operator chasing a timeout that never happened.
+        """
+        job = self._running_job(manager)
+        job.csv_path.write_text("")
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill"):
+            result = manager.stop_job(job.job_id)
+
+        assert "first step" in result["message"]
+        assert "stop_grace_seconds" not in result["message"]
+
+    def test_stop_skips_the_checkpoint_when_disabled(self, manager):
+        """checkpoint_on_stop=false means terminate now, don't wait for a step."""
+        job = self._running_job(manager)
+        manager._config.jobs.checkpoint_on_stop = False
+        manager._config.jobs.stop_grace_seconds = 900.0
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill") as kill:
+            result = manager.stop_job(job.job_id)
+
+        assert [c.args[1] for c in kill.call_args_list] == [signal.SIGTERM]
+        assert job._process.wait.call_args_list == [call(timeout=10.0)]
+        assert "checkpoint_on_stop is off" in result["message"]
+
+    def test_stop_reports_the_checkpoint_it_found(self, manager):
+        job = self._running_job(manager)
+        job.checkpoint_path.write_text("checkpoint")
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill"):
+            result = manager.stop_job(job.job_id)
+
+        assert result["checkpoint_path"] == str(job.checkpoint_path)
+        assert "Checkpoint saved at" in result["message"]
+
+    def test_stop_tolerates_an_already_dead_process(self, manager):
+        job = self._running_job(manager)
+
+        with patch("reinvent4_mcp.jobs.manager.os.kill", side_effect=ProcessLookupError):
+            result = manager.stop_job(job.job_id)
+
+        assert job.state == JobState.STOPPED
+        assert result["state"] == "stopped"
+        assert not result["error"]
 
 
 # ---------------------------------------------------------------------------

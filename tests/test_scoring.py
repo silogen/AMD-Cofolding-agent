@@ -5,6 +5,12 @@ Tests cover:
 - TTP resolution (stored vs inline, error cases)
 - Response format (TTP metadata, mapper summary, external notes)
 - Scorer construction from TTP-derived config
+
+All of these exercise the **in-process** scorer, which in a deployed stack
+lives in reinvent-runner rather than the agent: the shipped config therefore
+enables the runner, and these tests pin it off so they keep testing the code
+path they are about. The HTTP path has its own tests in
+``test_reinvent_runner.py``.
 """
 
 from __future__ import annotations
@@ -17,6 +23,14 @@ import pytest
 
 from reinvent4_mcp.ttp.schema import TTP
 from reinvent4_mcp.ttp.store import TTPStore
+
+
+@pytest.fixture(autouse=True)
+def score_in_process(monkeypatch):
+    """Keep ``score_molecules`` on the local scorer for this module."""
+    monkeypatch.setattr(
+        "reinvent4_mcp.runner_client.runner_enabled", lambda: False
+    )
 
 
 # ---------------------------------------------------------------------------

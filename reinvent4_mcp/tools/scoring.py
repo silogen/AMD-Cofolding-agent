@@ -393,6 +393,27 @@ def score_molecules(
             "summary": {"n_molecules": 0, "n_valid": 0, "per_component": {}},
         }
 
+    from reinvent4_mcp.runner_client import remote_score_molecules, runner_enabled
+
+    if runner_enabled():
+        # The Scorer lives wherever REINVENT4 is installed. A ``ttp_id`` is
+        # resolved here first, because the TTP store stays on this side and the
+        # runner is deliberately stateless about it.
+        resolved = ttp
+        if ttp_id and not resolved:
+            from reinvent4_mcp.tools.ttp import resolve_ttp
+
+            found = resolve_ttp(ttp_id=ttp_id)
+            if isinstance(found, dict) and "error" in found:
+                return found
+            resolved = found.model_dump() if hasattr(found, "model_dump") else found
+        return remote_score_molecules(
+            smiles=smiles,
+            components=components,
+            aggregation=aggregation,
+            ttp=resolved,
+        )
+
     if ttp_id or ttp:
         return _score_with_ttp(smiles, ttp_id=ttp_id, ttp_data=ttp)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the seven dd_agentic images locally. No registry push.
+# Build the eight dd_agentic images locally. No registry push.
 #
 # Must be run from examples/dd_agentic/ (or pass --project-dir).
 # Requires REINVENT4/, boltz2/, models/admet/, and models/retrodmta/ as
@@ -31,6 +31,8 @@ if [[ -z "${PROJECT_DIR}" ]]; then
 fi
 cd "${PROJECT_DIR}"
 
+# REINVENT4/ is consumed by the reinvent-runner build (it used to be the
+# agent's); boltz2/ by the boltz wrapper; models/ by the two predictors.
 for required in REINVENT4 boltz2 models/admet models/retrodmta; do
     if [[ ! -e "${required}" ]]; then
         echo "missing ${PROJECT_DIR}/${required}" >&2
@@ -55,6 +57,10 @@ docker build --file services/interaction-profiler/Dockerfile \
     --tag "interaction-profiler:${TAG}" .
 docker build --file services/boltz-gateway/Dockerfile \
     --tag "boltz-gateway:${TAG}" services/boltz-gateway
+# Owns REINVENT4 + the Zenodo priors, so this is the slow one. Context is the
+# repo root, where REINVENT4/ and reinvent4_mcp/ live.
+docker build --file services/reinvent-runner/Dockerfile \
+    --tag "reinvent-runner:${TAG}" .
 
 echo "built:"
 echo "  dd-agent:${TAG}"
@@ -64,3 +70,4 @@ echo "  admet-predictor:${TAG}"
 echo "  retrodmta-predictor:${TAG}"
 echo "  interaction-profiler:${TAG}"
 echo "  boltz-gateway:${TAG}"
+echo "  reinvent-runner:${TAG}"

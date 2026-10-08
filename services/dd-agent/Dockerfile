@@ -1,78 +1,50 @@
-# Extends the REINVENT4 ROCm image with the MCP server + agent CLI.
+# The agent and the MCP server. CPU only, no REINVENT4, no priors.
+#
+# This image used to extend the REINVENT4 ROCm image and bake in REINVENT4 plus
+# the Zenodo priors: ~11 GiB that every agent replica had to pull, and a GPU it
+# had to pin whether or not it was running a job. All of that now lives in
+# reinvent-runner, and the agent reaches it over HTTP (runner.enabled in the
+# process config), so agent count and RL capacity scale independently.
+#
+# Neither reinvent4_mcp nor reinvent4_agent depends on torch or REINVENT4 --
+# they need mcp, pydantic, numpy, pandas, requests and the LLM clients -- so the
+# base here is plain python.
 #
 # Build from the repo root:
 #   docker build -f services/dd-agent/Dockerfile -t dd-agent .
 #
-# Run interactively on a GPU node:
-#   docker run -it \
-#     --device=/dev/kfd --device=/dev/dri/renderD<ID> \
-#     --network host --ipc host --group-add video \
-#     --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-#     --shm-size 128G \
-#     -e LLM_GATEWAY_KEY="$LLM_GATEWAY_KEY" \
-#     -v $(pwd)/logs:/logs \
-#     dd-agent
+# Run interactively:
+#   docker run -it -e LLM_GATEWAY_KEY="$LLM_GATEWAY_KEY" -v $(pwd)/logs:/logs dd-agent
 
-# REINVENT4 (this checkout) requires Python >=3.11, so we build on the py3.12
-# ROCm base (same family the boltz service uses). Building on py3.10 makes
-# `pip install .` silently skip via requires-python, and install.py's sp.run()
-# has no check=True, so the failure is swallowed and the image ends up WITHOUT
-# rdkit/xxhash/numpy/etc. -> endless "No module named X" at runtime.
-FROM rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
+FROM python:3.12-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# --- Install REINVENT4 (torch comes from the base image; strip the pins) ---
-COPY REINVENT4/ /app/REINVENT4/
-WORKDIR /app/REINVENT4
-
-# `-d none` = core deps only (rdkit, xxhash, numpy, pandas, pydantic, ...),
-# skipping openeye (needs license/index) and isim (git). The final import check
-# turns any silent install failure into a hard build failure.
-RUN sed -i.bak '/torch==/d' pyproject.toml && \
-    sed -i.bak '/torchvision/d' pyproject.toml && \
-    python install.py cpu -d none && \
-    pip install --no-cache-dir --upgrade "numpy>=2,<3" "scipy>=1.13" && \
-    python -c "import numpy, scipy; from scipy.stats import gaussian_kde; import rdkit, xxhash, tomllib, pandas, pydantic; print('REINVENT4 deps OK; numpy', numpy.__version__, 'scipy', scipy.__version__)"
-
-# --- Download prior models from Zenodo ---
-# Fail the build (not silently at runtime) if a prior is missing, an HTTP
-# error page, or truncated. Checksums are the MD5s published by Zenodo for
-# record 15641297; verifying them also catches partial/corrupt downloads.
-RUN mkdir -p /app/REINVENT4/priors && \
-    wget --tries=3 -q -O /app/REINVENT4/priors/reinvent.prior \
-      "https://zenodo.org/records/15641297/files/reinvent.prior?download=1" && \
-    wget --tries=3 -q -O /app/REINVENT4/priors/mol2mol_medium_similarity.prior \
-      "https://zenodo.org/records/15641297/files/mol2mol_medium_similarity.prior?download=1" && \
-    echo "f268eb072f4fca69ca9434768d3cd461  /app/REINVENT4/priors/reinvent.prior" | md5sum -c - && \
-    echo "78b75e478bfd7dcccee8ece010bc0b07  /app/REINVENT4/priors/mol2mol_medium_similarity.prior" | md5sum -c -
-
-# --- Install MCP server + agent on top ---
 WORKDIR /app
 COPY reinvent4_mcp/ /app/reinvent4_mcp/
 COPY reinvent4_agent/ /app/reinvent4_agent/
 COPY reinvent4_mcp_config.yaml /app/reinvent4_mcp_config.yaml
 
-# Install the MCP server + agent, then pin numpy/scipy LAST so their resolution
-# can't be clobbered by a transitive dependency (e.g. an older numpy<2 pin).
-# Verify the exact import REINVENT4 needs at RL startup so any ABI mismatch
-# fails the build, not the run.
-RUN pip install --no-cache-dir /app/reinvent4_mcp /app/reinvent4_agent && \
-    pip install --no-cache-dir --upgrade "numpy>=2,<3" "scipy>=1.13" && \
-    python -c "import numpy, scipy; from scipy.stats import gaussian_kde; import reinvent; \
-import reinvent4_mcp.utils as u; u.ensure_reinvent4_importable(); \
-from reinvent.scoring.importer import get_registry; r = get_registry(); \
-assert 'externalrestscorer' in r, sorted(r); \
-print('FINAL env OK; externalrestscorer registered; numpy', numpy.__version__, 'scipy', scipy.__version__)"
+# rdkit is not a declared dependency of either package: it is used in one
+# guarded place, to validate Mol2Mol seed SMILES before a job is dispatched.
+# Worth ~120 MB here against the 11 GiB removed, since without it that check
+# degrades to a warning and a bad seed only fails later, inside the RL run.
+RUN pip install --no-cache-dir /app/reinvent4_mcp /app/reinvent4_agent "rdkit>=2024.3.1"
+
+# The inverse of the check this image used to make. REINVENT4 being *absent* is
+# the point of the split, so a torch or REINVENT4 dependency creeping back in
+# should fail the build rather than quietly restoring an 11 GiB image.
+RUN python -c "import importlib.util as u; \
+assert u.find_spec('reinvent') is None, 'REINVENT4 is back in the agent image; it belongs in reinvent-runner'; \
+assert u.find_spec('torch') is None, 'torch is back in the agent image'; \
+import reinvent4_mcp.server, reinvent4_agent.cli, rdkit; \
+from reinvent4_mcp.config import ProcessConfig; ProcessConfig(); \
+print('agent image OK: MCP server and agent import, REINVENT4 absent')"
 
 # --- Environment ---
-ENV REINVENT4_ROOT=/app/REINVENT4
 ENV REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.yaml
-# Custom REINVENT4 plugins (reinvent_plugins/components namespace layout) on the
-# path so ExternalRESTScorer is discoverable natively in the server AND the RL
-# worker subprocess. Points at the source copy (always present); the installed
-# copy under site-packages/reinvent4_mcp/_plugins is added by the code too.
-ENV PYTHONPATH=/app/reinvent4_mcp/_plugins:${PYTHONPATH}
+# No REINVENT4_ROOT and no reinvent_plugins on the path: both exist for
+# REINVENT's own scorer, which runs in the RL subprocess on the runner.
 
 # AMD gateway defaults
 ENV REINVENT4_AGENT_BACKEND=anthropic
@@ -84,8 +56,7 @@ ENV REINVENT4_AGENT_LOG_DIR=/logs
 # LLM_GATEWAY_KEY must be provided at runtime via -e
 
 # Entrypoint wrapper timestamps captured logs (file / docker logs) while leaving
-# interactive TTY sessions untouched. Copied late so it doesn't bust the cache
-# of the heavy install layers above.
+# interactive TTY sessions untouched.
 COPY services/dd-agent/entrypoint.sh /usr/local/bin/dd-agent-entrypoint.sh
 RUN chmod +x /usr/local/bin/dd-agent-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/dd-agent-entrypoint.sh"]

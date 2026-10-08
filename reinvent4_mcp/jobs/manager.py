@@ -10,6 +10,7 @@ import enum
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -38,6 +39,13 @@ class JobState(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
+
+
+# States that hold one of the ``max_concurrent_jobs`` slots. QUEUED counts as
+# well as RUNNING: a job is registered before its subprocess reports back, and
+# ignoring that window would let two callers arriving together both pass the
+# capacity check.
+ACTIVE_JOB_STATES = frozenset({JobState.QUEUED, JobState.RUNNING})
 
 
 class JobType(str, enum.Enum):
@@ -162,9 +170,13 @@ class JobManager:
     ) -> dict[str, Any]:
         """Create a new job, generate the TOML config, and start the subprocess.
 
-        Any currently running jobs are stopped first (with checkpoint save)
-        to avoid resource contention (especially with external scoring
-        services like Boltz2).
+        Refused when ``jobs.max_concurrent_jobs`` are already active. This used
+        to stop every running job instead, which capped the process at one RL
+        run: the stated reason was contention with external scoring services,
+        and that is now the boltz gateway's job -- it places each batch on an
+        idle replica and queues the rest. An RL step is mostly spent waiting on
+        that HTTP call, so several jobs share a GPU comfortably; memory is the
+        real limit, which is what the slot count is for.
 
         Returns a summary dict with job_id and working directory.
         """
@@ -174,7 +186,8 @@ class JobManager:
         except ValueError as exc:
             return {"error": str(exc)}
 
-        stopped_jobs = self._stop_running_jobs()
+        if (full := self._refuse_if_full()) is not None:
+            return full
 
         job_id = str(uuid.uuid4())[:8]
         job_dir = self._working_root / f"job_{job_id}"
@@ -238,12 +251,15 @@ class JobManager:
 
         self._save_metadata(job)
 
-        with self._lock:
-            self._jobs[job_id] = job
+        if (full := self._claim_slot(job)) is not None:
+            # Another caller took the last slot while this one was writing its
+            # config. Leave nothing behind.
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return full
 
         self._start_process(job)
 
-        result = {
+        return {
             "job_id": job_id,
             "state": job.state.value,
             "working_dir": str(job_dir),
@@ -252,9 +268,6 @@ class JobManager:
             "max_steps": max_steps,
             "resume_from": resume_from,
         }
-        if stopped_jobs:
-            result["stopped_previous_jobs"] = stopped_jobs
-        return result
 
     def create_and_start_tl(
         self,
@@ -291,7 +304,8 @@ class JobManager:
         except ValueError as exc:
             return {"error": str(exc)}
 
-        stopped_jobs = self._stop_running_jobs()
+        if (full := self._refuse_if_full()) is not None:
+            return full
 
         job_id = str(uuid.uuid4())[:8]
         job_dir = self._working_root / f"job_{job_id}"
@@ -346,12 +360,13 @@ class JobManager:
 
         self._save_metadata(job)
 
-        with self._lock:
-            self._jobs[job_id] = job
+        if (full := self._claim_slot(job)) is not None:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return full
 
         self._start_process(job)
 
-        result = {
+        return {
             "job_id": job_id,
             "job_type": "transfer_learning",
             "state": job.state.value,
@@ -362,9 +377,6 @@ class JobManager:
             "output_model_file": str(job_dir / output_model_file),
             "n_training_smiles": len(smiles) if smiles else None,
         }
-        if stopped_jobs:
-            result["stopped_previous_jobs"] = stopped_jobs
-        return result
 
     def get_status(self, job_id: str) -> dict[str, Any]:
         """Return current job status with score trajectory.
@@ -387,8 +399,60 @@ class JobManager:
 
         return result
 
+    @staticmethod
+    def _completed_a_step(job: JobInfo) -> bool:
+        """Whether any step has reported results yet.
+
+        The CSV exists from the moment the job starts and stays empty until
+        the first step is written to it.
+        """
+
+        try:
+            return job.csv_path.stat().st_size > 0
+        except OSError:
+            return False
+
+    def _signal_and_wait(self, job: JobInfo, first_signal: int, grace: float) -> None:
+        """Signal the job, then escalate to SIGTERM and SIGKILL if it hangs on.
+
+        Returns as soon as the process is gone, so a job that checkpoints
+        promptly costs nothing extra.
+        """
+
+        escalation = [(first_signal, grace)]
+        if first_signal != signal.SIGTERM:
+            escalation.append((signal.SIGTERM, 10.0))
+        escalation.append((signal.SIGKILL, 5.0))
+
+        for sig, timeout in escalation:
+            try:
+                os.kill(job.pid, sig)
+            except ProcessLookupError:
+                return
+
+            try:
+                job._process.wait(timeout=timeout)
+                return
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Job %s still running %.0fs after %s",
+                    job.job_id, timeout, signal.Signals(sig).name,
+                )
+
+        logger.error("Job %s could not be killed", job.job_id)
+
     def stop_job(self, job_id: str) -> dict[str, Any]:
-        """Stop a running job gracefully (SIGINT for checkpoint save)."""
+        """Stop a running job, letting it checkpoint first when configured.
+
+        REINVENT turns SIGUSR1 into a *controlled* stage interrupt: it saves the
+        checkpoint, logs why it is terminating and exits 0. Any other signal
+        becomes an uncontrolled one, which still writes the checkpoint but
+        leaves the exception uncaught, so the job looks like it crashed.
+
+        Either way it can only notice the signal while it is inside the scoring
+        call, and only unwind to the checkpoint-writing handler once that call
+        is abandoned, so the grace period has to span a full RL step.
+        """
 
         job = self._get_job(job_id)
         if isinstance(job, dict):
@@ -400,26 +464,21 @@ class JobManager:
                 "job": job.to_dict(),
             }
 
+        checkpoint_on_stop = self._config.jobs.checkpoint_on_stop
+
         if job._process and job._process.poll() is None:
-            logger.info("Sending SIGINT to job %s (pid %d)", job_id, job.pid)
-            try:
-                os.kill(job.pid, signal.SIGINT)
-                try:
-                    job._process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    logger.warning("Job %s did not stop after SIGINT, sending SIGTERM", job_id)
-                    job._process.terminate()
-                    try:
-                        job._process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        logger.warning("Job %s did not stop after SIGTERM, sending SIGKILL", job_id)
-                        job._process.kill()
-                        try:
-                            job._process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            logger.error("Job %s could not be killed", job_id)
-            except ProcessLookupError:
-                pass
+            if checkpoint_on_stop:
+                grace = self._config.jobs.stop_grace_seconds
+                logger.info(
+                    "Asking job %s (pid %d) to checkpoint and stop, waiting up to %.0fs",
+                    job_id, job.pid, grace,
+                )
+                self._signal_and_wait(job, signal.SIGUSR1, grace)
+            else:
+                logger.info(
+                    "Terminating job %s (pid %d) without a checkpoint", job_id, job.pid
+                )
+                self._signal_and_wait(job, signal.SIGTERM, 10.0)
 
         job.state = JobState.STOPPED
         job.finished_at = datetime.now(timezone.utc).isoformat()
@@ -428,10 +487,27 @@ class JobManager:
         self._save_metadata(job)
 
         result = job.to_dict()
-        result["message"] = "Job stopped"
         if job.checkpoint_path.exists():
             result["checkpoint_path"] = str(job.checkpoint_path)
-            result["message"] += f". Checkpoint saved at {job.checkpoint_path}"
+            result["message"] = f"Job stopped. Checkpoint saved at {job.checkpoint_path}"
+        elif checkpoint_on_stop and not self._completed_a_step(job):
+            # REINVENT only has an agent to save once a step has updated the
+            # weights, so a job stopped inside its first scoring call has
+            # nothing to checkpoint and nothing went wrong.
+            result["message"] = (
+                "Job stopped before it finished its first step, so there was no "
+                "trained agent to checkpoint. Start again rather than resuming."
+            )
+        elif checkpoint_on_stop:
+            result["message"] = (
+                "Job stopped, but it wrote no checkpoint: it was killed before it "
+                "finished the step it was on. Raise jobs.stop_grace_seconds to "
+                "give it longer, and check the job log for what it was waiting on."
+            )
+        else:
+            result["message"] = (
+                "Job stopped without a checkpoint (jobs.checkpoint_on_stop is off)"
+            )
 
         return result
 
@@ -907,9 +983,13 @@ class JobManager:
                     exit_code=data.get("exit_code"),
                     output_model_file=data.get("output_model_file"),
                 )
-                if job.state == JobState.RUNNING:
+                # Anything that held a slot is dead with the process that ran
+                # it. Resetting QUEUED as well as RUNNING matters now that the
+                # slot count is enforced: a job interrupted before it started
+                # would otherwise hold one of them forever.
+                if job.state in ACTIVE_JOB_STATES:
                     job.state = JobState.FAILED
-                    job.error = "Server restarted while job was running"
+                    job.error = "Server restarted while job was active"
                     self._save_metadata(job)
 
                 self._jobs[job_id] = job
@@ -921,40 +1001,53 @@ class JobManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _stop_running_jobs(self) -> list[dict[str, str]]:
-        """Stop all currently running jobs before starting a new one.
+    def active_job_ids(self) -> list[str]:
+        """Jobs currently holding a concurrency slot.
 
-        Returns a list of dicts with job_id and checkpoint_path for each
-        stopped job so the caller can report what was stopped.
+        The public view, for callers that want to report capacity -- the
+        runner's ``/health`` among them.
         """
         with self._lock:
-            running = [
-                j for j in self._jobs.values() if j.state == JobState.RUNNING
-            ]
+            return self._active_job_ids()
 
-        stopped: list[dict[str, str]] = []
-        for job in running:
-            logger.info(
-                "Auto-stopping job %s before launching new job", job.job_id,
-            )
-            try:
-                result = self.stop_job(job.job_id)
-                entry: dict[str, str] = {"job_id": job.job_id}
-                if "checkpoint_path" in result:
-                    entry["checkpoint_path"] = result["checkpoint_path"]
-                stopped.append(entry)
-            except Exception:
-                logger.error(
-                    "Failed to stop job %s, forcing state to stopped",
-                    job.job_id, exc_info=True,
-                )
-                job.state = JobState.STOPPED
-                job.finished_at = datetime.now(timezone.utc).isoformat()
-                job.error = "Force-stopped: process did not respond to signals"
-                self._save_metadata(job)
-                stopped.append({"job_id": job.job_id})
+    def _active_job_ids(self) -> list[str]:
+        """Jobs holding a concurrency slot. Caller must hold ``self._lock``."""
+        return [
+            j.job_id for j in self._jobs.values() if j.state in ACTIVE_JOB_STATES
+        ]
 
-        return stopped
+    def _capacity_error(self) -> dict[str, Any]:
+        """Why the job was refused, and what to stop. Caller holds the lock."""
+        active = self._active_job_ids()
+        return {
+            "error": (
+                f"Maximum concurrent jobs ({self._config.jobs.max_concurrent_jobs}) "
+                f"already active: {', '.join(active)}. Stop one first, or raise "
+                "jobs.max_concurrent_jobs."
+            ),
+            "active_jobs": active,
+        }
+
+    def _refuse_if_full(self) -> Optional[dict[str, Any]]:
+        """Pre-check, so a job that cannot start does no filesystem work."""
+        with self._lock:
+            if len(self._active_job_ids()) >= self._config.jobs.max_concurrent_jobs:
+                return self._capacity_error()
+        return None
+
+    def _claim_slot(self, job: JobInfo) -> Optional[dict[str, Any]]:
+        """Register *job* unless every slot is taken.
+
+        The count and the registration share one lock acquisition, so two
+        callers arriving together cannot both get through -- which matters now
+        that several agents can drive one runner. Returns an error dict when
+        the slot was lost, or None once the job is registered.
+        """
+        with self._lock:
+            if len(self._active_job_ids()) >= self._config.jobs.max_concurrent_jobs:
+                return self._capacity_error()
+            self._jobs[job.job_id] = job
+        return None
 
     def _get_job(self, job_id: str) -> JobInfo | dict[str, Any]:
         with self._lock:
@@ -1507,8 +1600,18 @@ def _scan_log_errors(job: JobInfo, tail_lines: int = 200) -> list[dict[str, Any]
 _manager: Optional[JobManager] = None
 
 
-def get_job_manager() -> JobManager:
-    """Return the singleton ``JobManager``, creating it on first call."""
+def get_job_manager():
+    """Return whatever owns the jobs: this process, or the runner service.
+
+    With ``runner.enabled`` the caller gets a ``RemoteJobManager`` speaking the
+    same seven methods over HTTP, so no tool has to know where REINVENT4 runs.
+    Not cached, so flipping the config takes effect without a restart.
+    """
+    from reinvent4_mcp.runner_client import RemoteJobManager, runner_enabled
+
+    if runner_enabled():
+        return RemoteJobManager()
+
     global _manager
     if _manager is None:
         _manager = JobManager()

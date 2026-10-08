@@ -53,6 +53,7 @@ SCORER_ENDPOINTS: dict[str, tuple[str, int]] = {
 AGENT_DEPLOYMENT = "dd-agentic"
 BOLTZ_DEPLOYMENT = "dd-agentic-boltz"
 BOLTZ_PROXY = "dd-agentic-boltz-proxy"
+RUNNER_DEPLOYMENT = "dd-agentic-reinvent-runner"
 BOLTZ_GATEWAY = "dd-agentic-boltz-gateway"
 
 # services/boltz2/app.py kills a prediction at this many seconds, so every
@@ -67,6 +68,8 @@ SHARED_VOLUME_DEPLOYMENTS = {
     "dd-agentic-boltz-gateway",
     "dd-agentic-posebusters",
     "dd-agentic-interaction-profiler",
+    # Runs the RL jobs, so it writes the job dirs and reads the MSAs.
+    RUNNER_DEPLOYMENT,
 }
 
 
@@ -183,15 +186,22 @@ class TestPodSplit:
             names = [c["name"] for c in _containers(deployments[service_name])]
             assert names == [container]
 
-    def test_gpu_demand_is_the_agent_plus_the_boltz_replicas(self, deployments):
+    def test_gpu_demand_is_the_gpu_workloads_times_their_replicas(self, deployments):
         # What has to be free on the node, which is per *pod* and so scales
         # with replicas -- the one number a bumped M silently changes.
         demand = sum(
             _gpus(d) * d["spec"].get("replicas", 1) for d in deployments.values()
         )
-        boltz = deployments[BOLTZ_DEPLOYMENT]["spec"]["replicas"]
+        expected = sum(
+            _gpus(deployments[name]) * deployments[name]["spec"].get("replicas", 1)
+            for name in (BOLTZ_DEPLOYMENT, RUNNER_DEPLOYMENT)
+        )
 
-        assert demand == 1 + boltz
+        # Only Boltz and the runner; everything else, the agent included, is
+        # CPU-only now that REINVENT4 moved out of the agent image.
+        assert demand == expected
+        assert _gpus(deployments[RUNNER_DEPLOYMENT]) == 1
+        assert _gpus(deployments[AGENT_DEPLOYMENT]) == 0
 
     def test_gpu_deployments_never_surge(self, deployments):
         for name, deployment in deployments.items():
