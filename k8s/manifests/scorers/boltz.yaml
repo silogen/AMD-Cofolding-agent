@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-boltz
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz
+    app.kubernetes.io/component: scorer
+spec:
+  # One GPU per replica, placed by dd-agentic-boltz-gateway. Raising this is
+  # safe only because that gateway is in front: a replica serves exactly one
+  # prediction at a time, so the headless Service below would otherwise hand a
+  # six-minute request to a busy replica while another sat idle.
+  replicas: 2
+  strategy:
+    # Zero surge, so a rollout never asks for an extra amd.com/gpu and the
+    # replaced replica's GPU is freed first. Unlike Recreate this keeps M-1
+    # replicas serving, which is the point of having more than one.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-boltz
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-boltz
+        app.kubernetes.io/component: scorer
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: boltz
+          image: boltz2-wrapper:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8091"
+          ports:
+            - name: boltz-http
+              containerPort: 8091
+          env:
+            # "0" enables boltz's optimized kernels. Default keeps them off;
+            # k8s/scripts/ab-boltz-kernels.py measures what they are worth.
+            - name: BOLTZ_NO_KERNELS
+              value: "1"
+            # Stated rather than left to the app default because the gateway
+            # depends on it: its maxconn 1 per replica is only "one prediction
+            # at a time" while this is 1. Raise both together or not at all.
+            - name: BOLTZ_MAX_CONCURRENCY
+              value: "1"
+          resources:
+            requests:
+              amd.com/gpu: "1"
+              cpu: "4"
+              memory: 32Gi
+            limits:
+              amd.com/gpu: "1"
+              cpu: "8"
+              memory: 96Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: boltz-http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: boltz-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: boltz-http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+            - name: data
+              mountPath: /cache
+              subPath: boltz-cache
+            - name: boltz-shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+        - name: boltz-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-boltz
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz
+    app.kubernetes.io/component: scorer
+spec:
+  type: ClusterIP
+  # Headless on purpose. A ClusterIP would collapse the replicas behind one
+  # virtual address, so the gateway could neither see them individually nor
+  # track which is busy; resolving this name returns one A record per ready
+  # pod, which is what server-template expands into one slot each. Scoring
+  # traffic goes to dd-agentic-boltz-gateway, not here.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: dd-agentic-boltz
+  ports:
+    - name: boltz-http
+      port: 8091
+      targetPort: boltz-http

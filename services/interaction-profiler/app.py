@@ -154,10 +154,12 @@ class ScoreParams(BaseModel):
         description="Interaction family to count: hbond | hydrophobic | ionic | pi_stacking | "
         "pi_cation | cation_pi | halogen_bond | metal | water_bridge | ... | all (total).",
     )
-    structure_paths: list[str] | None = Field(
+    structure_paths: list[str | None] | None = Field(
         default=None,
         description="Per-SMILES structure paths (index-aligned); injected from an upstream "
-        "structure producer (e.g. Boltz) via depends_on. Required to count interactions.",
+        "structure producer (e.g. Boltz) via depends_on. Required to count interactions. "
+        "A null entry means the upstream producer skipped that molecule, and scores null "
+        "here -- the holes are kept so the list stays aligned with the SMILES.",
     )
     ph: float = Field(default=7.4, ge=0.0, le=14.0, description="Protonation pH.")
     radius: float = Field(default=8.0, ge=1.0, le=25.0, description="Pocket crop radius (A).")

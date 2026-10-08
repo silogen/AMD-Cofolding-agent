@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the six dd_agentic images locally. No registry push.
+# Build the seven dd_agentic images locally. No registry push.
 #
 # Must be run from examples/dd_agentic/ (or pass --project-dir).
 # Requires REINVENT4/, boltz2/, models/admet/, and models/retrodmta/ as
@@ -53,6 +53,8 @@ docker build --file services/retrodmta-predictor/Dockerfile \
     --tag "retrodmta-predictor:${TAG}" .
 docker build --file services/interaction-profiler/Dockerfile \
     --tag "interaction-profiler:${TAG}" .
+docker build --file services/boltz-gateway/Dockerfile \
+    --tag "boltz-gateway:${TAG}" services/boltz-gateway
 
 echo "built:"
 echo "  dd-agent:${TAG}"
@@ -61,3 +63,4 @@ echo "  posebusters:${TAG}"
 echo "  admet-predictor:${TAG}"
 echo "  retrodmta-predictor:${TAG}"
 echo "  interaction-profiler:${TAG}"
+echo "  boltz-gateway:${TAG}"

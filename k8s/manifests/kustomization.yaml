@@ -9,11 +9,27 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - aim-service.yaml
+  # One Deployment + ClusterIP Service each. The ConfigMap's scoring
+  # service_urls are these Service names.
+  - scorers/boltz.yaml
+  # Least-busy placement across the M boltz replicas.
+  - scorers/boltz-proxy.yaml
+  # Result cache, batch coalescing and /stats in front of the proxy. This is
+  # what the ConfigMap dials.
+  - scorers/boltz-gateway.yaml
+  - scorers/posebusters.yaml
+  - scorers/interaction-profiler.yaml
+  - scorers/admet.yaml
+  - scorers/retrodmta.yaml
 
 labels:
   - pairs:
       app.kubernetes.io/part-of: dd-agentic
       app.kubernetes.io/managed-by: kustomize
+    # Also label the pods, so `kubectl get pods`/`wait --for=delete` can select
+    # the whole fleet. Selectors are deliberately left alone: a Deployment's
+    # spec.selector is immutable once created.
+    includeTemplates: true
 
 images:
   - name: dd-agent
@@ -21,6 +37,9 @@ images:
     newTag: local
   - name: boltz2-wrapper
     newName: boltz2-wrapper
+    newTag: local
+  - name: boltz-gateway
+    newName: boltz-gateway
     newTag: local
   - name: posebusters
     newName: posebusters

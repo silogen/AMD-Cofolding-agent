@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+# Canonicalises SMILES before keying the cache. The RL config sets
+# randomize_smiles, so without this the same molecule arrives spelled
+# differently every step and the cache would almost never hit.
+rdkit>=2024.3.1

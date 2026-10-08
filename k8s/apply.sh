@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Apply the k8s manifests into an existing project namespace and pin
-# deployment/dd-agentic to a GPU node (the one that already has the selected
-# images). Does not pin AIMService/dd-agentic-aim — that scheduler places the
-# predictor where acceleratorCount GPUs are free. Re-run with a different
-# --node to move the agent pod (strategic-merge nodeSelector).
+# Apply the k8s manifests into an existing project namespace and pin every
+# Deployment to one GPU node (the one that already has the selected images).
+# Does not pin AIMService/dd-agentic-aim — that scheduler places the predictor
+# where acceleratorCount GPUs are free. Re-run with a different --node to move
+# the workloads.
 set -euo pipefail
+
+# The label kustomization.yaml stamps on every resource; used here to restart
+# and wait for the whole set without naming each Deployment.
+PART_OF="app.kubernetes.io/part-of=dd-agentic"
 
 PROJECT=""
 NODE=""
@@ -35,7 +39,7 @@ done
 
 if [[ -z "${PROJECT}" || -z "${NODE}" ]]; then
     echo "usage: $0 --namespace <project-namespace> --node <dd-agentic-gpu-node> [--tag local]" >&2
-    echo "  --node pins deployment/dd-agentic only (not AIM). See k8s/README.md." >&2
+    echo "  --node pins every dd-agentic Deployment (not AIM). See k8s/README.md." >&2
     exit 1
 fi
 
@@ -73,30 +77,45 @@ trap cleanup EXIT
 cp --archive "${MANIFESTS_DIR}/." "${OVERLAY}/"
 sed --in-place "s/newTag: local/newTag: ${TAG}/g" "${OVERLAY}/kustomization.yaml"
 
+# Untargeted by name, so it covers every Deployment the overlay carries. Two
+# reasons, both node-local: the *:local images live in one node's kubelet
+# store, and the dd-agentic-data claim is ReadWriteOnce on a single-node
+# cluster — readable and writable by any number of pods, but only from the
+# node that mounts it. So boltz, posebusters, and the interaction profiler
+# have to sit beside the agent to resolve the structure_paths they hand each
+# other. Kyverno mutates the claim to RWX on multi-node clusters, where those
+# three could spread; the image store still keeps them here.
 cat >> "${OVERLAY}/kustomization.yaml" <<EOF
 namespace: ${PROJECT}
 patches:
   - target:
       kind: Deployment
-      name: dd-agentic
     patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: dd-agentic
-      spec:
-        template:
-          spec:
-            nodeSelector:
-              kubernetes.io/hostname: "${NODE}"
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          kubernetes.io/hostname: "${NODE}"
 EOF
 
-echo "applying dd-agentic:${TAG} into namespace ${PROJECT}; deployment pinned to ${NODE} (AIM unpinned)"
+echo "applying dd-agentic:${TAG} into namespace ${PROJECT}; deployments pinned to ${NODE} (AIM unpinned)"
 kubectl kustomize "${OVERLAY}" |
     kubectl apply --server-side --force-conflicts --filename -
 
-echo "restarting deployment/dd-agentic to load tag ${TAG}"
-kubectl --namespace "${PROJECT}" rollout restart deployment/dd-agentic
-echo "waiting for deployment/dd-agentic"
-kubectl --namespace "${PROJECT}" rollout status deployment/dd-agentic --timeout=20m
+echo "restarting the dd-agentic deployments to load tag ${TAG}"
+kubectl --namespace "${PROJECT}" rollout restart deployment --selector "${PART_OF}"
+
+DEPLOYMENTS="$(
+    kubectl --namespace "${PROJECT}" get deployments \
+        --selector "${PART_OF}" --output name
+)"
+if [[ -z "${DEPLOYMENTS}" ]]; then
+    echo "no deployments matched ${PART_OF} in ${PROJECT}; nothing was applied" >&2
+    exit 1
+fi
+
+# Names cannot contain whitespace, so splitting on newlines is safe.
+while read -r deployment; do
+    echo "waiting for ${deployment}"
+    kubectl --namespace "${PROJECT}" rollout status "${deployment}" --timeout=20m
+done <<< "${DEPLOYMENTS}"
 echo "watch AIM with: kubectl --namespace ${PROJECT} get aimservice dd-agentic-aim --watch"

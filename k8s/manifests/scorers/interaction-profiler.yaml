@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-interaction-profiler
+  labels:
+    app.kubernetes.io/name: dd-agentic-interaction-profiler
+    app.kubernetes.io/component: scorer
+spec:
+  # CPU only and measured at 12.0 s against Boltz's 386 s on the same batch.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-interaction-profiler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-interaction-profiler
+        app.kubernetes.io/component: scorer
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: interaction-profiler
+          image: interaction-profiler:local
+          imagePullPolicy: IfNotPresent
+          # args, not command: the image has a micromamba ENTRYPOINT that
+          # activates the environment before exec'ing this.
+          args:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8083"
+          ports:
+            - name: profile-http
+              containerPort: 8083
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: profile-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: profile-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            # Reads Boltz structures by path; writes its own artifacts
+            # elsewhere. Same PVC, same node.
+            - name: data
+              mountPath: /shared
+              subPath: shared
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-interaction-profiler
+  labels:
+    app.kubernetes.io/name: dd-agentic-interaction-profiler
+    app.kubernetes.io/component: scorer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-interaction-profiler
+  ports:
+    - name: profile-http
+      port: 8083
+      targetPort: profile-http

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-posebusters
+  labels:
+    app.kubernetes.io/name: dd-agentic-posebusters
+    app.kubernetes.io/component: scorer
+spec:
+  # CPU only and measured at 8.2 s against Boltz's 386 s on the same batch, so
+  # one replica is not a bottleneck. Raise it (or uvicorn --workers) if a
+  # larger fleet makes the single worker serialize.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-posebusters
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-posebusters
+        app.kubernetes.io/component: scorer
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: posebusters
+          image: posebusters:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8082"
+          ports:
+            - name: pose-http
+              containerPort: 8082
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: pose-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: pose-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            # Reads the structures Boltz wrote, by the absolute path Boltz
+            # returned in structure_paths. Same PVC, same node.
+            - name: data
+              mountPath: /shared
+              subPath: shared
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-posebusters
+  labels:
+    app.kubernetes.io/name: dd-agentic-posebusters
+    app.kubernetes.io/component: scorer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-posebusters
+  ports:
+    - name: pose-http
+      port: 8082
+      targetPort: pose-http

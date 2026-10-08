@@ -47,6 +47,22 @@ STANDARD_AA = set("ACDEFGHIKLMNPQRSTVWY")
 BOLTZ_MAX_CONCURRENCY = int(os.getenv("BOLTZ_MAX_CONCURRENCY", "1"))
 _predict_sem = asyncio.Semaphore(BOLTZ_MAX_CONCURRENCY)
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+# Boltz's optimized kernels stay disabled by default, and on ROCm they have to:
+# the kernel path imports ``cuequivariance_torch``, which is CUDA-only and is
+# not in this image, so ``BOLTZ_NO_KERNELS=0`` aborts inside the pairformer's
+# triangular multiplicative update. The flag keeps that dependency explicit and
+# lets a CUDA node -- or an image that ships cuEquivariance -- be retested with
+# k8s/scripts/ab-boltz-kernels.py.
+BOLTZ_NO_KERNELS = _env_flag("BOLTZ_NO_KERNELS", True)
+
 app = FastAPI(title="Boltz2 Scoring Wrapper")
 
 
@@ -373,13 +389,14 @@ def _build_predict_cmd(
         "--cache", str(CACHE_DIR),
         "--output_format", params.output_format,
         "--override",
-        "--no_kernels",
         "--recycling_steps", str(params.recycling_steps),
         "--diffusion_samples", str(params.diffusion_samples),
         "--sampling_steps", str(params.sampling_steps),
         "--sampling_steps_affinity", str(params.sampling_steps_affinity),
         "--diffusion_samples_affinity", str(params.diffusion_samples_affinity),
     ]
+    if BOLTZ_NO_KERNELS:
+        cmd.append("--no_kernels")
     if use_msa_server:
         cmd.append("--use_msa_server")
         cmd.extend(["--msa_server_url", params.msa_server_url])
@@ -576,8 +593,10 @@ def _assemble_response(
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    # ``no_kernels`` is reported so an A/B run can confirm which arm the live
+    # replica is serving instead of inferring it from a rollout.
+    return {"status": "ok", "no_kernels": BOLTZ_NO_KERNELS}
 
 
 @app.post("/score", response_model=ScoreResponse)

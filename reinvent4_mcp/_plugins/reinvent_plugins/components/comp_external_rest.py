@@ -19,6 +19,7 @@ __all__ = ["ExternalRESTScorer"]
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,36 @@ logger = logging.getLogger("reinvent")
 
 _CALL_LOG_DIR = Path("/data/reinvent4_mcp/logs")
 _CALL_LOG_FILE = _CALL_LOG_DIR / "external_scoring.jsonl"
+
+# How long to wait for a blocking /score call. A queue-fronted gateway can hold
+# a batch far longer than one prediction takes, and giving up turns a request
+# that would have succeeded into NaN for the whole batch -- which both poisons
+# the RL signal and reports a component failure that never happened. Tunable
+# per deployment rather than hardcoded.
+DEFAULT_TIMEOUT_SECONDS = 1800.0
+TIMEOUT_ENV = "EXTERNAL_SCORER_TIMEOUT_SECONDS"
+
+# Submit-then-poll settings for services that answer 202 + {task_id}. Polling
+# costs nothing while queued and removes the timeout question entirely: the
+# wait is bounded by the deadline, not by one HTTP connection staying up.
+POLL_INTERVAL_SECONDS = 5.0
+POLL_MAX_INTERVAL_SECONDS = 60.0
+POLL_BACKOFF = 1.5
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("%s=%r must be positive; using %s", name, raw, default)
+        return default
+    return value
 
 
 def _log_call(record: dict[str, Any]) -> None:
@@ -70,6 +101,12 @@ class Parameters:
     component_name: List[Optional[str]] = None
     affinity_mode: List[str] = None
     failure_score: List[Optional[float]] = None
+    # Seconds to wait for a result. Falls back to
+    # EXTERNAL_SCORER_TIMEOUT_SECONDS, then to DEFAULT_TIMEOUT_SECONDS.
+    timeout: List[Optional[float]] = None
+    # Submit with ``?mode=async`` and poll ``/result/{task_id}``. Needs a
+    # gateway that answers 202; ignored by the plain scorer services.
+    async_poll: List[Optional[bool]] = None
 
 
 @add_tag("__component")
@@ -84,14 +121,30 @@ class ExternalRESTScorer:
 
     _INTERNAL_PARAMS = frozenset({
         "service_url", "service", "depends_on", "component_name",
-        "failure_score",
+        "failure_score", "timeout", "async_poll",
     })
     _artifact_registry: dict[str, dict] = {}
 
     def __init__(self, params: Parameters):
         self.service_url = params.service_url[0]
         self.service = params.service[0]
-        self.timeout = 1800
+
+        timeout_list = getattr(params, "timeout", None)
+        configured = (
+            timeout_list[0]
+            if isinstance(timeout_list, list) and timeout_list
+            else None
+        )
+        self.timeout = float(configured) if configured else _env_float(
+            TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS
+        )
+
+        async_list = getattr(params, "async_poll", None)
+        self.async_poll = bool(
+            async_list[0]
+            if isinstance(async_list, list) and async_list
+            else False
+        )
 
         depends_on_list = getattr(params, "depends_on", None)
         self.depends_on = (
@@ -140,13 +193,67 @@ class ExternalRESTScorer:
         # external objectives produces a run of identical "Creating scoring
         # component ExternalRESTScorer" lines. Announce which one this is.
         logger.info(
-            "ExternalRESTScorer[%s] -> service=%s url=%s%s%s",
+            "ExternalRESTScorer[%s] -> service=%s url=%s timeout=%.0fs%s%s%s",
             self.component_name or "unnamed",
             self.service,
             self.service_url,
+            self.timeout,
+            " async-poll" if self.async_poll else "",
             f" depends_on={self.depends_on}" if self.depends_on else "",
             self._selector_summary(),
         )
+
+    def _result_url(self, task_id: str) -> str:
+        """Where to poll for a task submitted to ``service_url``."""
+        base = self.service_url.split("?", 1)[0]
+        if base.endswith("/score"):
+            base = base[: -len("/score")]
+        return f"{base.rstrip('/')}/result/{task_id}"
+
+    def _submit_and_poll(self, payload: dict, record: dict[str, Any]):
+        """Submit with ``mode=async``, then poll until the result is ready.
+
+        The point is that the wait is bounded by ``self.timeout`` overall rather
+        than by one HTTP connection staying up, and that a ``202`` means queued
+        rather than broken. A gateway that does not speak this contract answers
+        the submit normally, and that response is used as-is so the
+        misconfiguration is visible instead of silent.
+        """
+        separator = "&" if "?" in self.service_url else "?"
+        submit_url = f"{self.service_url}{separator}mode=async"
+
+        deadline = time.monotonic() + self.timeout
+        response = requests.post(
+            submit_url, json=payload, timeout=min(self.timeout, 120.0)
+        )
+        record["status_code"] = response.status_code
+        if response.status_code != 202:
+            return response
+
+        task_id = (response.json() or {}).get("task_id")
+        if not task_id:
+            raise RuntimeError("service accepted the batch but returned no task_id")
+        record["task_id"] = task_id
+        logger.info("%s accepted batch as task %s; polling", self.service, task_id)
+
+        interval = POLL_INTERVAL_SECONDS
+        polls = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"no result for task {task_id} within {self.timeout:.0f}s"
+                )
+            time.sleep(min(interval, remaining))
+            interval = min(interval * POLL_BACKOFF, POLL_MAX_INTERVAL_SECONDS)
+            polls += 1
+
+            poll = requests.get(self._result_url(task_id), timeout=60)
+            record["status_code"] = poll.status_code
+            record["polls"] = polls
+            if poll.status_code == 202:
+                continue
+            return poll
 
     def _selector_summary(self) -> str:
         """Render the params that decide what this instance measures.
@@ -225,11 +332,14 @@ class ExternalRESTScorer:
 
         t0 = time.monotonic()
         try:
-            response = requests.post(
-                self.service_url,
-                json=payload,
-                timeout=self.timeout,
-            )
+            if self.async_poll:
+                response = self._submit_and_poll(payload, record)
+            else:
+                response = requests.post(
+                    self.service_url,
+                    json=payload,
+                    timeout=self.timeout,
+                )
             elapsed = time.monotonic() - t0
             record["status_code"] = response.status_code
             record["elapsed_seconds"] = round(elapsed, 2)

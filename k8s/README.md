@@ -1,8 +1,9 @@
 # Kubernetes
 
-This directory deploys the six Compose containers as one Kubernetes Deployment
-plus an in-cluster AIM endpoint. Run the scripts from `examples/dd_agentic/`
-(the Dockerfiles and gitignored build inputs live there).
+This directory deploys the six Compose containers as six Kubernetes
+Deployments plus an in-cluster AIM endpoint. Run the scripts from
+`examples/dd_agentic/` (the Dockerfiles and gitignored build inputs live
+there).
 
 ```
 k8s/
@@ -11,21 +12,54 @@ k8s/
 ├── build-images.sh           # docker build of the six selected image tags
 ├── load-images.sh            # import those tags into kubelet containerd
 ├── rbac.yaml                 # developer grant for demo-lux on internal staging
-├── manifests/                # kustomize resources (Deployment, AIMService, …)
+├── manifests/                # kustomize resources (Deployments, AIMService, …)
+│   └── scorers/              # one Deployment + ClusterIP Service per scorer
 └── scripts/
     ├── switch-aim-model.sh   # wrapper
     ├── switch-aim-model.py   # catalog lookup, AIMService recreate, ConfigMap
-    └── uat-scoring.sh        # piped scoring prompts; checks tool score tables
+    ├── uat-scoring.sh        # piped scoring prompts; checks tool score tables
+    ├── analyze-scoring-latency.py  # harvest scorer latency + cache hit rate
+    ├── ab-boltz-kernels.py   # A/B the optimized Boltz kernels on one /score call
+    ├── verify-artifact-handoff.py  # Boltz writes in pod A, the others read in pod B
+    └── verify-boltz-placement.py   # concurrent batches land on idle replicas
 ```
 
-The manifests in [`manifests/`](manifests) run the six Compose containers in one
-Deployment. REINVENT and Boltz each request one `amd.com/gpu` (two GPUs on
-that pod). AIM is a separate `AIMService` and can use **1 GPU** (the Qwen3-32B
-example) or **8 GPUs** (a tensor-parallel catalog profile). The two workloads
-do not have to share a node: pin the agent pod with `apply.sh --node`, and
-leave AIM where `acceleratorCount` GPUs are free (often the other GPU node).
-Images for the agent pod are imported onto **the agent node** — nothing is
-pushed to a registry. AIM pulls its catalog image as usual.
+The manifests in [`manifests/`](manifests) run each of the six Compose
+containers as its own Deployment:
+
+| Deployment | Service | GPU | `/shared` |
+|------------|---------|-----|-----------|
+| `dd-agentic` | — (reached by `kubectl exec`) | 1 | yes |
+| `dd-agentic-boltz` | `dd-agentic-boltz:8091` (headless) | 1 each | yes |
+| `dd-agentic-boltz-proxy` | `dd-agentic-boltz-proxy:8091` (internal) | no | no |
+| `dd-agentic-boltz-gateway` | `dd-agentic-boltz-gateway:8091` | no | yes |
+| `dd-agentic-posebusters` | `dd-agentic-posebusters:8082` | no | yes |
+| `dd-agentic-interaction-profiler` | `dd-agentic-interaction-profiler:8083` | no | yes |
+| `dd-agentic-admet` | `dd-agentic-admet:8084` | no | no |
+| `dd-agentic-retrodmta` | `dd-agentic-retrodmta:8085` | no | no |
+
+The `service_url`s in [`manifests/configmap.yaml`](manifests/configmap.yaml)
+are those Service names, unqualified so they resolve in whichever namespace
+`apply.sh --namespace` deploys into. They were `http://127.0.0.1:<port>` while
+everything shared one pod.
+
+GPU demand is **one for REINVENT in `dd-agentic` plus one per Boltz replica**,
+so the default `replicas: 2` on `dd-agentic-boltz` needs three free
+`amd.com/gpu`. Neither GPU workload may surge during a rollout, since the extra
+pod would ask for another GPU and stay `Pending`: `dd-agentic` uses
+`strategy: Recreate`, and `dd-agentic-boltz` uses a rolling update pinned to
+`maxSurge: 0`, which replaces one replica at a time and keeps the others
+serving.
+
+Scoring traffic goes to **`dd-agentic-boltz-gateway`**, not to the replicas.
+See [Place batches on idle Boltz replicas](#place-batches-on-idle-boltz-replicas).
+
+AIM is a separate `AIMService` and can use **1 GPU** (the Qwen3-32B example) or
+**8 GPUs** (a tensor-parallel catalog profile). It does not have to share a
+node with the rest: `apply.sh --node` pins every Deployment, and AIM lands
+wherever `acceleratorCount` GPUs are free (often the other GPU node). Images
+for the Deployments are imported onto **that node** — nothing is pushed to a
+registry. AIM pulls its catalog image as usual.
 
 The agent talks to AIM at `http://dd-agentic-aim/v1`. Set
 `REINVENT4_AGENT_MODEL` to the served-model `id` from `/v1/models` (commonly
@@ -80,24 +114,24 @@ Bearer token.
   [RBAC](#rbac) for the developer grant that covers that namespace.
 - A Qwen3-32B `AIMClusterModel` (or another catalog model you will set in
   `manifests/aim-service.yaml`).
-- A GPU node with at least two free `amd.com/gpu` for `deployment/dd-agentic`,
-  with the six `*:local` images in that node's kubelet store. AIM needs
-  `acceleratorCount` free GPUs on **one** node (1 for the Qwen3-32B example, 8
-  for an 8-way profile). That can be a different node; see
-  [Pin the agent pod and AIM](#pin-the-agent-pod-and-aim).
+- A GPU node with at least two free `amd.com/gpu` for the dd-agentic
+  Deployments, with the six `*:local` images in that node's kubelet store. AIM
+  needs `acceleratorCount` free GPUs on **one** node (1 for the Qwen3-32B
+  example, 8 for an 8-way profile). That can be a different node; see
+  [Pin the Deployments and AIM](#pin-the-deployments-and-aim).
 - Gitignored build inputs from
   [Restore the gitignored dependencies](../README.md#1-restore-the-gitignored-dependencies)
   (`REINVENT4/`, `boltz2/`, `models/admet/`, `models/retrodmta/`).
 
-Pick the namespace and the GPU node that will run **the agent pod** (not
-necessarily the AIM node):
+Pick the namespace and the GPU node that will run **the agent and scorer
+pods** (not necessarily the AIM node):
 
 ```bash
 cd examples/dd_agentic
 export PROJECT="demo-lux"          # internal staging namespace; see RBAC
 kubectl get namespace "${PROJECT}"
 kubectl get nodes --output custom-columns=NAME:.metadata.name,GPU:.status.allocatable.amd\\.com/gpu
-export NODE="<gpu-node-name>"   # Kubernetes node name for deployment/dd-agentic
+export NODE="<gpu-node-name>"   # Kubernetes node name for the dd-agentic pods
 ```
 
 ### RBAC
@@ -185,13 +219,29 @@ chmod +x k8s/build-images.sh k8s/load-images.sh k8s/apply.sh
 The default image tag is `local`. To use another tag, pass the same `--tag`
 value to all three scripts.
 
-`apply.sh` pins `deployment/dd-agentic` to `${NODE}` via
+`apply.sh` pins **every** dd-agentic Deployment to `${NODE}` via
 `nodeSelector[kubernetes.io/hostname]` (not `spec.nodeName`, which some
 schedulers reject while scheduling gates are set) and
 `imagePullPolicy: IfNotPresent`, so kubelet uses the imported `*:local` tags
-and does not try a registry. Re-run `apply.sh` with a different `--node` to
-move the agent pod. **AIM is not pinned** — see
-[Pin the agent pod and AIM](#pin-the-agent-pod-and-aim).
+and does not try a registry. It then restarts and waits for all of them by the
+`app.kubernetes.io/part-of=dd-agentic` label, so a new Deployment is picked up
+without editing the script. Re-run `apply.sh` with a different `--node` to move
+the pods. **AIM is not pinned** — see
+[Pin the Deployments and AIM](#pin-the-deployments-and-aim).
+
+Two separate things make that pin necessary, and only one of them goes away on
+a multi-node cluster:
+
+- **Images are node-local.** `load-images.sh` imports the six `*:local` tags
+  into one node's kubelet store, so every pod using them must land there.
+- **`/shared` is node-local.** Boltz writes structures to `/shared` and returns
+  their absolute paths; PoseBusters and the interaction profiler then read
+  those paths. On a single-node cluster `dd-agentic-data` stays
+  `ReadWriteOnce`, which is per *node*, not per pod — any number of pods on the
+  node may mount it read-write, but a pod elsewhere could not. Kyverno mutates
+  the claim to `ReadWriteMany` on multi-node clusters, where those three may
+  spread. Never switch the claim to `ReadWriteOncePod`: that one really is
+  single-pod and would admit only one of them.
 
 Watch AIM separately (cache warm can take several minutes). Confirm the
 `AIMService` object exists and the Service has endpoints before chatting:
@@ -230,9 +280,312 @@ If `/v1/models` reports a different `id` than `REINVENT4_AGENT_MODEL` in
 `manifests/configmap.yaml`, update the ConfigMap and re-run `apply.sh`, or use
 [`scripts/switch-aim-model.sh`](scripts/switch-aim-model.sh) below.
 
-### Pin the agent pod and AIM
+### Measure scorer latency and cache hit rate
 
-`deployment/dd-agentic` and `AIMService/dd-agentic-aim` are scheduled
+`ExternalRESTScorer` appends one JSON record per external call to
+`/data/reinvent4_mcp/logs/external_scoring.jsonl` on the PVC, carrying
+`elapsed_seconds`, the service name, the status code, and the request — so the
+SMILES list makes batch size recoverable per call. Any campaign that has
+already run therefore *measured* how long a Boltz batch takes and how often
+molecules repeat, and no GPU benchmark is needed to read it back.
+
+Do not assume the file is there. On `demo-lux` as of 2026-10-06 it did not
+exist: `/data/reinvent4_mcp/logs/` was empty, `/shared` held no MSA cache, and
+Boltz's weight cache was unpopulated — no campaign had ever driven the external
+scorers on that PVC. Check before planning around the harvest, and fall back to
+a measured call when it is missing.
+
+[`scripts/analyze-scoring-latency.py`](scripts/analyze-scoring-latency.py)
+reads that log — a path, a directory, or `-` for stdin — and reports, per
+service, the latency distribution per batch and per molecule, the breakdown by
+batch size, and the share of molecule-level demand a result cache would serve.
+It excludes records with `error` set or a non-2xx `status_code`: a prediction
+is killed at `PREDICT_TIMEOUT_SECONDS` and those capped values would skew p95.
+
+```bash
+kubectl --namespace "${PROJECT}" exec deployment/dd-agentic \
+  --container dd-agent -- cat /data/reinvent4_mcp/logs/external_scoring.jsonl \
+  | ./k8s/scripts/analyze-scoring-latency.py -
+```
+
+From the two harvested numbers it derives the replica counts that scale off
+them: Boltz replicas needed for `N` concurrent agents at a target step time,
+agents supportable at a given replica count, and how many RL steps fit a
+campaign window. `--supervisors`, `--replicas`, `--step-minutes`, and
+`--campaign-hours` set those inputs; `--batch-size` reads the per-batch time at
+a specific batch size instead of the most common one; `--json` emits the same
+report for a script to consume.
+
+The exit code is 2 when the log holds no usable Boltz call, which is the signal
+to fall back to a single measured call (`ab-boltz-kernels.py --baseline-only`)
+rather than to trust a placeholder.
+
+### A/B the optimized Boltz kernels
+
+`services/boltz2/app.py` passes `--no_kernels` to `boltz predict` by default,
+which disables Boltz's optimized kernels. `BOLTZ_NO_KERNELS=0` turns them on.
+
+**Measured on MI300 (`useocpm2m-silogen-007`): the kernels do not work and the
+flag is not a lever.** Enabling them aborts after ~81 s, partway through the
+pairformer, with `ModuleNotFoundError: No module named 'cuequivariance_torch'`
+— Boltz's kernel path depends on NVIDIA's cuEquivariance, which is CUDA-only
+and absent from this image. Keep `BOLTZ_NO_KERNELS=1` on ROCm. The measured
+per-batch time with kernels off is **386 s (6.4 min) for 16 molecules**, 24 s
+per molecule, against BRD4 BD1 at `recycling_steps: 3` and
+`diffusion_samples_affinity: 5`.
+
+[`scripts/ab-boltz-kernels.py`](scripts/ab-boltz-kernels.py) is what produced
+that result and is how to re-check it on a CUDA node, or after an image ships
+cuEquivariance. It times one `/score` call each way against BRD4 BD1, using the
+precomputed `brd4_bd1.a3m` on the shared volume so neither arm pays an
+MSA-server round trip, at the production batch size of 16:
+
+```bash
+kubectl --namespace "${PROJECT}" port-forward deployment/dd-agentic-boltz 8091:8091 &
+./k8s/scripts/ab-boltz-kernels.py --namespace "${PROJECT}"
+```
+
+The script flips `BOLTZ_NO_KERNELS` on `deployment/dd-agentic-boltz` between
+arms and waits for the container to come back healthy, so both arms hit the
+same replica with the same weights cache. It reports the speedup and what it
+does to the replica count. `--baseline-only` runs the default arm alone, which
+is also the fallback when the scoring log has no usable history.
+
+### Place batches on idle Boltz replicas
+
+A Boltz replica runs **one prediction at a time** (`BOLTZ_MAX_CONCURRENCY=1`),
+and a prediction takes minutes — 386 s for a production batch of 16. Replicas
+are therefore not interchangeable mid-flight, and a plain ClusterIP Service is
+the wrong shape for them: kube-proxy round-robins without knowing who is busy,
+so it will hand a six-minute batch to a replica that is already predicting
+while another sits idle, costing a whole RL step.
+
+`dd-agentic-boltz-proxy` is HAProxy in front of the replicas with:
+
+- **`balance leastconn`** — because per-replica concurrency is 1,
+  least-connections *is* least-busy.
+- **`maxconn 1` per replica** — what turns that from a hint into placement. A
+  surplus batch waits in the gateway's queue instead of being stacked onto a
+  busy replica.
+- **timeouts above `PREDICT_TIMEOUT_SECONDS`** (`client`, `server`, and `queue`
+  all 2100 s) — the proxy must never be what aborts a live prediction, and a
+  batch that queued for an hour and then succeeded is correct, not a failure.
+- **`retries 2` + `option redispatch`** — only connection failures retry, so a
+  replica dying before it answers costs a redispatch rather than a NaN batch.
+
+`dd-agentic-boltz` is a **headless** Service (`clusterIP: None`) so the proxy
+resolves one address per ready pod and can track them individually; a ClusterIP
+would collapse them behind one virtual address. The proxy runs exactly **one**
+replica, because least-connections is only least-busy if a single process owns
+the whole view of who is busy.
+
+Scale Boltz with `replicas` on `scorers/boltz.yaml` (or `kubectl scale`); the
+config has 12 server slots, so nothing in the proxy changes:
+
+```bash
+kubectl --namespace "${PROJECT}" scale deployment/dd-agentic-boltz --replicas=3
+kubectl --namespace "${PROJECT}" rollout status deployment/dd-agentic-boltz
+```
+
+A new replica takes **about 30 s after it is Ready** to start receiving work:
+the proxy caches DNS for 10 s (`hold valid`) and then needs two passing
+health checks 10 s apart (`rise 2 inter 10s`) before the slot leaves
+`MAINT (resolution)`. Checking the stats page immediately after a scale-up
+shows the old count and looks like a failure — wait for the slot to turn `UP`.
+
+Queue depth, in-flight work per replica, and which replicas are up are on the
+proxy's stats endpoint. Each request also logs `%Tw` (time spent waiting for
+a free replica) and `queue=%sq/%bq`, which is what distinguishes a slow
+prediction from a queued one, and every response carries an `X-Boltz-Replica`
+header naming the replica that served it:
+
+```bash
+kubectl --namespace "${PROJECT}" port-forward \
+  deployment/dd-agentic-boltz-proxy 8091:8091 8404:8404 &
+curl -s http://localhost:8404/stats            # HTML dashboard
+curl -s "http://localhost:8404/stats;csv"      # same numbers, parseable
+curl -s http://localhost:8404/metrics | head   # Prometheus exposition
+kubectl --namespace "${PROJECT}" logs deployment/dd-agentic-boltz-proxy | tail
+```
+
+[`scripts/verify-boltz-placement.py`](scripts/verify-boltz-placement.py) proves
+the behaviour rather than assuming it. It fires one more concurrent `/score`
+call than there are replicas, at reduced fidelity, and checks that each is
+placed on its own replica, that no replica is ever given two at once, and that
+the surplus queues and still succeeds:
+
+```bash
+./k8s/scripts/verify-boltz-placement.py --namespace "${PROJECT}"
+```
+
+**Measured on `demo-lux` with M=2**: three concurrent batches used both
+replicas, peak in-flight was 1 per replica, and the third waited **197.6 s**
+in the queue (`%Tw`) before running — 784.9 s of work in 372.0 s of wall clock,
+a 2.11x speedup over serial. A 503 from this script would mean `timeout queue`
+is below the prediction time, which downstream reads as a component failure.
+
+> **One-time step when upgrading an existing namespace.** `spec.clusterIP` is
+> immutable, so turning `dd-agentic-boltz` headless fails with
+> `may not change once set` until the old Service is removed. Delete it once,
+> then apply as usual; nothing dials it directly any more:
+>
+> ```bash
+> kubectl --namespace "${PROJECT}" delete service dd-agentic-boltz
+> ./k8s/apply.sh --namespace "${PROJECT}" --node "${NODE}"
+> ```
+>
+> The HAProxy workload was also renamed from `dd-agentic-boltz-gateway` to
+> `dd-agentic-boltz-proxy`, and that name now belongs to the caching gateway
+> below. A Deployment cannot change `strategy` from the defaulted
+> `RollingUpdate` to `Recreate` in place, so delete the old one first:
+> `kubectl -n "${PROJECT}" delete deployment dd-agentic-boltz-gateway` and
+> `kubectl -n "${PROJECT}" delete configmap dd-agentic-boltz-gateway`.
+
+The proxy image, `haproxy:3.2-alpine`, is the **one image not built from this
+repo**: kubelet pulls it from Docker Hub once and `IfNotPresent` reuses it. On a
+cluster without registry access, import it the same way as the local tags
+(`docker pull`, `docker save`, then `ctr -n k8s.io images import`).
+
+### Cache results and coalesce batches
+
+Placement alone does not reduce the amount of prediction being asked for.
+`dd-agentic-boltz-gateway` sits in front of the proxy and owns the two things a
+proxy cannot do, because they need to understand the payload. It speaks the same
+`{smiles, params}` contract as a bare replica, so the ConfigMap's `service_url`
+is what it was.
+
+**A per-molecule result cache** under `/shared/boltz_results_cache`, keyed on
+`sha256(canonical_smiles ‖ protein_sequence ‖ msa_digest ‖ predict_params)`.
+Per *molecule* rather than per batch is the point: a batch of 16 where 10 were
+seen before costs 6 predictions. Canonicalising is load-bearing rather than
+tidy, because the RL config sets `randomize_smiles: true` — the same molecule
+arrives spelled differently on every step, and a literal-string cache would
+almost never hit. The MSA is keyed by **content**, so two paths holding one
+alignment share entries and editing an `.a3m` invalidates them.
+
+Exploration-tier requests read and write it; `fidelity_tier: validation`
+bypasses the read and always re-predicts, so a reported result is never a stale
+sample — but still populates the cache. `cache_policy: none` opts out entirely.
+A cached entry that names a structure file which has since been deleted is
+**dropped rather than served**, since downstream scorers re-open those paths and
+a hit pointing at a missing file is worse than a miss.
+
+**Batch coalescing.** `boltz predict <dir>` folds a directory of YAMLs into one
+process, so the per-invocation cost is paid once regardless of batch size — and
+at least 124 s of the measured 386 s batch is exactly that fixed cost. Requests
+waiting on the same `(protein_sequence, params)` are merged into one upstream
+call. Concurrent upstream calls are capped at the number of healthy replicas, so
+every GPU stays busy while anything beyond that accumulates into a larger batch
+instead of queueing a one-molecule call behind another.
+
+**In-flight de-duplication.** If a molecule is already being predicted, a second
+request for it waits on that prediction rather than starting another. With
+several supervisors exploring neighbouring weight vectors over one target, this
+is where the cross-supervisor saving actually lands — caching alone cannot help
+when neither request has finished yet.
+
+**Measured on `demo-lux`**: the same three-molecule handoff verification took
+**3 m 35 s cold and 12 s warm**, served the identical affinity values and the
+same structure paths, and PoseBusters and the interaction profiler re-opened
+those cached poses and scored identically. Note the warm run also hit on the
+molecule Boltz *skipped*: a deterministic skip is cached, a failed prediction
+never is.
+
+`GET /stats` is what `N` should be throttled against, and reports the cache hit
+rate that every sizing calculation so far has had to assume:
+
+```bash
+kubectl --namespace "${PROJECT}" port-forward \
+  deployment/dd-agentic-boltz-gateway 8091:8091 &
+curl -s http://localhost:8091/stats | python -m json.tool
+```
+
+**Submit and poll instead of holding a connection open.** `POST /score?mode=async`
+answers `202 {"task_id": ...}`; `GET /result/{task_id}` answers `202` while it is
+queued or predicting, then `200` with the result once — after which it is freed,
+so a long campaign cannot grow the registry without bound. `ExternalRESTScorer`
+uses it with `async_poll: true`, and its timeout is now configurable
+(`timeout` in the component params, or `EXTERNAL_SCORER_TIMEOUT_SECONDS`)
+instead of hardcoded at the same 1800 s the service itself enforces. That
+combination is what stops a deep queue from reading as a failure and filling an
+RL batch with NaN.
+
+The knobs are env on the Deployment: `COALESCE_WINDOW_SECONDS` (how long a batch
+is held open), `COALESCE_MAX_MOLECULES` (raise it to merge whole batches from
+several supervisors, at the cost of a later first result),
+`GATEWAY_MAX_INFLIGHT` (`0` = healthy replicas), and `GATEWAY_CACHE_ENABLED`.
+
+### Prove the structure handoff across pods
+
+Boltz returns the *absolute path* of each structure it writes to `/shared`, and
+PoseBusters and the interaction profiler re-open those paths — no structure is
+ever carried in a payload. That was free while all six containers shared one
+pod. Now they are separate Deployments, and the handoff holds only because
+every `/shared`-mounting pod is pinned to one node (`ReadWriteOnce` is per
+node), or because Kyverno mutated the claim to `ReadWriteMany`. Both are
+assumptions about the storage class, so this is the one thing in the split
+worth a run rather than an argument.
+
+[`scripts/verify-artifact-handoff.py`](scripts/verify-artifact-handoff.py)
+drives the production path: one Boltz `/score` against BRD4 BD1, then the paths
+it returns relayed to PoseBusters and the profiler in exactly the shape
+`ExternalRESTScorer` injects them — the full index-aligned `structure_paths`
+plus `protein_pdb_path`. Run it in-cluster with no port-forward at all:
+
+```bash
+kubectl --namespace "${PROJECT}" exec --stdin deployment/dd-agentic \
+  --container dd-agent -- python - --in-cluster \
+  < k8s/scripts/verify-artifact-handoff.py
+```
+
+Or from a workstation, where `--namespace` also reports which pod and node
+answered and stats the handed-over files from inside them — which is what makes
+a green result *cross-pod* rather than merely green:
+
+```bash
+kubectl --namespace "${PROJECT}" port-forward deployment/dd-agentic-boltz-gateway 8091:8091 &
+kubectl --namespace "${PROJECT}" port-forward deployment/dd-agentic-posebusters 8082:8082 &
+kubectl --namespace "${PROJECT}" port-forward deployment/dd-agentic-interaction-profiler 8083:8083 &
+./k8s/scripts/verify-artifact-handoff.py --namespace "${PROJECT}"
+```
+
+The batch deliberately includes a 60-heavy-atom molecule, past the wrapper's
+limit of 56, so Boltz skips it and leaves a `None` hole mid-list.
+`ExternalRESTScorer` forwards those holes instead of compacting them, and the
+consumers pair `structure_paths[i]` with `smiles[i]`, so a batch without a hole
+would never exercise the alignment every partial RL batch depends on.
+
+Exit status is 0 proven, 1 disproven, 2 inconclusive, and the four outcomes are
+deliberately not collapsed:
+
+| Outcome | Means |
+|---------|-------|
+| `ok` | The consumer scored real values off the producer's paths |
+| `blind` | 200 with nothing but nulls: the path was accepted and no file behind it could be opened. **This is the storage failure**; the fallback is object storage with URIs instead of paths |
+| `rejected` | 4xx: the consumer refused the payload shape. A config or schema problem — the file was never looked for |
+| same pod | Producer and consumer answered from one pod, so the run re-proved the in-pod handoff and exits 2 |
+
+Two extra checks run when `--namespace` is given. PoseBusters extracts the
+ligand to `<structure>_lig.sdf` *beside* the PDB it was handed, i.e. into the
+producer's own output directory, so the script looks for that file from inside
+the Boltz pod — if it is missing while PoseBusters scored, the two pods
+resolved one path on two filesystems. And if the pods turn out to sit on
+different nodes, the claim must already be `ReadWriteMany`, which the report
+says out loud.
+
+Re-run it after anything that moves a pod or changes the storage class.
+`--structure`/`--smiles` replays against a pose already on the volume, which
+proves the same thing without spending another prediction:
+
+```bash
+./k8s/scripts/verify-artifact-handoff.py --namespace "${PROJECT}" \
+  --structure /shared/predictions/out_<id>/boltz_results_batch_<id>/predictions/mol_0/mol_0_model_0.pdb \
+  --smiles 'CC1=C(C)C2=C(S1)N1C(C)=NN=C1[C@H](CC(=O)OC(C)(C)C)N=C2c1ccc(Cl)cc1'
+```
+
+### Pin the Deployments and AIM
+
+The dd-agentic Deployments and `AIMService/dd-agentic-aim` are scheduled
 independently. The agent pod talks to AIM over the in-cluster Service
 `http://dd-agentic-aim/v1` (any node). `AIMService` has **no** nodeSelector
 in this API; the predictor lands where `spec.profile.selector.acceleratorCount`
@@ -240,13 +593,13 @@ GPUs are free on a **single** node.
 
 | Workload | GPUs | How it is pinned |
 |----------|------|------------------|
-| `deployment/dd-agentic` | 2 (`dd-agent` + `boltz`) | `apply.sh --node` → `nodeSelector[kubernetes.io/hostname]` |
+| Every dd-agentic Deployment | 2 (`dd-agentic` + `dd-agentic-boltz`) | `apply.sh --node` → `nodeSelector[kubernetes.io/hostname]` on each |
 | `AIMService/dd-agentic-aim` | `acceleratorCount` (1 or 8 in the examples) | Scheduler only. Free that many GPUs on the node you want; do not leave that many free on the other GPU node |
 
 **8-GPU AIM** (for example DeepSeek-V3.1-Terminus fp8 tp8) needs one node with
-**8 free** `amd.com/gpu`. Put the agent pod on the **other** node, which needs
-**2 free** GPUs and the `*:local` images. Two 8-GPU nodes can run this as 2+8
-or 8+2; they cannot run 8-GPU AIM and the agent pod on the same node.
+**8 free** `amd.com/gpu`. Put the dd-agentic pods on the **other** node, which
+needs **2 free** GPUs and the `*:local` images. Two 8-GPU nodes can run this as
+2+8 or 8+2; they cannot run 8-GPU AIM and the dd-agentic pods on the same node.
 
 Check allocatable vs already requested:
 
@@ -256,27 +609,30 @@ kubectl describe node "${NODE}" | sed -n '/Allocated resources/,/Events/p'
 ```
 
 Move **dd-agentic** to another node (images must already be in that node's
-kubelet store; the `dd-agentic-data` PVC is `ReadWriteOnce`, so scale down
-first and wait for Longhorn to detach):
+kubelet store). On a single-node storage class `dd-agentic-data` is
+`ReadWriteOnce`, so every pod that mounts it has to leave the old node before
+Longhorn will attach the volume to the new one — scale all of them down and
+wait for the detach:
 
 ```bash
 export AGENT_NODE="<gpu-node-for-dd-agentic>"   # e.g. useocpm2m-silogen-007
-kubectl --namespace "${PROJECT}" scale deployment/dd-agentic --replicas=0
+kubectl --namespace "${PROJECT}" scale deployment --replicas=0 \
+  --selector app.kubernetes.io/part-of=dd-agentic
 kubectl --namespace "${PROJECT}" wait pod \
-  --selector app.kubernetes.io/name=dd-agentic --for=delete --timeout=5m
+  --selector app.kubernetes.io/part-of=dd-agentic --for=delete --timeout=5m
 ./k8s/apply.sh --namespace "${PROJECT}" --node "${AGENT_NODE}"
 ```
 
-`apply.sh` scales the rollout back up as it applies `replicas: 1` from the
-manifest. Confirm:
+`apply.sh` scales the rollouts back up as it applies `replicas` from the
+manifests. Confirm:
 
 ```bash
-kubectl --namespace "${PROJECT}" get pods --selector app.kubernetes.io/name=dd-agentic \
-  --output wide
+kubectl --namespace "${PROJECT}" get pods \
+  --selector app.kubernetes.io/part-of=dd-agentic --output wide
 ```
 
 Place **AIM** by GPU packing, then create or switch the service. Scale the
-agent pod onto `AGENT_NODE` first so the AIM node still has 8 free:
+dd-agentic pods onto `AGENT_NODE` first so the AIM node still has 8 free:
 
 ```bash
 export AIM_NODE="<gpu-node-for-aim>"   # e.g. useocpm2m-silogen-017
@@ -303,12 +659,13 @@ jobs down is enough for the 2+8 split.
 
 ### Rebuild the dd-agent image
 
-`dd-agent:local` bakes `reinvent4_agent/` into the image. Docker and kubelet
-do not share an image store. `load-images.sh` replaces an existing containerd
-tag during import, and `apply.sh` restarts the Deployment after applying so
-pods load the newly imported image. For a single-image rebuild, use the
-focused workflow below because `load-images.sh` requires all six Compose
-images to exist in Docker.
+`dd-agent:local` bakes `reinvent4_agent/` into the image, and after the pod
+split it is used only by `deployment/dd-agentic`. Docker and kubelet do not
+share an image store. `load-images.sh` replaces an existing containerd tag
+during import, and `apply.sh` restarts the Deployments after applying so pods
+load the newly imported image. For a single-image rebuild, use the focused
+workflow below because `load-images.sh` requires all six Compose images to
+exist in Docker.
 
 Either build **on the GPU node** (same host as `kubernetes.io/hostname` on
 the Deployment) or build **elsewhere and copy the tar** onto that node.
@@ -454,15 +811,35 @@ to `45m`.
 `--dry-run` still rewrites the local `manifests/aim-service.yaml` so you can inspect it,
 then stops before apply, ConfigMap, and restart.
 
-Health of the in-pod scorers:
+### Check scorer health
+
+Dial the scorers over cluster DNS from the agent pod. These are the same URLs
+the ConfigMap gives `ExternalRESTScorer`, so this also proves the split
+services resolve:
 
 ```bash
 kubectl --namespace "${PROJECT}" exec deployment/dd-agentic \
   --container dd-agent -- python -c \
-  'import urllib.request; [print(url, urllib.request.urlopen(url).read().decode()) for url in ["http://127.0.0.1:8091/health", "http://127.0.0.1:8082/health", "http://127.0.0.1:8083/health", "http://127.0.0.1:8084/health", "http://127.0.0.1:8085/health"]]'
+  'import urllib.request; [print(url, urllib.request.urlopen(url).read().decode()) for url in ["http://dd-agentic-boltz-gateway:8091/health", "http://dd-agentic-posebusters:8082/health", "http://dd-agentic-interaction-profiler:8083/health", "http://dd-agentic-admet:8084/health", "http://dd-agentic-retrodmta:8085/health"]]'
 ```
 
-The `dd-agentic-data` PVC is `ReadWriteOnce`; the Deployment uses `Recreate`.
+Boltz answers through its gateway here, which is the path
+`ExternalRESTScorer` takes. The headless `dd-agentic-boltz` still resolves to
+the pods themselves if you want to reach one replica directly.
+
+The CPU scorers should each have exactly one ready address, and
+`dd-agentic-boltz` one per replica (`v1 Endpoints` is deprecated from
+Kubernetes 1.33, so this reads EndpointSlices):
+
+```bash
+kubectl --namespace "${PROJECT}" get endpointslices \
+  --selector 'app.kubernetes.io/component in (scorer,scorer-gateway)'
+```
+
+Boltz also reports `no_kernels` on `/health`, but only once
+`boltz2-wrapper:local` has been rebuilt since that field was added — an older
+image returns `{"status": "ok"}` alone, and `ab-boltz-kernels.py` falls back to
+trusting the arm it asked for.
 
 ### Tool calls on vLLM-served models
 

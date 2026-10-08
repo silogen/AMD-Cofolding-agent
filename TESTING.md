@@ -172,6 +172,14 @@ Tests for the Boltz2 FastAPI wrapper (`services/boltz2/app.py`). Validates YAML 
 | 77 | MW correction flag | `--affinity_mw_correction` included when enabled | `pytest tests/test_boltz_wrapper.py::TestPredictCommand::test_affinity_mw_correction_flag -v` |
 | 78 | Custom sampling steps | `--sampling_steps` and `--sampling_steps_affinity` with custom values | `pytest tests/test_boltz_wrapper.py::TestPredictCommand::test_custom_sampling_steps -v` |
 | 79 | Output format | `--output_format mmcif` when specified | `pytest tests/test_boltz_wrapper.py::TestPredictCommand::test_output_format -v` |
+| 253 | Optimized kernels off | `--no_kernels` present while `BOLTZ_NO_KERNELS` keeps them off | `pytest tests/test_boltz_wrapper.py::TestPredictCommand::test_no_kernels_flag_present_when_kernels_disabled -v` |
+| 254 | Optimized kernels on | `--no_kernels` absent once the kernels are enabled | `pytest tests/test_boltz_wrapper.py::TestPredictCommand::test_no_kernels_flag_absent_when_kernels_enabled -v` |
+
+#### Kernel Flag Parsing
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 255 | `BOLTZ_NO_KERNELS` | Unset or blank keeps today's behaviour; `0`, `false`, `no`, and `off` enable the optimized kernels | `pytest tests/test_boltz_wrapper.py::TestKernelFlagEnv -v` |
 
 #### Output Parsing
 
@@ -203,7 +211,8 @@ Tests for the Boltz2 FastAPI wrapper (`services/boltz2/app.py`). Validates YAML 
 
 | # | Test | What it verifies | Command |
 |---|------|------------------|---------|
-| 91 | Health endpoint | `GET /health` returns `{"status": "ok"}` | `pytest tests/test_boltz_wrapper.py::TestHealthEndpoint -v` |
+| 91 | Health endpoint | `GET /health` reports `status: ok` | `pytest tests/test_boltz_wrapper.py::TestHealthEndpoint::test_health_returns_ok -v` |
+| 256 | Health reports kernels | `GET /health` carries `no_kernels`, so an A/B run can confirm the live arm | `pytest tests/test_boltz_wrapper.py::TestHealthEndpoint::test_health_reports_the_kernel_flag -v` |
 | 92 | Missing MSA config → 400 | No `msa_path` and `use_msa_server=False` returns HTTP 400 | `pytest tests/test_boltz_wrapper.py::TestScoreEndpoint::test_missing_msa_config_returns_400 -v` |
 | 93 | Subprocess failure → 500 | Non-zero exit code from `boltz predict` returns HTTP 500 | `pytest tests/test_boltz_wrapper.py::TestScoreEndpoint::test_subprocess_failure_returns_500 -v` |
 | 94 | Successful scoring | Mocked subprocess + output → HTTP 200 with scores and artifacts | `pytest tests/test_boltz_wrapper.py::TestScoreEndpoint::test_successful_scoring -v` |
@@ -564,13 +573,167 @@ Tests for Phase 4: background job manager, TOML config generation, score traject
 | 251 | CSV with components | Per-component transformed + raw scores in output | `pytest tests/test_optimization.py::TestGetTopCandidatesComponentBreakdown -v` |
 | 252 | CSV without raw columns | Transformed scores only, no raw key | same class |
 
+### Scoring Latency Harvest (`tests/test_scoring_latency.py`)
+
+Tests for `k8s/scripts/analyze-scoring-latency.py`, which reads
+`external_scoring.jsonl` back to recover how long a Boltz batch takes and how
+often molecules repeat. Records are synthesized in the shape
+`ExternalRESTScorer._log_call` writes, so no cluster, log file, or GPU is
+needed.
+
+**Dependencies**: none beyond `pytest`
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 257 | Record parsing | Batch size recovered from `request.smiles`; a 2xx with no `error` is usable | `pytest tests/test_scoring_latency.py::TestRecordParsing -v` |
+| 258 | Failure classification | `HTTP 500` → `http_500`; a capped `request_failed` → `timeout`; missing `elapsed_seconds` is unusable | same class |
+| 259 | Cache-key digest | Predict params change the digest; per-call `structure_paths` do not | same class |
+| 260 | Timeouts excluded | Nine 600s calls plus nine capped 1800s timeouts leave p95 at 600s | `pytest tests/test_scoring_latency.py::TestFailureExclusion -v` |
+| 261 | Latency percentiles | Linear interpolation; per-molecule latency is `elapsed_seconds / batch size` | `pytest tests/test_scoring_latency.py::TestLatencyStats -v` |
+| 262 | Per-batch-size split | Separate p50 per batch size; the modal size breaks ties towards the larger batch | same class |
+| 263 | Cache hit rate | Repeated SMILES under one protein sequence are hits; the same SMILES under another target is a miss | `pytest tests/test_scoring_latency.py::TestCacheHitRate -v` |
+| 264 | Full cache key | Differing `recycling_steps` turns a repeat into two misses | same class |
+| 265 | Fleet sizing | A 10-minute batch against a 5-minute step gives `M = 2N`; a hit rate lowers `M`; 100 steps is 16.7 h on a dedicated replica | `pytest tests/test_scoring_latency.py::TestFleetSizing -v` |
+| 266 | Assumption warnings | Too-short window → shrink the task unit; a slow CPU scorer → "not negligible"; mixed targets flagged | `pytest tests/test_scoring_latency.py::TestWarnings -v` |
+| 267 | CLI | `--json`, `--service`, `--since`, `--batch-size`, directory input, and unparseable lines | `pytest tests/test_scoring_latency.py::TestCLI -v` |
+| 268 | No usable records | An empty or all-failed log exits 2 and prints the single-call fallback | same class |
+
+### Boltz Kernel A/B Harness (`tests/test_boltz_kernels_ab.py`)
+
+Tests for `k8s/scripts/ab-boltz-kernels.py`, which times one `/score` call with
+and without Boltz's optimized kernels. The molecule panel is checked against
+the wrapper's own validator, so neither arm can silently score a smaller batch.
+`kubectl` is stubbed and no arm is run, so no cluster, service, or GPU is
+needed.
+
+**Dependencies**: `rdkit`, `pydantic` (both already required to import the wrapper)
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 269 | Panel validity | 16 unique molecules, each accepted by `_validate_smiles`, none dropped by `_partition_smiles` | `pytest tests/test_boltz_kernels_ab.py::TestPanel -v` |
+| 270 | BRD4 BD1 sequence | The baked-in sequence is foldable and matches the query record of `brd4_bd1.a3m` (skipped when that gitignored file is absent) | same class |
+| 271 | Request shape | Carries `msa_path` and no `use_msa_server`, keeps production affinity settings, and validates as a `ScoreRequest` | `pytest tests/test_boltz_kernels_ab.py::TestPayload -v` |
+| 272 | Replica arithmetic | A 10-minute batch against a 5-minute step gives `M = 2N`; counts round up | `pytest tests/test_boltz_kernels_ab.py::TestUrlsAndMath -v` |
+| 273 | Deployment env | `BOLTZ_NO_KERNELS` read from the right container; an originally unset value is restored by removing it | `pytest tests/test_boltz_kernels_ab.py::TestDeploymentEnv -v` |
+| 274 | CLI guards | A two-arm run without a restart mechanism, conflicting arm flags, and a batch larger than the panel are all refused | `pytest tests/test_boltz_kernels_ab.py::TestCLIGuards -v` |
+
+### Kubernetes Manifests (`tests/test_k8s_manifests.py`)
+
+Tests for the split manifests under `k8s/manifests/`. The six Compose
+containers were one pod with loopback scorer URLs; they are now one Deployment
+plus one ClusterIP Service each. These parse the YAML directly, so no cluster,
+`kubectl`, or GPU is needed.
+
+**Dependencies**: `PyYAML`
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 275 | Pod split | Each of the five scorers has its own Deployment, every Deployment runs exactly one container, and `dd-agentic` carries only `dd-agent` | `pytest tests/test_k8s_manifests.py::TestPodSplit -v` |
+| 276 | GPU accounting | Still two `amd.com/gpu` in total, and every GPU Deployment uses `Recreate` so a surge pod cannot ask for a third | same class |
+| 277 | Boltz replica cap | `dd-agentic-boltz` stays at one replica while a plain Service would round-robin onto a busy replica (§5.2) | same class |
+| 278 | Scorer Services | Each scorer has a ClusterIP Service whose selector matches its own pods and no one else's, on the container's named port | `pytest tests/test_k8s_manifests.py::TestScorerServices -v` |
+| 279 | Cluster DNS URLs | No `127.0.0.1`/`localhost` anywhere in the manifests; every `service_url` resolves to a Service in the set, on the right port, unqualified so the namespace stays free | `pytest tests/test_k8s_manifests.py::TestConfigMapServiceUrls -v` |
+| 280 | Node pinning | `apply.sh` patches `nodeSelector[kubernetes.io/hostname]` onto Deployments with no name or label restriction, so future workloads are pinned too | `pytest tests/test_k8s_manifests.py::TestSharedVolumePinning -v` |
+| 281 | Shared volume | The `/shared` users are exactly the agent, Boltz, PoseBusters, and the interaction profiler, all mounting the one claim at the same path; ADMET and RetroDMTA mount nothing | same class |
+| 282 | Never `ReadWriteOncePod` | The claim stays `ReadWriteOnce`, which is per node and admits the whole pinned fleet | same class |
+| 283 | `/shared` is writable | No `/shared` mount is `readOnly`: PoseBusters extracts the ligand *beside* the PDB Boltz handed it, and a read-only mount fails that exactly like a missing file | same class |
+| 284 | Kustomization | Every manifest file is a listed resource, images are remapped by tag and never pulled from a registry, and the `part-of` label `apply.sh` selects on is stamped | `pytest tests/test_k8s_manifests.py::TestKustomization -v` |
+| 285 | Script targets | `ab-boltz-kernels.py` defaults to `dd-agentic-boltz`/`boltz`, and `uat-scoring.sh` and `switch-aim-model.py` still target `dd-agentic`/`dd-agent` | `pytest tests/test_k8s_manifests.py::TestScriptTargets -v` |
+| 286 | Handoff harness targets | Every Deployment/container pair `verify-artifact-handoff.py` execs into exists and is one of the three that mount `/shared` | same class |
+| 287 | Gateway placement | `balance leastconn` plus `maxconn 1` per replica, `http-reuse never` so an idle connection cannot hold the slot, and `BOLTZ_MAX_CONCURRENCY=1` on the replicas to match | `pytest tests/test_k8s_manifests.py::TestBoltzGateway -v` |
+| 288 | Gateway timeouts | `client`, `server`, and `queue` all exceed `PREDICT_TIMEOUT_SECONDS`, and a connection failure redispatches instead of becoming a NaN batch | same class |
+| 289 | Gateway discovery | Replicas come from the headless Service by DNS with `init-addr none`, enough slots for every replica, and no cluster DNS address or namespace baked in | same class |
+| 290 | Gateway shape | Exactly one gateway (one view of who is busy), no GPU, no `/shared`, readiness that fails with no healthy replica but liveness that does not, and 10 min grace so a live batch is not killed | same class |
+| 291 | Several replicas | More than one Boltz replica is only allowed when the ConfigMap dials the gateway; GPU demand is the agent plus the replicas; no GPU Deployment surges | `pytest tests/test_k8s_manifests.py::TestPodSplit -v` |
+
+### Boltz Gateway (`tests/test_boltz_gateway.py`)
+
+Tests for `services/boltz-gateway/app.py`: the per-molecule result cache, batch
+coalescing, in-flight de-duplication, `/stats`, and the `202`+poll contract. The
+upstream Boltz call is stubbed and the cache points at a `tmp_path`, so no GPU,
+cluster, or service is needed.
+
+**Dependencies**: `fastapi`, `pydantic`, `rdkit`
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 298 | Cache keying | The same molecule spelled differently shares a key (`randomize_smiles` makes that the common case); target and predict params do not; policy flags and per-call plumbing are excluded | `pytest tests/test_boltz_gateway.py::TestCacheKeying -v` |
+| 299 | MSA keyed by content | Two paths holding one alignment share the whole key, editing an `.a3m` invalidates it, and the path is still forwarded so Boltz can find it | same class |
+| 300 | Cache behaviour | A repeat batch predicts nothing, a randomised spelling still hits, a duplicate inside one batch is predicted once, and a partly cached batch only predicts the rest | `pytest tests/test_boltz_gateway.py::TestCacheBehaviour -v` |
+| 301 | Tiers | `validation` bypasses the read but still populates; `cache_policy: none` does neither | same class |
+| 302 | Structures survive a hit | The cached structure path comes back, and an entry naming a deleted file is dropped rather than served — downstream scorers re-open these by path | same class |
+| 303 | What is cacheable | A deterministic skip (too many heavy atoms) is kept; a failed prediction never is, so one bad run cannot poison a molecule | same class |
+| 304 | Coalescing | Concurrent batches share one upstream call; different targets or fidelities are never merged; a full batch dispatches without waiting and an oversized one splits | `pytest tests/test_boltz_gateway.py::TestCoalescing -v` |
+| 305 | In-flight de-duplication | Three concurrent requests for one molecule cost one prediction — the cross-supervisor saving caching alone cannot give | same class |
+| 306 | Response shape | Scores, per-molecule metadata and structures all come back in the caller's order and the right length; an upstream failure is a 502 and leaves nothing cached | `pytest tests/test_boltz_gateway.py::TestResponseShape -v` |
+| 307 | Async contract | `202` + `task_id`, `202` while pending, `200` once, then `404`; a failure surfaces as 502 | `pytest tests/test_boltz_gateway.py::TestAsyncApi -v` |
+| 308 | Stats | Hit rate, molecules per upstream call, latency percentiles, queue depth and duplicate/invalid counts | `pytest tests/test_boltz_gateway.py::TestStats -v` |
+| 309 | Replica view | Healthy replicas and the proxy's **backend** queue row; an unreachable proxy still allows one call rather than wedging | `pytest tests/test_boltz_gateway.py::TestReplicaView -v` |
+| 310 | Drop-in contract | The same request body validates against both the gateway and the Boltz wrapper, and the response has the three keys the scorer reads | `pytest tests/test_boltz_gateway.py::TestContract -v` |
+
+### Scorer Timeout and Polling (`tests/test_external_scoring.py`)
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 311 | Configurable timeout | Default unchanged at 1800 s; component config beats `EXTERNAL_SCORER_TIMEOUT_SECONDS`; a nonsense env value falls back instead of disabling the timeout | `pytest tests/test_external_scoring.py::TestTimeoutConfiguration -v` |
+| 312 | Submit then poll | `?mode=async`, the result URL derived from the score URL, backoff between polls, and the overall deadline still bounding it | `pytest tests/test_external_scoring.py::TestSubmitThenPoll -v` |
+| 313 | Async misconfiguration is visible | A service that answers the submit normally instead of 202 is honoured as-is; a 202 with no `task_id` fails rather than hanging | same class |
+
+### Boltz Placement Harness (`tests/test_boltz_placement.py`)
+
+Tests for `k8s/scripts/verify-boltz-placement.py`, which proves concurrent
+batches land on idle replicas instead of stacking on a busy one. The stats
+endpoint and the HTTP calls are stubbed, so no cluster, service, or GPU is
+needed.
+
+**Dependencies**: `PyYAML`, `rdkit` (via the Boltz wrapper the payload is
+validated against)
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 292 | Stats parsing | Columns indexed by name, only this backend's rows, and unresolved slots excluded from "ready" | `pytest tests/test_boltz_placement.py::TestStatsParsing -v` |
+| 293 | Backend queue row | An unplaceable request waits in the **backend** queue, so per-server `qcur` stays 0 — reading only server rows reports "nothing queued" while a batch is queued | same class |
+| 294 | Verdict | Doubling up, an idle replica left unused, and a 503 queue timeout are each reported as their own failure; a missing replica header is inconclusive | `pytest tests/test_boltz_placement.py::TestVerdict -v` |
+| 295 | Request shape | Boltz accepts the payload, the panel molecules all fold and are distinct so a cache cannot answer them, and the defaults are cheaper than production | `pytest tests/test_boltz_placement.py::TestRequest -v` |
+| 296 | Harness vs manifest | Backend name, both ports, and the `X-Boltz-Replica` header match the deployed gateway, and the client timeout outlasts the gateway's queue | `pytest tests/test_boltz_placement.py::TestAgainstTheManifest -v` |
+| 297 | CLI | Defaults to one more request than replicas so the queue is exercised; refuses zero requests, or more than the panel holds | `pytest tests/test_boltz_placement.py::TestCLI -v` |
+
+### Cross-Pod Artifact Handoff (`tests/test_artifact_handoff.py`)
+
+Tests for the handoff itself and for
+`k8s/scripts/verify-artifact-handoff.py`, which proves it against a live
+cluster. Boltz hands the consumers an absolute path on `/shared` and never the
+structure, so the split only works if the consumer pods can open the
+producer's files. kubectl and the HTTP calls are stubbed, so no cluster,
+service, or GPU is needed.
+
+**Dependencies**: `PyYAML`, `pydantic`, `rdkit`, `pandas` (the last two come
+with the service modules under test)
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 287 | Path portability | A relative path, or one outside `/shared`, is refused: neither means the same thing in two pods | `pytest tests/test_artifact_handoff.py::TestPathAudit -v` |
+| 288 | Index alignment | A short list, a scored molecule with no structure, and a structure sitting where Boltz skipped one are all reported — the last is the off-by-one that pairs a pose with the wrong SMILES | same class |
+| 289 | Payload parity | The payloads the harness relays are byte-identical to what `ExternalRESTScorer` injects, holes included rather than compacted | `pytest tests/test_artifact_handoff.py::TestRelayedPayloads -v` |
+| 290 | Consumers accept them | PoseBusters' and the interaction profiler's own models validate the index-aligned list with `None` holes; Boltz is asked for `pdb`, since PoseBusters reads HETATM records | same class |
+| 291 | Deliberate hole | The panel passes Boltz's validator, the 60-heavy-atom molecule is skipped for an explicit size reason, and it is still a parseable SMILES so the profiler fails it for the right reason | `pytest tests/test_artifact_handoff.py::TestBatch -v` |
+| 292 | Extracted-ligand path | `derived_sdf_path` matches where `_boltz_pdb_to_sdf` really writes, which is inside the producer's own output directory | `pytest tests/test_artifact_handoff.py::TestDerivedSdfPath -v` |
+| 293 | Failure classification | 200-with-nulls is a storage failure, a 4xx is a config one, a 5xx is neither, and a scored hole is misalignment | `pytest tests/test_artifact_handoff.py::TestConsumerClassification -v` |
+| 294 | Verdict | A blind consumer or an unportable path disproves it; nothing produced or an unreachable service is inconclusive; an invisible `_lig.sdf` means the pods resolved one path on two filesystems | `pytest tests/test_artifact_handoff.py::TestVerdict -v` |
+| 295 | Same-pod guard | A green run where producer and consumer share a pod exits 2, so a re-run of the in-pod proof cannot pass as the cross-pod one | same class |
+| 296 | Findings | Each failure names its next step — the object-storage fallback, the config fix, or `--namespace` | `pytest tests/test_artifact_handoff.py::TestFindings -v` |
+| 297 | kubectl probes | The pod is resolved from the `name` label and only when `Running`; a missing kubectl degrades to "unknown"; a zero-byte SDF counts as missing | `pytest tests/test_artifact_handoff.py::TestKubectlProbes -v` |
+| 298 | Health gate | An unreachable service, or a profiler reporting `shared_dir_exists: false`, stops the run before the GPU call | `pytest tests/test_artifact_handoff.py::TestHealthGate -v` |
+| 299 | Endpoints | The cluster URLs are the ConfigMap's `service_url`s and the documented port-forwards map the same ports; replay mode refuses a structure without its SMILES | `pytest tests/test_artifact_handoff.py::TestEndpointsAndCli -v` |
+| 300 | End to end | `main` drives producer → consumers → verdict: three services dialled once each, the paths relayed verbatim, and exit 0/1/2 for proven/disproven/inconclusive | `pytest tests/test_artifact_handoff.py::TestEndToEnd -v` |
+
 ### Run All Unit Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-Expected: all 280+ tests pass in ~2 seconds.
+Expected: all 600+ tests pass in a few seconds.
 
 ---
 
@@ -732,7 +895,7 @@ Requires Docker (with GPU support for Boltz) and the `docker-compose.yml` in the
 |---|------|-----------|-----------------|
 | 23 | Boltz2 image builds | `docker compose build boltz` | Image builds from `services/boltz2/Dockerfile` |
 | 24 | PoseBusters image builds | `docker compose build posebusters` | Image builds from `services/posebusters/Dockerfile` |
-| 25 | Boltz2 health check | `docker compose up -d boltz && sleep 30 && curl http://localhost:8091/health` | `{"status": "ok"}` |
+| 25 | Boltz2 health check | `docker compose up -d boltz && sleep 30 && curl http://localhost:8091/health` | `{"status": "ok", "no_kernels": true}` |
 | 26 | PoseBusters health check | `docker compose up -d posebusters && sleep 10 && curl http://localhost:8082/health` | `{"status": "ok"}` |
 | 27 | Full stack up | `docker compose up -d` | All three services (`reinvent4-mcp`, `boltz`, `posebusters`) healthy |
 | 28 | Boltz2 score endpoint | `curl -X POST http://localhost:8091/score -H 'Content-Type: application/json' -d '{"smiles": ["CCO"], "params": {"protein_sequence": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSH", "use_msa_server": true}}'` | JSON with `scores`, `metadata`, `artifacts` |
@@ -796,15 +959,81 @@ These tests verify the agent can run RL optimization campaigns that include Bolt
 | 55 | Interactive session | `srun --partition=batch --cpus-per-task=4 --mem=16G --time=1:00:00 --pty bash services/slurm/run_interactive.sh` | Agent starts on compute node |
 | 56 | Batch job | `echo "List all scoring components" \| sbatch services/slurm/agent.sbatch` | Job output file contains component list |
 
+### Scorer Measurement (requires a campaign's worth of logs, or Docker + GPU)
+
+These produce the two numbers Boltz replica counts are derived from. Neither
+needs a dedicated benchmark run: the first reads history, the second is one
+`/score` call per arm.
+
+| # | Test | How to run | Expected result |
+|---|------|-----------|-----------------|
+| 57 | Harvest latency and cache hit rate | `./k8s/scripts/analyze-scoring-latency.py data/logs/external_scoring.jsonl` | Per-service latency per batch and per molecule, the breakdown by batch size, the cache hit rate, and the replica counts that follow. Exit 2 when the log has no usable Boltz call |
+| 58 | Measure `t_boltz_per_batch` | `docker compose up -d boltz && ./k8s/scripts/ab-boltz-kernels.py --baseline-only` | 16/16 scored against BRD4 BD1 using `brd4_bd1.a3m`, with the per-batch and per-molecule time and the replica count it implies. Measured 386 s on MI300 |
+| 59 | A/B the optimized kernels | `./k8s/scripts/ab-boltz-kernels.py --restart-command 'docker compose up -d boltz'` | On ROCm the kernels arm fails with `ModuleNotFoundError: cuequivariance_torch` and the script reports keeping `BOLTZ_NO_KERNELS=1`. On a CUDA node both arms score 16/16 and a speedup is reported |
+
+### Split Scorer Deployments (requires a cluster)
+
+After `apply.sh`, the scorers are separate pods reached over cluster DNS rather
+than loopback inside one pod.
+
+| # | Test | How to run | Expected result |
+|---|------|-----------|-----------------|
+| 60 | All six Deployments are up | `kubectl -n "${PROJECT}" get deployments,pods --selector app.kubernetes.io/part-of=dd-agentic --output wide` | Six Deployments `1/1`, every pod on the `--node` host, and two `amd.com/gpu` requested in total. Matching no pods means the `labels` transformer lost `includeTemplates` |
+| 61 | Every Service has an endpoint | `kubectl -n "${PROJECT}" get endpointslices --selector app.kubernetes.io/component=scorer` | Five scorer Services, each with exactly one ready address, on ports 8091/8082/8083/8084/8085 |
+| 62 | Scorers resolve from the agent pod | The one-liner under [Check scorer health](k8s/README.md#check-scorer-health) | `{"status": "ok"}` from all five cluster-DNS URLs. Boltz adds `no_kernels` only if `boltz2-wrapper:local` was rebuilt since that field landed |
+| 63 | Scoring still works across pods | `kubectl -n "${PROJECT}" exec deployment/dd-agentic -c dd-agent -- python -c 'import json; from reinvent4_mcp.tools.external import list_external_services; print(json.dumps(list_external_services(), indent=2))'` | All five report `status: ok` against the ConfigMap's `dd-agentic-*` URLs, which exercises the same config `ExternalRESTScorer` reads |
+
+### Cross-Pod Artifact Handoff (requires a cluster + GPU)
+
+The riskiest assumption in the split: Boltz returns absolute `/shared` paths
+and PoseBusters and the interaction profiler re-open them, so the consumers
+must see the producer's filesystem. Proven in-pod already; this is the same
+handoff across pod boundaries. See
+[Prove the structure handoff across pods](k8s/README.md#prove-the-structure-handoff-across-pods).
+
+| # | Test | How to run | Expected result |
+|---|------|-----------|-----------------|
+| 64 | Handoff across pods | `kubectl -n "${PROJECT}" exec -i deployment/dd-agentic -c dd-agent -- python - --in-cluster < k8s/scripts/verify-artifact-handoff.py` | `PROVEN`, exit 0: two structures written under `/shared`, both consumers scoring real values off them, the skipped molecule still `--` in every column. Without `--namespace` the verdict says pod identity was not checked |
+| 65 | Same handoff, pods named | Three port-forwards (8091/8082/8083), then `./k8s/scripts/verify-artifact-handoff.py --namespace "${PROJECT}"` | The same, plus the pod and node that answered for each service, and PoseBusters' extracted `_lig.sdf` visible from the Boltz pod. Exit 2 if any two share a pod — that is the in-pod proof, not this one |
+| 66 | Re-prove after a storage change | `./k8s/scripts/verify-artifact-handoff.py --namespace "${PROJECT}" --structure <path from run 64> --smiles <its SMILES>` | Same verdict with no GPU time: the consumers re-open a pose already on the volume |
+| 67 | Same handoff on Compose | `docker compose up -d boltz posebusters interaction-profiler && ./k8s/scripts/verify-artifact-handoff.py` | `PROVEN` against the published 8091/8082/8083. Three separate containers over one host directory, so it rehearses the mechanism before a cluster is involved |
+
+### Boltz Gateway Placement (requires a cluster + 2 GPUs)
+
+Each replica serves one prediction at a time, so the gateway has to place work
+on an idle one and queue the surplus. See
+[Place batches on idle Boltz replicas](k8s/README.md#place-batches-on-idle-boltz-replicas).
+
+| # | Test | How to run | Expected result |
+|---|------|-----------|-----------------|
+| 68 | Gateway discovered the replicas | Port-forward 8404, then `curl -s "http://localhost:8404/stats;csv" \| cut -d, -f1,2,18` | One `UP` row per Boltz replica; the remaining slots sit in `MAINT (resolution)` until DNS fills them, which is how scaling needs no config change |
+| 69 | Least-busy placement | `./k8s/scripts/verify-boltz-placement.py --namespace "${PROJECT}"` | `PROVEN`: each concurrent batch on its own replica, peak in-flight 1 per replica, the surplus queued. Measured at M=2: 2.11x speedup, third batch waited 197.6 s |
+| 70 | Queueing is not failure | `kubectl -n "${PROJECT}" logs deployment/dd-agentic-boltz-gateway \| tail` | `%Tw` non-zero and `queue=0/1` on the surplus request, with status `200`. A `503` means `timeout queue` is below the prediction time |
+| 71 | Scoring still works through the gateway | `./k8s/scripts/verify-artifact-handoff.py --namespace "${PROJECT}"` | `PROVEN` with Boltz reported as "2 replicas" and the extracted ligands visible from all of them |
+| 72 | The RL path dials the gateway | `kubectl -n "${PROJECT}" exec deployment/dd-agentic -c dd-agent -- python -c "from reinvent4_mcp.tools.external import list_external_services as l; [print('%-22s %-10s %s' % (n, i['status'], i['url'])) for n, i in l().items()]"` | `boltz ok http://dd-agentic-boltz-gateway:8091/score` and the four CPU scorers direct — the ConfigMap path `ExternalRESTScorer` actually takes |
+| 73 | Scaling needs no proxy change | `kubectl -n "${PROJECT}" scale deployment/dd-agentic-boltz --replicas=3`, then watch the stats CSV | A third slot leaves `MAINT (resolution)` and turns `UP` **about 30 s after the pod is Ready** (10 s DNS hold + `rise 2 inter 10s`). Checking immediately shows the old count and looks like a failure |
+
+### Boltz Gateway: Cache and Coalescing (requires a cluster + GPU)
+
+The gateway reduces how much prediction is asked for at all. See
+[Cache results and coalesce batches](k8s/README.md#cache-results-and-coalesce-batches).
+
+| # | Test | How to run | Expected result |
+|---|------|-----------|-----------------|
+| 74 | The chain is wired | `kubectl -n "${PROJECT}" exec deployment/dd-agentic -c dd-agent -- python -c "import json,urllib.request; print(urllib.request.urlopen('http://dd-agentic-boltz-gateway:8091/health').read().decode())"` | `cache_enabled: true`, `upstream` the proxy, `healthy_replicas` matching the Boltz replica count, `upstream_reachable: true` |
+| 75 | Cold then warm | `./k8s/scripts/verify-artifact-handoff.py --namespace "${PROJECT}"` twice | Measured 3 m 35 s then **12 s**, with identical affinities and the *same* structure paths, and both consumers re-opening the cached poses. The molecule Boltz skipped hits too — a deterministic skip is cached |
+| 76 | Hit rate is reported | `curl -s http://localhost:8091/stats` through a port-forward | `cache.hit_rate` 0.5 after one cold and one warm run, `coalescing.molecules_per_call`, `queue.*` and latency percentiles. This is the number §5.4's admission control has always had to assume |
+| 77 | Submit and poll | `curl -s -X POST "http://localhost:8091/score?mode=async" -d @batch.json`, then `GET /result/{task_id}` | `202` with a `task_id`, `202` while queued or predicting, `200` with the scores once, then `404` — results are served once so the registry cannot grow without bound |
+
 ---
 
 ## Test Matrix Summary
 
 | Tier | Tests | Needs REINVENT4 | Needs LLM API | Needs Docker | Needs GPU | Needs Slurm |
 |------|-------|-----------------|---------------|--------------|-----------|-------------|
-| 1 - Unit | 280+ | No | No | No | No | No |
+| 1 - Unit | 600+ | No | No | No | No | No |
 | 2 - Integration | 39 | Yes | No | Partially | For RL/TL | No |
-| 3 - E2E | 56 | Yes | Yes | Partially | For RL/TL | Partially |
+| 3 - E2E | 77 | Yes | Yes | Partially | For RL/TL | Partially |
 
 ### Recommended Test Sequence
 

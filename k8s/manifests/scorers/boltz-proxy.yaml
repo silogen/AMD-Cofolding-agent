@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dd-agentic-boltz-proxy
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz-proxy
+    app.kubernetes.io/component: scorer-proxy
+data:
+  haproxy.cfg: |
+    global
+        log stdout format raw local0 info
+        maxconn 1024
+
+    defaults
+        mode http
+        log global
+        option dontlognull
+        # Default httplog with the queue fields appended: %Tw is time spent
+        # waiting for a free replica and %sq/%bq are the queue depths at
+        # dispatch, so one log line distinguishes "slow prediction" from
+        # "waited behind another batch" without a stats scrape.
+        log-format "%ci:%cp [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %tsc %ac/%fc/%bc/%sc/%rc queue=%sq/%bq %{+Q}r"
+        # One prediction runs for minutes and boltz kills its own at
+        # PREDICT_TIMEOUT_SECONDS=1800, so every timeout here sits above that
+        # ceiling. The proxy must never be the thing that aborts a live
+        # prediction, and a request that queued for an hour and then succeeded
+        # is correct behaviour rather than a failure.
+        timeout connect 5s
+        timeout client 2100s
+        timeout server 2100s
+        timeout queue 2100s
+        timeout http-request 60s
+        # Only a connection that never reached a replica is retried, so a
+        # replica dying before it answers costs a redispatch instead of a
+        # whole RL batch of NaN.
+        retries 2
+        option redispatch
+
+    resolvers coredns
+        # Reads the pod's own nameservers, so no cluster DNS address is baked
+        # into this file.
+        parse-resolv-conf
+        hold valid 10s
+        hold nx 5s
+        hold other 5s
+        hold refused 5s
+        hold timeout 5s
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry 1s
+
+    frontend score
+        bind *:8091
+        default_backend boltz
+
+    backend boltz
+        # Every replica runs BOLTZ_MAX_CONCURRENCY=1, so least-connections is
+        # literally least-busy. maxconn 1 is what turns that into placement
+        # rather than a hint: a second request waits in this queue instead of
+        # being handed to a replica that is already predicting, which is what
+        # a plain round-robin Service would do.
+        balance leastconn
+        # An idle keep-alive connection would hold a maxconn slot open, so take
+        # a fresh one per request. A TCP handshake is nothing against 386 s.
+        http-reuse never
+        # Which replica served this batch, so placement is checkable from a
+        # single curl rather than inferred from timing.
+        http-response set-header X-Boltz-Replica %[srv_name]
+        option httpchk
+        http-check send meth GET uri /health
+        http-check expect status 200
+        default-server check maxconn 1 inter 10s fall 3 rise 2 resolvers coredns init-addr none
+        # One slot per ready pod behind the headless Service. Twelve covers the
+        # largest M in the plan, so scaling boltz needs no change here.
+        server-template boltz 12 dd-agentic-boltz.${POD_NAMESPACE}.svc.${CLUSTER_DOMAIN}:8091
+
+    frontend stats
+        bind *:8404
+        # Queue depth, in-flight per replica, and which replicas are up. The
+        # What dd-agentic-boltz-gateway scrapes for its own /stats, and the
+        # authority on which replica is busy.
+        stats enable
+        stats uri /stats
+        stats refresh 10s
+        # Declared before the http-request rule below: monitor rules run first
+        # regardless, and HAProxy warns when the order suggests otherwise.
+        # Unready with no healthy replica, so a proxy that cannot place work
+        # does not advertise itself as able to take it.
+        monitor-uri /healthz
+        monitor fail if { nbsrv(boltz) eq 0 }
+        http-request use-service prometheus-exporter if { path /metrics }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-boltz-proxy
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz-proxy
+    app.kubernetes.io/component: scorer-proxy
+spec:
+  # Exactly one. Least-connections is only least-busy if one process owns the
+  # whole view of who is busy; two would each place a batch on the same idle
+  # replica.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-boltz-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-boltz-proxy
+        app.kubernetes.io/component: scorer-proxy
+    spec:
+      # In-flight predictions are minutes long: let them finish instead of
+      # killing a GPU batch to replace a proxy.
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: boltz-proxy
+          # The one image not built from this repo. Upstream HAProxy LTS,
+          # pulled once per node and then reused by IfNotPresent.
+          image: haproxy:3.2-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            # The config resolves the headless Service by FQDN, which needs a
+            # namespace. Taken from the pod so the manifest stays deployable
+            # into whichever namespace apply.sh --namespace targets.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CLUSTER_DOMAIN
+              value: cluster.local
+          ports:
+            - name: boltz-http
+              containerPort: 8091
+            - name: stats-http
+              containerPort: 8404
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: stats-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            # Deliberately not /healthz: that one fails when no replica is
+            # healthy, which is the scorers' problem, not the proxy's. Killing
+            # the proxy for it would drop the queue with it.
+            httpGet:
+              path: /stats
+              port: stats-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/haproxy
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: dd-agentic-boltz-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-boltz-proxy
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz-proxy
+    app.kubernetes.io/component: scorer-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-boltz-proxy
+  ports:
+    # Same port the scorers used to dial directly, so only the host in the
+    # ConfigMap changes.
+    - name: boltz-http
+      port: 8091
+      targetPort: boltz-http
+    - name: stats-http
+      port: 8404
+      targetPort: stats-http

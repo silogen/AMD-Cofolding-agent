@@ -3,7 +3,8 @@
 Covers:
 - YAML generation per SMILES (protein+ligand structure, MSA handling)
 - Batch YAML writing to disk
-- CLI command construction for ``boltz predict``
+- CLI command construction for ``boltz predict``, including the
+  ``BOLTZ_NO_KERNELS`` switch over the optimized kernels
 - Output directory parsing (affinity JSON, confidence JSON, structure files)
 - Response assembly from parsed outputs
 - FastAPI endpoint validation and error responses
@@ -12,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -190,6 +192,52 @@ class TestPredictCommand:
         )
         idx = cmd.index("--output_format")
         assert cmd[idx + 1] == "mmcif"
+
+    def test_no_kernels_flag_present_when_kernels_disabled(self):
+        with patch.object(boltz_app, "BOLTZ_NO_KERNELS", True):
+            cmd = _build_predict_cmd(
+                Path("/batch"), Path("/out"),
+                self._default_params(msa_path="/m.a3m"), False,
+            )
+        assert "--no_kernels" in cmd
+
+    def test_no_kernels_flag_absent_when_kernels_enabled(self):
+        with patch.object(boltz_app, "BOLTZ_NO_KERNELS", False):
+            cmd = _build_predict_cmd(
+                Path("/batch"), Path("/out"),
+                self._default_params(msa_path="/m.a3m"), False,
+            )
+        assert "--no_kernels" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# TestKernelFlagEnv
+# ---------------------------------------------------------------------------
+
+
+class TestKernelFlagEnv:
+    """BOLTZ_NO_KERNELS parsing. Unset must preserve today's behaviour."""
+
+    def test_unset_leaves_kernels_disabled(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert boltz_app._env_flag("BOLTZ_NO_KERNELS", True) is True
+
+    def test_zero_enables_kernels(self):
+        with patch.dict(os.environ, {"BOLTZ_NO_KERNELS": "0"}, clear=True):
+            assert boltz_app._env_flag("BOLTZ_NO_KERNELS", True) is False
+
+    def test_false_words_enable_kernels(self):
+        for raw in ("false", "FALSE", "no", "off"):
+            with patch.dict(os.environ, {"BOLTZ_NO_KERNELS": raw}, clear=True):
+                assert boltz_app._env_flag("BOLTZ_NO_KERNELS", True) is False, raw
+
+    def test_one_keeps_kernels_disabled(self):
+        with patch.dict(os.environ, {"BOLTZ_NO_KERNELS": "1"}, clear=True):
+            assert boltz_app._env_flag("BOLTZ_NO_KERNELS", True) is True
+
+    def test_blank_falls_back_to_the_default(self):
+        with patch.dict(os.environ, {"BOLTZ_NO_KERNELS": "  "}, clear=True):
+            assert boltz_app._env_flag("BOLTZ_NO_KERNELS", True) is True
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +542,12 @@ class TestHealthEndpoint:
     def test_health_returns_ok(self):
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+        assert resp.json()["status"] == "ok"
+
+    def test_health_reports_the_kernel_flag(self):
+        # An A/B run reads this to confirm which arm the replica is serving.
+        resp = client.get("/health")
+        assert resp.json()["no_kernels"] == boltz_app.BOLTZ_NO_KERNELS
 
 
 # ---------------------------------------------------------------------------

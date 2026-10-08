@@ -23,6 +23,10 @@ data:
         bucket_size: 25
         minscore: 0.4
 
+    # Each scorer is its own Deployment behind a ClusterIP Service, so the
+    # URLs below are cluster DNS, not the loopback addresses a single
+    # multi-container pod used. Names are unqualified, so they resolve in
+    # whichever namespace apply.sh --namespace deploys into.
     scoring:
       aggregation: "geometric_mean"
       pre_scoring:
@@ -36,7 +40,9 @@ data:
           num_rot_bond: true
       boltz:
         enabled: true
-        service_url: "http://127.0.0.1:8091/score"
+        # The gateway, not the replicas: it places each batch on an idle one.
+        # dd-agentic-boltz is headless and is what the gateway resolves.
+        service_url: "http://dd-agentic-boltz-gateway:8091/score"
         recycling_steps: 3
         diffusion_samples: 1
         sampling_steps_affinity: 200
@@ -46,19 +52,19 @@ data:
         msa_server_url: "https://api.colabfold.com"
       posebusters:
         enabled: true
-        service_url: "http://127.0.0.1:8082/score"
+        service_url: "http://dd-agentic-posebusters:8082/score"
         mode: "dock"
       admet:
         enabled: true
-        service_url: "http://127.0.0.1:8084/score"
+        service_url: "http://dd-agentic-admet:8084/score"
       retrodmta:
         enabled: true
-        service_url: "http://127.0.0.1:8085/score"
+        service_url: "http://dd-agentic-retrodmta:8085/score"
         method: "ensemble"
         window: "latest"
       interaction_profiler:
         enabled: true
-        service_url: "http://127.0.0.1:8083/score"
+        service_url: "http://dd-agentic-interaction-profiler:8083/score"
         interaction_type: "all"
         radius: 8.0
         ph: 7.4

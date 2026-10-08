@@ -64,6 +64,7 @@ class TestExternalRESTScorer:
         assert scorer.service_url == "http://boltz:8080/score"
         assert scorer.service == "boltz"
         assert scorer.timeout == 1800
+        assert scorer.async_poll is False
 
     def test_init_builds_request_params(self):
         scorer = ExternalRESTScorer(
@@ -239,6 +240,177 @@ class TestExternalRESTScorer:
         assert params["structure_paths"] == ["/shared/m0.pdb", None, "/shared/m2.pdb"]
         # protein_pdb_path falls back to the first *valid* structure.
         assert params["protein_pdb_path"] == "/shared/m0.pdb"
+
+
+# ---------------------------------------------------------------------------
+# TestTimeoutConfiguration
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutConfiguration:
+    """A deep queue must stop being indistinguishable from a failure.
+
+    The timeout used to be hardcoded at 1800 s, the same ceiling the Boltz
+    service itself enforces, so a batch that queued behind another one became
+    NaN for every molecule and tripped a component-failure diagnostic that was
+    not true.
+    """
+
+    def test_the_default_is_unchanged(self):
+        # Nothing silently changes for existing configs.
+        assert ExternalRESTScorer(_make_params()).timeout == 1800
+
+    def test_an_explicit_timeout_wins(self):
+        scorer = ExternalRESTScorer(_make_params(timeout=[7200.0]))
+
+        assert scorer.timeout == 7200.0
+
+    def test_the_environment_sets_it_when_the_config_does_not(self, monkeypatch):
+        monkeypatch.setenv("EXTERNAL_SCORER_TIMEOUT_SECONDS", "5400")
+
+        assert ExternalRESTScorer(_make_params()).timeout == 5400.0
+
+    def test_the_config_beats_the_environment(self, monkeypatch):
+        monkeypatch.setenv("EXTERNAL_SCORER_TIMEOUT_SECONDS", "5400")
+
+        assert ExternalRESTScorer(_make_params(timeout=[600.0])).timeout == 600.0
+
+    @pytest.mark.parametrize("bad", ["not-a-number", "0", "-1", ""])
+    def test_a_nonsense_environment_value_falls_back(self, monkeypatch, bad):
+        # A typo must not disable the timeout or make it instant.
+        monkeypatch.setenv("EXTERNAL_SCORER_TIMEOUT_SECONDS", bad)
+
+        assert ExternalRESTScorer(_make_params()).timeout == 1800
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_the_configured_timeout_is_the_one_used(self, mock_post):
+        mock_post.return_value = _mock_response({"scores": [0.5]})
+
+        ExternalRESTScorer(_make_params(timeout=[3600.0]))(["CCO"])
+
+        assert mock_post.call_args.kwargs["timeout"] == 3600.0
+
+    def test_timeout_is_not_forwarded_to_the_service(self):
+        # It is ours, not a prediction parameter.
+        scorer = ExternalRESTScorer(_make_params(timeout=[600.0], async_poll=[True]))
+
+        assert "timeout" not in scorer.request_params
+        assert "async_poll" not in scorer.request_params
+
+
+# ---------------------------------------------------------------------------
+# TestSubmitThenPoll
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitThenPoll:
+    """202 + poll, so waiting is bounded by the deadline, not by one socket."""
+
+    def _scorer(self, **kwargs) -> ExternalRESTScorer:
+        params = _make_params(
+            service_url=["http://gateway:8091/score"], async_poll=[True], **kwargs
+        )
+        scorer = ExternalRESTScorer(params)
+        return scorer
+
+    def test_result_url_derived_from_the_score_url(self):
+        scorer = self._scorer()
+
+        assert scorer._result_url("abc") == "http://gateway:8091/result/abc"
+
+    def test_result_url_ignores_an_existing_query(self):
+        scorer = ExternalRESTScorer(
+            _make_params(service_url=["http://gateway:8091/score?x=1"],
+                         async_poll=[True])
+        )
+
+        assert scorer._result_url("abc") == "http://gateway:8091/result/abc"
+
+    @patch("reinvent_plugins.components.comp_external_rest.time.sleep")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.get")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_it_submits_async_then_polls_until_ready(self, mock_post, mock_get, _sleep):
+        mock_post.return_value = _mock_response({"task_id": "t1"}, status_code=202)
+        mock_get.side_effect = [
+            _mock_response({"status": "pending"}, status_code=202),
+            _mock_response({"status": "pending"}, status_code=202),
+            _mock_response({"scores": [1.5]}),
+        ]
+
+        result = self._scorer()(["CCO"])
+
+        # mode=async on the submit, then the result URL until it is ready.
+        assert mock_post.call_args.args[0] == "http://gateway:8091/score?mode=async"
+        assert mock_get.call_args.args[0] == "http://gateway:8091/result/t1"
+        assert mock_get.call_count == 3
+        assert result.scores[0][0] == pytest.approx(1.5)
+
+    @patch("reinvent_plugins.components.comp_external_rest.time.sleep")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.get")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_polling_backs_off(self, mock_post, mock_get, mock_sleep):
+        mock_post.return_value = _mock_response({"task_id": "t1"}, status_code=202)
+        mock_get.side_effect = [
+            _mock_response({}, status_code=202),
+            _mock_response({}, status_code=202),
+            _mock_response({"scores": [1.0]}),
+        ]
+
+        self._scorer()(["CCO"])
+
+        waits = [call.args[0] for call in mock_sleep.call_args_list]
+        # Cheap while queued: the interval grows instead of hammering.
+        assert waits[1] > waits[0]
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_a_service_that_does_not_do_async_is_used_as_is(self, mock_post):
+        # Answering the submit normally rather than 202 means the flag is
+        # misconfigured; the response is still honoured so it is visible.
+        mock_post.return_value = _mock_response({"scores": [0.25]})
+
+        result = self._scorer()(["CCO"])
+
+        assert result.scores[0][0] == pytest.approx(0.25)
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_202_without_a_task_id_is_a_failure(self, mock_post):
+        mock_post.return_value = _mock_response({}, status_code=202)
+
+        result = self._scorer(failure_score=[0.0])(["CCO"])
+
+        assert result.scores[0][0] == pytest.approx(0.0)
+
+    @patch("reinvent_plugins.components.comp_external_rest.time.sleep")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.get")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_the_deadline_still_applies(self, mock_post, mock_get, _sleep):
+        # Polling forever would hang an RL step; the overall timeout bounds it.
+        mock_post.return_value = _mock_response({"task_id": "t1"}, status_code=202)
+        mock_get.return_value = _mock_response({}, status_code=202)
+
+        result = self._scorer(timeout=[0.01], failure_score=[0.0])(["CCO"])
+
+        assert result.scores[0][0] == pytest.approx(0.0)
+
+    @patch("reinvent_plugins.components.comp_external_rest.time.sleep")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.get")
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_the_poll_count_is_logged(self, mock_post, mock_get, _sleep):
+        mock_post.return_value = _mock_response({"task_id": "t1"}, status_code=202)
+        mock_get.side_effect = [
+            _mock_response({}, status_code=202),
+            _mock_response({"scores": [1.0]}),
+        ]
+        records: list[dict] = []
+        with patch(
+            "reinvent_plugins.components.comp_external_rest._log_call",
+            side_effect=records.append,
+        ):
+            self._scorer()(["CCO"])
+
+        # So a slow step can be explained after the fact.
+        assert records[0]["task_id"] == "t1"
+        assert records[0]["polls"] == 2
 
 
 # ---------------------------------------------------------------------------

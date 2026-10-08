@@ -92,6 +92,8 @@ services:
     environment:
       - AMD_VISIBLE_DEVICES=${BOLTZ_GPU}
       - HIP_VISIBLE_DEVICES=${BOLTZ_GPU}
+      # 0 enables boltz's optimized kernels; see k8s/scripts/ab-boltz-kernels.py
+      - BOLTZ_NO_KERNELS=${BOLTZ_NO_KERNELS:-1}
     ports:
       - "127.0.0.1:8091:8080"
     volumes:

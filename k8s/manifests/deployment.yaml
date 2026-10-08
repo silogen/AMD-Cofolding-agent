@@ -2,9 +2,13 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dd-agentic
+  labels:
+    app.kubernetes.io/name: dd-agentic
+    app.kubernetes.io/component: agent
 spec:
   replicas: 1
   strategy:
+    # A surge pod would need a second amd.com/gpu and stay Pending.
     type: Recreate
   selector:
     matchLabels:
@@ -13,9 +17,15 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: dd-agentic
+        app.kubernetes.io/component: agent
     spec:
       terminationGracePeriodSeconds: 30
       initContainers:
+        # Creates the subPath layout the scorer Deployments mount, with
+        # permissive modes. kubelet creates a missing subPath itself, but
+        # root-owned and 0755, which the non-root interaction-profiler image
+        # could not write to. The recursive chmod also repairs directories a
+        # scorer pod reached first.
         - name: initialize-data
           image: dd-agent:local
           imagePullPolicy: IfNotPresent
@@ -113,195 +123,6 @@ spec:
               readOnly: true
             - name: agent-shm
               mountPath: /dev/shm
-
-        - name: boltz
-          image: boltz2-wrapper:local
-          imagePullPolicy: IfNotPresent
-          command:
-            - uvicorn
-            - app:app
-            - --host
-            - 0.0.0.0
-            - --port
-            - "8091"
-          ports:
-            - name: boltz-http
-              containerPort: 8091
-          resources:
-            requests:
-              amd.com/gpu: "1"
-              cpu: "4"
-              memory: 32Gi
-            limits:
-              amd.com/gpu: "1"
-              cpu: "8"
-              memory: 96Gi
-          startupProbe:
-            httpGet:
-              path: /health
-              port: boltz-http
-            periodSeconds: 10
-            failureThreshold: 30
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: boltz-http
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: boltz-http
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
-          volumeMounts:
-            - name: data
-              mountPath: /shared
-              subPath: shared
-            - name: data
-              mountPath: /cache
-              subPath: boltz-cache
-            - name: boltz-shm
-              mountPath: /dev/shm
-
-        - name: posebusters
-          image: posebusters:local
-          imagePullPolicy: IfNotPresent
-          command:
-            - uvicorn
-            - app:app
-            - --host
-            - 0.0.0.0
-            - --port
-            - "8082"
-          ports:
-            - name: pose-http
-              containerPort: 8082
-          resources:
-            requests:
-              cpu: "500m"
-              memory: 1Gi
-            limits:
-              cpu: "2"
-              memory: 4Gi
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: pose-http
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: pose-http
-            periodSeconds: 30
-            timeoutSeconds: 5
-          volumeMounts:
-            - name: data
-              mountPath: /shared
-              subPath: shared
-
-        - name: interaction-profiler
-          image: interaction-profiler:local
-          imagePullPolicy: IfNotPresent
-          args:
-            - uvicorn
-            - app:app
-            - --host
-            - 0.0.0.0
-            - --port
-            - "8083"
-          ports:
-            - name: profile-http
-              containerPort: 8083
-          resources:
-            requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
-              cpu: "4"
-              memory: 8Gi
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: profile-http
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: profile-http
-            periodSeconds: 30
-            timeoutSeconds: 5
-          volumeMounts:
-            - name: data
-              mountPath: /shared
-              subPath: shared
-
-        - name: admet-predictor
-          image: admet-predictor:local
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: admet-http
-              containerPort: 8084
-          resources:
-            requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
-              cpu: "4"
-              memory: 8Gi
-          startupProbe:
-            httpGet:
-              path: /health
-              port: admet-http
-            periodSeconds: 10
-            failureThreshold: 12
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: admet-http
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: admet-http
-            periodSeconds: 30
-            timeoutSeconds: 5
-
-        - name: retrodmta-predictor
-          image: retrodmta-predictor:local
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: retro-http
-              containerPort: 8085
-          resources:
-            requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
-              cpu: "4"
-              memory: 8Gi
-          startupProbe:
-            httpGet:
-              path: /health
-              port: retro-http
-            periodSeconds: 10
-            failureThreshold: 12
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: retro-http
-            periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: retro-http
-            periodSeconds: 30
-            timeoutSeconds: 5
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -316,7 +137,3 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 128Gi
-        - name: boltz-shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 64Gi

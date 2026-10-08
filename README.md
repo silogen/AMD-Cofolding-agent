@@ -160,17 +160,22 @@ dd_agentic/
 ├── k8s/                            # Kubernetes deploy — see [k8s/README.md](k8s/README.md)
 │   ├── apply.sh / build-images.sh / load-images.sh
 │   ├── manifests/                  # Deployment, AIMService, ConfigMap, Secret, PVC
-│   └── scripts/                    # switch-aim-model helpers
+│   └── scripts/                    # switch-aim-model helpers, scorer measurement
 ├── reinvent4_mcp_config.yaml       # Process config (service URLs, RL defaults, storage paths)
 ├── TENSORWAVE_INSTRUCTIONS.md      # SSH-tunnel recipe for reaching the AMD LLM gateway
 ├── TESTING.md                      # Manual and scripted test scenarios
-├── tests/                          # ~316 unit tests (REINVENT4 imports mocked, no GPU needed)
+├── tests/                          # ~690 unit tests (REINVENT4 imports mocked, no GPU needed)
 │   ├── test_scoring.py             # Native + TTP scoring paths
 │   ├── test_ttp.py                 # Schema, store, mapper
 │   ├── test_optimization.py        # Job manager, TOML gen, diagnostics, transfer learning
 │   ├── test_boltz_wrapper.py       # Boltz2 FastAPI app
 │   ├── test_posebusters_wrapper.py # PoseBusters FastAPI app
 │   ├── test_external_scoring.py    # ExternalRESTScorer + pipeline integration
+│   ├── test_artifact_handoff.py    # Cross-pod structure handoff and its verification harness
+│   ├── test_boltz_placement.py     # Least-busy placement across Boltz replicas
+│   ├── test_boltz_gateway.py       # Result cache, batch coalescing, 202+poll
+│   ├── test_scoring_latency.py     # Latency + cache-hit harvest from external_scoring.jsonl
+│   ├── test_boltz_kernels_ab.py    # Boltz optimized-kernels A/B harness
 │   ├── test_agent_tool_repair.py   # Orphaned tool-call repair in the agent loop
 │   └── conftest.py
 │
@@ -431,14 +436,35 @@ Everything the stack writes lands under `${DATA_DIR:-./data}` on the host, so st
 
 ## Running on Kubernetes
 
-The Compose stack also deploys as one Kubernetes Deployment plus an in-cluster
-AIM endpoint. Manifests live under `k8s/manifests/`. Image build, load, and
+The Compose stack also deploys as eight Kubernetes Deployments — the agent, one
+per scorer, and two tiers in front of the Boltz replicas (a least-busy proxy and
+a caching, coalescing gateway) — with an in-cluster AIM endpoint. Manifests live under `k8s/manifests/`, the scorers in
+`k8s/manifests/scorers/`. Image build, load, and
 apply scripts stay at the `k8s/` root. `k8s/scripts/` holds AIM catalog
 switching and [`k8s/scripts/uat-scoring.sh`](k8s/scripts/uat-scoring.sh), which
 pipes two scoring prompts into a running `dd-agent` and checks the
-`score_molecules` tables.
+`score_molecules` tables. It also holds the two scorer measurements:
+[`analyze-scoring-latency.py`](k8s/scripts/analyze-scoring-latency.py) reads
+per-call latency and the result-cache hit rate back out of
+`external_scoring.jsonl`, and
+[`ab-boltz-kernels.py`](k8s/scripts/ab-boltz-kernels.py) times one `/score`
+call with and without Boltz's optimized kernels. Since the scorers now sit in
+separate pods and hand each other `/shared` paths rather than payloads,
+[`verify-artifact-handoff.py`](k8s/scripts/verify-artifact-handoff.py) checks
+that a structure Boltz writes in its own pod is still readable by PoseBusters
+and the interaction profiler in theirs. Boltz itself now runs several replicas
+behind a least-busy proxy, and
+[`verify-boltz-placement.py`](k8s/scripts/verify-boltz-placement.py) checks
+that concurrent batches are spread over idle replicas rather than stacked on a
+busy one. In front of that sits a gateway that caches results per molecule and
+coalesces concurrent batches into single predictions.
 
 **Full guide:** [k8s/README.md](k8s/README.md)
+
+`--node` pins every Deployment: the `*:local` images live in one node's
+kubelet store, and on a single-node cluster the `ReadWriteOnce` claim is
+writable only from the node that mounts it, so the pods that hand each other
+`/shared` structure paths have to stay together.
 
 ```bash
 cd examples/dd_agentic
@@ -851,7 +877,7 @@ Builds a hierarchical medchem fragment taxonomy from SMILES, and — when a stru
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `interaction_type` | `"all"` | Family to count (`hbond`, `hydrophobic`, `ionic`, `pi_stacking`, …, or `all`) |
-| `structure_paths` | `null` | Per-SMILES structure paths, injected from an upstream cofold |
+| `structure_paths` | `null` | Per-SMILES structure paths, injected from an upstream cofold. A null entry is a molecule the cofold skipped: it scores null and keeps the list aligned with the SMILES |
 | `ph` | `7.4` | Protonation pH |
 | `radius` | `8.0` | Pocket crop radius (Å) |
 
@@ -1095,6 +1121,7 @@ On Compose and Apptainer these are set in `services/env.local.sh` and forwarded 
 | `DATA_DIR` | `./data` | Host directory bind-mounted into the containers |
 | `REINVENT_GPU` | first of `SLURM_STEP_GPUS`, else `0` | GPU for REINVENT / the agent |
 | `BOLTZ_GPU` | second of `SLURM_STEP_GPUS`, else `1` | GPU for Boltz2 |
+| `BOLTZ_NO_KERNELS` | `1` | Keeps Boltz's optimized kernels off, as every run so far. `0` enables them; measure what that is worth with `k8s/scripts/ab-boltz-kernels.py` |
 | `SLURM_PARTITION` | `batch` | Cluster partition |
 | `SLURM_CPUS` / `SLURM_MEM` / `SLURM_TIME` | `4` / `16G` / `4:00:00` | Slurm defaults |
 

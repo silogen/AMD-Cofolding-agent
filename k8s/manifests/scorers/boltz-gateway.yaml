@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-boltz-gateway
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz-gateway
+    app.kubernetes.io/component: scorer-gateway
+spec:
+  # One. The coalescing window and the in-flight de-duplication table live in
+  # this process, so a second replica would see half the traffic and merge half
+  # as much. The result cache is on the shared volume and would still be
+  # correct, but the cheapest saving -- two supervisors asking for the same
+  # molecule at the same moment -- only lands when one process sees both.
+  replicas: 1
+  strategy:
+    # Never two at once, for the same reason.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-boltz-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-boltz-gateway
+        app.kubernetes.io/component: scorer-gateway
+    spec:
+      # A coalesced batch is minutes of GPU time, and async results are held in
+      # memory: let in-flight work drain rather than throwing it away.
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: boltz-gateway
+          image: boltz-gateway:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8091"
+          ports:
+            - name: gateway-http
+              containerPort: 8091
+          env:
+            # Placement stays with the proxy: it knows which replica is idle.
+            - name: BOLTZ_UPSTREAM_URL
+              value: http://dd-agentic-boltz-proxy:8091/score
+            - name: BOLTZ_PROXY_STATS_URL
+              value: http://dd-agentic-boltz-proxy:8404/stats;csv
+            - name: GATEWAY_CACHE_DIR
+              value: /shared/boltz_results_cache
+            - name: GATEWAY_CACHE_ENABLED
+              value: "1"
+            # How long a batch is held open for more molecules. Two seconds is
+            # nothing against a 386 s prediction, and it is what lets the
+            # leftovers of several cache-thinned batches share one invocation.
+            - name: COALESCE_WINDOW_SECONDS
+              value: "2.0"
+            # Matches the RL batch_size, so one step is one call. Raise it to
+            # merge whole batches from several supervisors: a bigger call
+            # amortises the >=124 s fixed cost further, at the price of a later
+            # first result, and must stay well inside the 1800 s ceiling.
+            - name: COALESCE_MAX_MOLECULES
+              value: "16"
+            # 0 = as many concurrent upstream calls as there are healthy
+            # replicas, so every GPU stays busy and the surplus accumulates
+            # into larger batches instead of queueing one-molecule calls.
+            - name: GATEWAY_MAX_INFLIGHT
+              value: "0"
+            - name: UPSTREAM_TIMEOUT_SECONDS
+              value: "2100"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: gateway-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: gateway-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            # The result cache, and the MSA files it digests to key on.
+            - name: data
+              mountPath: /shared
+              subPath: shared
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-boltz-gateway
+  labels:
+    app.kubernetes.io/name: dd-agentic-boltz-gateway
+    app.kubernetes.io/component: scorer-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-boltz-gateway
+  ports:
+    # Same port and path as a bare replica, so the ConfigMap's service_url is
+    # unchanged by this phase.
+    - name: gateway-http
+      port: 8091
+      targetPort: gateway-http
