@@ -55,6 +55,9 @@ BOLTZ_DEPLOYMENT = "dd-agentic-boltz"
 BOLTZ_PROXY = "dd-agentic-boltz-proxy"
 RUNNER_DEPLOYMENT = "dd-agentic-reinvent-runner"
 BOLTZ_GATEWAY = "dd-agentic-boltz-gateway"
+CAMPAIGN_STORE = "dd-agentic-campaign-store"
+SUPERVISOR_DEPLOYMENT = "dd-agentic-supervisor"
+CONDUCTOR_DEPLOYMENT = "dd-agentic-conductor"
 
 # services/boltz2/app.py kills a prediction at this many seconds, so every
 # gateway timeout has to sit above it.
@@ -70,7 +73,21 @@ SHARED_VOLUME_DEPLOYMENTS = {
     "dd-agentic-interaction-profiler",
     # Runs the RL jobs, so it writes the job dirs and reads the MSAs.
     RUNNER_DEPLOYMENT,
+    # The ledger is a SQLite file on the volume, beside the job dirs its
+    # results refer to.
+    CAMPAIGN_STORE,
+    # Reads the base TTP and writes each task's weight-vector variant back.
+    SUPERVISOR_DEPLOYMENT,
+    # Reviews results and reads TTPs. Read-only, deliberately -- see
+    # STRUCTURE_WRITERS below.
+    CONDUCTOR_DEPLOYMENT,
 }
+
+# The /shared users that must be able to *write* to it. The conductor is the
+# one that must not: it reviews results and reads TTPs, and a writable mount
+# would invite it to edit a base TTP mid-campaign, which would silently change
+# what later tasks in the sweep mean.
+STRUCTURE_WRITERS = SHARED_VOLUME_DEPLOYMENTS - {CONDUCTOR_DEPLOYMENT}
 
 
 def _manifest_files() -> list[Path]:
@@ -504,6 +521,306 @@ class TestBoltzGateway:
 
 
 # ---------------------------------------------------------------------------
+# TestCampaignStore
+# ---------------------------------------------------------------------------
+
+
+class TestCampaignStore:
+    """The control-plane ledger: one writer, on the volume, reachable by name."""
+
+    def _env(self, deployments) -> dict[str, str]:
+        return {
+            var["name"]: var.get("value")
+            for var in _containers(deployments[CAMPAIGN_STORE])[0]["env"]
+        }
+
+    def test_exactly_one_writer_on_the_ledger(self, deployments):
+        # The atomic claim relies on SQLite's write lock. A second replica
+        # would be a second process on the same file over a network
+        # filesystem, which is where that locking stops being dependable --
+        # and two supervisors would be handed the same weight vector.
+        spec = deployments[CAMPAIGN_STORE]["spec"]
+
+        assert spec["replicas"] == 1
+        assert spec["strategy"]["type"] == "Recreate"
+
+    def test_one_uvicorn_worker(self, deployments):
+        command = _containers(deployments[CAMPAIGN_STORE])[0]["command"]
+
+        assert "--workers" in command
+        assert command[command.index("--workers") + 1] == "1"
+
+    def test_the_ledger_lives_on_the_shared_volume(self, deployments):
+        # It has to outlive the pod: a conductor that restarts rebuilds its
+        # loop by reading the ledger back.
+        db = self._env(deployments)["CAMPAIGN_STORE_DB"]
+        mounts = {
+            m["mountPath"]
+            for m in _containers(deployments[CAMPAIGN_STORE])[0]["volumeMounts"]
+        }
+
+        assert db.startswith("/shared/")
+        assert "/shared" in mounts
+
+    def test_it_needs_no_gpu(self, deployments):
+        assert _gpus(deployments[CAMPAIGN_STORE]) == 0
+
+    def test_the_default_lease_outlives_one_rl_step(self, deployments):
+        # A supervisor blocked in a scoring call cannot heartbeat, and the
+        # gateway will hold that call for its whole upstream timeout. A lease
+        # that expires inside a normal step hands the task to a second
+        # supervisor and runs the same weight vector twice, so the two numbers
+        # have to stay coupled.
+        lease = float(self._env(deployments)["DEFAULT_LEASE_SECONDS"])
+        gateway_env = {
+            var["name"]: var.get("value")
+            for var in _containers(deployments[BOLTZ_GATEWAY])[0]["env"]
+        }
+
+        assert lease > float(gateway_env["UPSTREAM_TIMEOUT_SECONDS"])
+
+    def test_a_task_is_retried_but_not_forever(self, deployments):
+        # One retry survives an eviction; unbounded retries would let a task
+        # that fails for its own reasons cycle through the whole pool.
+        assert int(self._env(deployments)["TASK_MAX_ATTEMPTS"]) == 2
+
+    def test_it_is_reachable_by_the_name_clients_use(self, services, deployments):
+        service = services[CAMPAIGN_STORE]
+        ports = {p["name"]: p["port"] for p in service["spec"]["ports"]}
+        container_ports = {
+            p["name"]: p["containerPort"]
+            for p in _containers(deployments[CAMPAIGN_STORE])[0]["ports"]
+        }
+
+        assert service["spec"]["type"] == "ClusterIP"
+        assert ports == {"store-http": 8087}
+        assert container_ports == {"store-http": 8087}
+
+    def test_the_probes_use_the_health_endpoint(self, deployments):
+        container = _containers(deployments[CAMPAIGN_STORE])[0]
+
+        for probe in ("readinessProbe", "livenessProbe"):
+            assert container[probe]["httpGet"]["path"] == "/health"
+            assert container[probe]["httpGet"]["port"] == "store-http"
+
+
+# ---------------------------------------------------------------------------
+# TestSupervisorPool
+# ---------------------------------------------------------------------------
+
+
+class TestSupervisorPool:
+    """N headless agents draining the ledger's queue."""
+
+    def _env(self, deployments) -> dict[str, Any]:
+        return {
+            var["name"]: var
+            for var in _containers(deployments[SUPERVISOR_DEPLOYMENT])[0]["env"]
+        }
+
+    def test_the_pool_starts_empty(self, deployments):
+        # Applying the manifests must not start burning GPU against an empty
+        # queue; a campaign begins by scaling up.
+        assert deployments[SUPERVISOR_DEPLOYMENT]["spec"]["replicas"] == 0
+
+    def test_it_is_the_agent_image_with_another_entrypoint(self, deployments):
+        # A supervisor *is* the agent, so there is no second image to build and
+        # no second copy of the agent to keep in step.
+        container = _containers(deployments[SUPERVISOR_DEPLOYMENT])[0]
+        agent_image = _containers(deployments[AGENT_DEPLOYMENT])[0]["image"]
+
+        assert container["image"] == agent_image
+        assert container["command"] == [
+            "python", "-m", "reinvent4_agent.supervisor",
+        ]
+
+    def test_the_entrypoint_module_exists(self):
+        # The command above is a string in YAML; nothing else would catch a
+        # rename of the module it names.
+        assert (
+            _MANIFESTS.parents[1] / "reinvent4_agent" / "supervisor.py"
+        ).is_file()
+
+    def test_supervisors_need_no_gpu(self, deployments):
+        # The point of the Phase 2 split: N supervisors cost N CPU
+        # allocations, and the GPUs go to Boltz and the runner instead of
+        # being pinned one per agent.
+        assert _gpus(deployments[SUPERVISOR_DEPLOYMENT]) == 0
+
+    def test_nothing_dials_a_supervisor(self, services):
+        # It is a client of the ledger and the runner, so a Service would be
+        # an invitation to depend on a pod that is scaled to zero most of the
+        # time.
+        assert SUPERVISOR_DEPLOYMENT not in services
+
+    def test_it_knows_where_the_ledger_is(self, deployments, services):
+        store_url = self._env(deployments)["CAMPAIGN_STORE_URL"]["value"]
+        port = services[CAMPAIGN_STORE]["spec"]["ports"][0]["port"]
+
+        assert store_url == f"http://{CAMPAIGN_STORE}:{port}"
+
+    def test_each_supervisor_is_named_in_the_ledger(self, deployments):
+        # So /status names the pod holding each task and a stuck supervisor
+        # can be found by name.
+        identity = self._env(deployments)["SUPERVISOR_ID"]
+
+        assert identity["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
+
+    def test_heartbeats_are_well_inside_the_lease(self, deployments):
+        # A couple of missed heartbeats must not cost the task.
+        interval = float(self._env(deployments)["SUPERVISOR_HEARTBEAT_SECONDS"]["value"])
+        lease = float(
+            {
+                var["name"]: var.get("value")
+                for var in _containers(deployments[CAMPAIGN_STORE])[0]["env"]
+            }["DEFAULT_LEASE_SECONDS"]
+        )
+
+        assert interval * 3 < lease
+
+    def test_it_shares_the_agents_ttp_store(self, deployments):
+        # The base TTP is read from here and each task's weight-vector variant
+        # written back, so both have to be the same directory.
+        def ttp_mount(name: str) -> str:
+            return next(
+                m["mountPath"]
+                for m in _containers(deployments[name])[0]["volumeMounts"]
+                if m.get("subPath") == "ttps"
+            )
+
+        assert ttp_mount(SUPERVISOR_DEPLOYMENT) == ttp_mount(AGENT_DEPLOYMENT)
+
+    def test_it_reads_the_same_llm_config_as_the_agent(self, deployments):
+        # One place to change the model for the whole fleet.
+        def llm_keys(name: str) -> set[str]:
+            return {
+                var["name"]
+                for var in _containers(deployments[name])[0]["env"]
+                if var["name"].startswith("REINVENT4_AGENT_")
+            }
+
+        assert llm_keys(SUPERVISOR_DEPLOYMENT) <= llm_keys(AGENT_DEPLOYMENT)
+        assert "REINVENT4_AGENT_MODEL" in llm_keys(SUPERVISOR_DEPLOYMENT)
+
+    def test_the_api_key_comes_from_the_secret(self, deployments):
+        key = self._env(deployments)["REINVENT4_AGENT_API_KEY"]
+
+        assert key["valueFrom"]["secretKeyRef"]["name"] == "dd-agentic-llm"
+        assert "value" not in key
+
+
+# ---------------------------------------------------------------------------
+# TestConductor
+# ---------------------------------------------------------------------------
+
+
+class TestConductor:
+    """One conductor, with just enough Kubernetes access to scale the pool."""
+
+    def _env(self, deployments) -> dict[str, Any]:
+        return {
+            var["name"]: var
+            for var in _containers(deployments[CONDUCTOR_DEPLOYMENT])[0]["env"]
+        }
+
+    def test_exactly_one_conductor(self, deployments):
+        # Two would each top the pool up to N and the campaign would run at
+        # 2N -- the one way to overcommit the GPUs that the ledger cannot
+        # catch, because each dispatch is individually legitimate.
+        spec = deployments[CONDUCTOR_DEPLOYMENT]["spec"]
+
+        assert spec["replicas"] == 1
+        assert spec["strategy"]["type"] == "Recreate"
+
+    def test_it_has_its_own_service_account(self, deployments):
+        # The deployments/scale grant in k8s/rbac.yaml is bound to the
+        # oidc:demo-lux developer group, so it authorises a human's kubectl
+        # and not a pod. Without this the scale call is a 403.
+        pod = _pod_spec(deployments[CONDUCTOR_DEPLOYMENT])
+
+        assert pod["serviceAccountName"] == "dd-agentic-conductor"
+        assert "dd-agentic-conductor" in _by_kind("ServiceAccount")
+
+    def test_the_scale_grant_is_scoped_to_the_supervisor_pool(self):
+        # So a conductor cannot scale Boltz or the runner, which hold the GPUs.
+        role = _by_kind("Role")["dd-agentic-conductor"]
+        rules = role["rules"]
+
+        assert len(rules) == 1
+        assert rules[0]["resources"] == ["deployments/scale"]
+        assert rules[0]["resourceNames"] == [SUPERVISOR_DEPLOYMENT]
+
+    def test_the_grant_withholds_everything_but_read_and_patch(self):
+        rules = _by_kind("Role")["dd-agentic-conductor"]["rules"][0]
+
+        # `list` and `watch` cannot be restricted by resourceNames, so
+        # granting them would widen the scope above to every Deployment.
+        assert set(rules["verbs"]) == {"get", "patch"}
+
+    def test_the_binding_names_the_service_account(self):
+        binding = _by_kind("RoleBinding")["dd-agentic-conductor"]
+
+        assert binding["roleRef"]["name"] == "dd-agentic-conductor"
+        assert binding["subjects"] == [
+            {"kind": "ServiceAccount", "name": "dd-agentic-conductor"}
+        ]
+
+    def test_it_knows_which_deployment_to_scale(self, deployments):
+        assert self._env(deployments)["SUPERVISOR_DEPLOYMENT"]["value"] == (
+            SUPERVISOR_DEPLOYMENT
+        )
+
+    def test_it_knows_its_own_namespace(self, deployments):
+        # The scale call is namespaced, and the manifests carry no hard-coded
+        # namespace -- apply.sh sets it.
+        namespace = self._env(deployments)["POD_NAMESPACE"]
+
+        assert namespace["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
+
+    def test_admission_control_points_at_the_gateway(self, deployments, services):
+        # Boltz is the binding constraint, so capacity is a question about its
+        # queue depth rather than about the agent count.
+        stats_url = self._env(deployments)["BOLTZ_GATEWAY_STATS_URL"]["value"]
+        port = services[BOLTZ_GATEWAY]["spec"]["ports"][0]["port"]
+
+        assert stats_url == f"http://{BOLTZ_GATEWAY}:{port}/stats"
+
+    def test_it_reads_the_ledger_it_writes_to(self, deployments, services):
+        store_url = self._env(deployments)["CAMPAIGN_STORE_URL"]["value"]
+        port = services[CAMPAIGN_STORE]["spec"]["ports"][0]["port"]
+
+        assert store_url == f"http://{CAMPAIGN_STORE}:{port}"
+
+    def test_every_shared_mount_is_read_only(self, deployments):
+        # It reviews results and reads TTPs; the supervisors write. A writable
+        # mount would invite it to edit a base TTP mid-campaign, silently
+        # changing what later tasks in the sweep mean.
+        mounts = [
+            m for m in _containers(deployments[CONDUCTOR_DEPLOYMENT])[0]["volumeMounts"]
+            if m["name"] == "data"
+        ]
+
+        assert mounts, "the conductor should still be able to read results"
+        for mount in mounts:
+            assert mount["readOnly"] is True, f"{mount['mountPath']} is writable"
+
+    def test_it_needs_no_gpu(self, deployments):
+        assert _gpus(deployments[CONDUCTOR_DEPLOYMENT]) == 0
+
+    def test_it_stays_interactive(self, deployments):
+        # The conductor is the REPL entrypoint, reached by kubectl exec, so it
+        # must not exit when a campaign's loop finishes.
+        assert _containers(deployments[CONDUCTOR_DEPLOYMENT])[0]["command"] == [
+            "sleep", "infinity",
+        ]
+
+    def test_the_loop_module_exists(self):
+        assert (
+            _MANIFESTS.parents[1] / "reinvent4_agent" / "conductor.py"
+        ).is_file()
+
+
+# ---------------------------------------------------------------------------
 # TestConfigMapServiceUrls
 # ---------------------------------------------------------------------------
 
@@ -615,7 +932,7 @@ class TestSharedVolumePinning:
         # PDB Boltz handed it, i.e. into the producer's own output directory.
         # A read-only mount would make every pose fail extraction and score
         # None -- which reads exactly like a missing file.
-        for name in SHARED_VOLUME_DEPLOYMENTS:
+        for name in STRUCTURE_WRITERS:
             for container in _containers(deployments[name]):
                 for mount in container["volumeMounts"]:
                     if mount.get("subPath") != "shared":

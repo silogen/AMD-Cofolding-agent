@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+# SQLite is in the standard library, so there is nothing else to install: the
+# ledger is deliberately a file on the shared volume rather than a database
+# server the fleet would have to operate.

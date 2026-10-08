@@ -14,6 +14,16 @@ resources:
   # REINVENT4 job lifecycle and scoring behind REST, so the agent needs
   # neither REINVENT4 nor a GPU once runner.enabled is set.
   - runner/reinvent-runner.yaml
+  # Control-plane ledger: the queue of weight vectors, who holds which task,
+  # what came back, and the Pareto front over it.
+  - campaign-store/campaign-store.yaml
+  # The worker pool that drains that queue. Ships at replicas: 0 -- a campaign
+  # starts by scaling it to N.
+  - supervisor/dd-supervisor.yaml
+  # Opens campaigns, keeps N in flight, closes the books. Carries its own
+  # ServiceAccount: it is the only workload that calls the Kubernetes API,
+  # because scaling the pool is how concurrency is expressed.
+  - conductor/dd-conductor.yaml
   - scorers/boltz.yaml
   # Least-busy placement across the M boltz replicas.
   - scorers/boltz-proxy.yaml
@@ -46,6 +56,9 @@ images:
     newTag: local
   - name: reinvent-runner
     newName: reinvent-runner
+    newTag: local
+  - name: campaign-store
+    newName: campaign-store
     newTag: local
   - name: posebusters
     newName: posebusters

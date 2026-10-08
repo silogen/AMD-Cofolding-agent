@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-campaign-store
+  labels:
+    app.kubernetes.io/name: dd-agentic-campaign-store
+    app.kubernetes.io/component: control-plane
+spec:
+  # One, and this is load-bearing rather than provisional. The ledger is a
+  # SQLite file on the shared volume and the atomic claim relies on its write
+  # lock; a second replica on another node would be writing the same file over
+  # a network filesystem, where that locking is exactly what cannot be relied
+  # on. Scaling the control plane is not needed anyway -- the fleet's work is
+  # minutes of GPU per task, not requests per second.
+  replicas: 1
+  strategy:
+    # Never two processes on the ledger at once.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-campaign-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-campaign-store
+        app.kubernetes.io/component: control-plane
+    spec:
+      # Requests are milliseconds; the only thing worth waiting for is an
+      # in-flight write committing.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: campaign-store
+          image: campaign-store:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8087"
+            - --workers
+            - "1"
+          ports:
+            - name: store-http
+              containerPort: 8087
+          env:
+            # Beside the job working directories the results refer to.
+            - name: CAMPAIGN_STORE_DB
+              value: /shared/campaign-store/campaigns.db
+            # Claims a task gets before it is abandoned. Two means one retry:
+            # enough to survive a supervisor being evicted, few enough that a
+            # task failing for its own reasons stops cycling through the pool.
+            - name: TASK_MAX_ATTEMPTS
+              value: "2"
+            # Lease granted when a claim does not ask for one. Sized to
+            # outlive a whole RL step even if the holder never heartbeats:
+            # the boltz-gateway will hold a scoring call for up to
+            # UPSTREAM_TIMEOUT_SECONDS (2100), and a measured cold batch has
+            # taken 9.5 minutes. A lease that expires inside a normal step
+            # would hand the task to a second supervisor and run the same
+            # weight vector twice.
+            - name: DEFAULT_LEASE_SECONDS
+              value: "3600"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: store-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: store-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-campaign-store
+  labels:
+    app.kubernetes.io/name: dd-agentic-campaign-store
+    app.kubernetes.io/component: control-plane
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-campaign-store
+  ports:
+    - name: store-http
+      port: 8087
+      targetPort: store-http

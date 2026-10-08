@@ -22,8 +22,12 @@ spec:
         app.kubernetes.io/name: dd-agentic-reinvent-runner
         app.kubernetes.io/component: runner
     spec:
-      # An RL job is hours long and checkpoints on SIGINT, so give the job
-      # manager time to stop its subprocesses cleanly.
+      # An RL job is hours long and checkpoints when asked with SIGUSR1, so
+      # give the job manager time to stop its subprocesses cleanly. Note this
+      # is shorter than jobs.stop_grace_seconds on purpose: a pod being
+      # deleted cannot wait out a whole RL step, so a job caught by a rollout
+      # resumes from its last checkpoint rather than the one it would have
+      # written on the way out.
       terminationGracePeriodSeconds: 120
       containers:
         - name: reinvent-runner

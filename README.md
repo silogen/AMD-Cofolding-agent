@@ -1027,7 +1027,7 @@ In multi-agent mode steps 3-6 also happen without prompting: the Reviewer monito
 
 ### Background job management
 
-Jobs run as background subprocesses of the MCP server. The `JobManager` tracks job states (`queued` → `running` → `completed`/`failed`/`stopped`), subprocess lifecycle (PID tracking, graceful SIGINT for checkpoint saves, SIGTERM fallback), and metadata as JSON files in each job's working directory, so jobs survive a server restart. Concurrency is capped by `jobs.max_concurrent_jobs` in the process config — a real slot limit: a job past the cap is refused with the ids of the jobs to stop, rather than the previous behaviour of stopping every running job to make room. `queued` counts as occupying a slot, and a restart frees slots held by jobs that cannot still be running.
+Jobs run as background subprocesses of the MCP server. The `JobManager` tracks job states (`queued` → `running` → `completed`/`failed`/`stopped`), subprocess lifecycle (PID tracking, a graceful SIGUSR1 that asks REINVENT4 to checkpoint and exit, then SIGTERM and SIGKILL if it does not), and metadata as JSON files in each job's working directory, so jobs survive a server restart. The stop waits up to `jobs.stop_grace_seconds` because REINVENT4 can only act on the request once it abandons the scoring call it is in, which takes as long as one RL step. Concurrency is capped by `jobs.max_concurrent_jobs` in the process config — a real slot limit: a job past the cap is refused with the ids of the jobs to stop, rather than the previous behaviour of stopping every running job to make room. `queued` counts as occupying a slot, and a restart frees slots held by jobs that cannot still be running.
 
 ### Transfer learning
 

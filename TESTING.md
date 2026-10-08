@@ -291,6 +291,8 @@ Tests for the ExternalRESTScorer REINVENT4 plugin, `list_external_services` MCP 
 | 125 | All NaN on connection error | `ConnectionError` → all-NaN scores (RL loop continues) | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_all_nan_on_connection_error -v` |
 | 126 | All NaN on timeout | `requests.Timeout` → all-NaN scores | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_all_nan_on_timeout -v` |
 | 127 | All NaN on HTTP error | HTTP 500 → all-NaN scores | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_all_nan_on_http_error -v` |
+| 307 | A stop is not swallowed | REINVENT relays a stop by raising `StageInterrupted*` from a signal handler, which surfaces from inside this component's socket read. Those are plain `Exception`s, so the broad failure handler has to let them through — catching one turns a stop into a batch of NaN, the RL loop runs on to the next step, and the job is killed with no checkpoint to resume from | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_stop_request_is_not_swallowed -v` |
+| 308 | Interrupt names match | The exception names resolved at import time are the ones REINVENT's `handler.py` actually raises, so a rename upstream cannot silently restore the swallow | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_stop_request_exceptions_match_reinvents -v` |
 | 128 | HTTP payload structure | POST body has `{smiles: [...], params: {...}}` with correct timeout | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_http_call_payload -v` |
 | 129 | No artifacts in response | `last_artifacts` stays `None` when response omits `artifacts` | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_last_artifacts_none_when_response_has_no_artifacts -v` |
 | 130 | No metadata in response | `metadata` is `None` when response omits it | `pytest tests/test_external_scoring.py::TestExternalRESTScorer::test_metadata_none_when_absent -v` |
@@ -486,6 +488,11 @@ Tests for Phase 4: background job manager, TOML config generation, score traject
 | # | Test | What it verifies | Command |
 |---|------|------------------|---------|
 | 221 | Stop non-running job | Returns error with current state | `pytest tests/test_optimization.py::TestJobManagerStop -v` |
+| 309 | Stop asks with SIGUSR1 | SIGUSR1 is the only signal REINVENT treats as a *controlled* stop: it checkpoints, logs why it is terminating, and exits 0. Every other signal checkpoints but leaves the exception uncaught, so the job looks like it crashed | same class |
+| 310 | Grace spans a step | The wait is `jobs.stop_grace_seconds`, not the old hardcoded 30 s. REINVENT can only act on the stop once it abandons the scoring call it is in, and a cold Boltz batch has measured 9.5 minutes | same class |
+| 311 | Stop still escalates | A job that never checkpoints gets SIGTERM and then SIGKILL, and the result says no checkpoint was written and which knob to turn | same class |
+| 312 | `checkpoint_on_stop` is read | With it off, the job is terminated immediately rather than waiting a step for a checkpoint nobody asked for. The flag was dead config until this | same class |
+| 313 | First-step stop is not a failure | REINVENT has no agent to save until a step has updated the weights, so a job stopped inside its first scoring call reports that rather than blaming the grace period — which would send an operator chasing a timeout that never happened | same class |
 
 #### JobManager Top Candidates
 
@@ -663,6 +670,101 @@ plus one ClusterIP Service each. These parse the YAML directly, so no cluster,
 | 289 | Gateway discovery | Replicas come from the headless Service by DNS with `init-addr none`, enough slots for every replica, and no cluster DNS address or namespace baked in | same class |
 | 290 | Gateway shape | Exactly one gateway (one view of who is busy), no GPU, no `/shared`, readiness that fails with no healthy replica but liveness that does not, and 10 min grace so a live batch is not killed | same class |
 | 291 | Several replicas | More than one Boltz replica is only allowed when the ConfigMap dials the gateway; GPU demand is the agent plus the replicas; no GPU Deployment surges | `pytest tests/test_k8s_manifests.py::TestPodSplit -v` |
+| 292 | Store is one writer | `dd-agentic-campaign-store` is one replica with `Recreate` and one uvicorn worker, because the atomic claim relies on SQLite's write lock | `pytest tests/test_k8s_manifests.py::TestCampaignStore -v` |
+| 293 | Store lease sizing | `DEFAULT_LEASE_SECONDS` exceeds the gateway's `UPSTREAM_TIMEOUT_SECONDS`, so a lease cannot expire inside a normal RL step and hand the same weight vector to a second supervisor | same class |
+| 294 | Store placement | The ledger sits on the mounted `/shared` so it outlives the pod, needs no GPU, and is reachable on `store-http` 8087 with `/health` probes | same class |
+| 314 | Supervisor pool shape | `dd-agentic-supervisor` ships at `replicas: 0`, runs the *agent* image with `python -m reinvent4_agent.supervisor`, needs no GPU, and has no Service because nothing dials it | `pytest tests/test_k8s_manifests.py::TestSupervisorPool -v` |
+| 315 | Supervisor wiring | It dials the store's own Service and port, is named in the ledger by `metadata.name`, heartbeats well inside the store's lease, shares the agent's TTP mount, and takes the API key from the Secret | same class |
+| 328 | One conductor | `replicas: 1` with `Recreate`. Two would each top the pool up to N and the campaign would run at 2N — the one way to overcommit the GPUs the ledger cannot catch, because each dispatch is individually legitimate | `pytest tests/test_k8s_manifests.py::TestConductor -v` |
+| 329 | Conductor RBAC | It carries its own ServiceAccount, Role and RoleBinding, because the `deployments/scale` grant in `k8s/rbac.yaml` is bound to the `oidc:demo-lux` developer group and authorises a human's kubectl, not a pod | same class |
+| 330 | Scale is least-privilege | The Role is scoped by `resourceNames` to `dd-agentic-supervisor` and grants only `get` and `patch`, so a conductor cannot scale Boltz or the runner; `list`/`watch` are withheld because they cannot be restricted by name | same class |
+| 331 | Conductor is read-only on `/shared` | Every data mount is `readOnly`. A writable mount would invite it to edit a base TTP mid-campaign, silently changing what later tasks in the sweep mean | same class |
+| 332 | Conductor wiring | It dials the ledger and the gateway's `/stats` on their own Services and ports, knows its namespace from `metadata.namespace`, names the Deployment it scales, needs no GPU, and stays interactive for the REPL | same class |
+
+### Conductor (`tests/test_conductor.py`)
+
+Tests for `reinvent4_agent/conductor.py`. `tick()` is a pure function of one
+ledger read, so the whole loop — the windows, the top-up arithmetic, the
+Pareto-guided proposals, admission control and the hard stop — is covered
+against a fake store with no cluster and no GPU.
+
+**Dependencies**: `requests`
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 333 | Weight vectors are points | Key order and float noise do not make a "new" vector, so the same point is not dispatched twice for a GPU hour | `pytest tests/test_conductor.py::TestWeightVector -v` |
+| 334 | Seeding before refining | With no results it emits a balanced vector plus one per objective emphasised. Bounding the front's extremes early is what makes later refinement meaningful; refining around one lucky point first explores a corner | `pytest tests/test_conductor.py::TestParetoProposer -v` |
+| 335 | Refinement around the front | Each proposal moves exactly one objective off a front member, and weights stay strictly positive — a zero weight would silently drop an objective from the score | same class |
+| 336 | Never pay twice | A tried vector is never re-proposed, and an exhausted sweep proposes nothing rather than re-running points already paid for | same class |
+| 337 | State comes from the ledger | Tried vectors and front weights are read back from the task specs, so a restarted conductor does not re-dispatch the sweep | `pytest tests/test_conductor.py::TestLedgerDerivedState -v` |
+| 338 | Admission control | A deep Boltz queue holds dispatch back, a shallow one lets work through, and an unreachable gateway is *unknown* rather than idle — but unknown does not block dispatch, or a silent gateway would stall the campaign | `pytest tests/test_conductor.py::TestQueuePressure -v` and `::TestAdmissionControl` |
+| 339 | Top-up arithmetic | It dispatches only the shortfall; queued and claimed both count against the target, finished tasks do not; and it scales the pool to the campaign's concurrency | `pytest tests/test_conductor.py::TestDispatchWindow -v` |
+| 340 | Task deadlines | Each task gets the task budget, capped by the campaign's hard stop, so no supervisor starts a run that would outlive the campaign | `pytest tests/test_conductor.py::TestDeadlines -v` |
+| 341 | Windows | Draining closes the queue exactly once and dispatches nothing; the hard stop finalizes and scales the pool to 0; a finalized campaign is left alone | `pytest tests/test_conductor.py::TestWindows -v` |
+| 346 | Orphaned jobs are stopped | Abandoning a task does not stop its RL job — the job lives in the runner and holds a GPU until told otherwise, which left two running after the first live wind-down. The hard stop now stops the jobs of open tasks, skips finished ones, closes the ledger *before* stopping so a supervisor cannot post against a dead campaign, and treats freeing GPUs as best-effort so an unreachable runner does not block the wind-down | same class |
+| 342 | Status view | Renders the things an operator asks about — counts, who holds what, the front, time left — and calls out results left off the front, which usually means a failed scorer | `pytest tests/test_conductor.py::TestStatusView -v` |
+| 343 | Pool scaler | Outside a cluster every call is a logged no-op so a laptop run still exercises the loop; inside, it sends a merge patch of only `spec.replicas` to the scale subresource, skips the write when already at the target, and reports a refused scale instead of raising | `pytest tests/test_conductor.py::TestPoolScaler -v` |
+| 351 | Campaign resolution | With no id the loop attaches to the only live campaign (draining counts as live), says how to open one when there are none, and refuses to guess between two — naming them so one can be picked, because conducting the wrong campaign spends GPU on the wrong goal | `pytest tests/test_conductor.py::TestCampaignResolution -v` |
+| 352 | Objective defaults | A new campaign's objectives default to every one the base TTP declares, across both sections and deduplicated. Typing them by hand is the easiest way to get a campaign wrong: an unknown objective fails every task referencing it, and surfaces minutes later as a task failure rather than a typo | `pytest tests/test_conductor.py::TestObjectiveDefaults -v` |
+| 353 | Entrypoint guards | `--start` requires a goal and a base TTP, cannot also name a campaign to attach to, and the opening flags are refused without it — quietly ignoring them would look like the campaign had been configured | `pytest tests/test_conductor.py::TestEntrypointGuards -v` |
+
+### Supervisor (`tests/test_supervisor.py`)
+
+Tests for `reinvent4_agent/supervisor.py`. The campaign run is injected into
+`Supervisor`, so everything around it — leases, failures, deadlines, shutdown,
+and reading the achieved profile out of a results CSV — is covered with no LLM,
+no MCP server and no GPU. The loop drives its own event loop, since the repo
+has no `pytest-asyncio`.
+
+**Dependencies**: `requests`, `pydantic`
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 316 | Weight overrides | Weights and transforms are replaced by name in both `scoring.objectives` and `pre_scoring.components`, and the base dict is never mutated — N supervisors read the same base out of a shared store | `pytest tests/test_supervisor.py::TestApplyOverrides -v` |
+| 317 | An unknown objective fails | A typo is an error, not a no-op. Ignoring it would have the task report a profile for a weight vector it never ran, and the conductor would draw conclusions from a point that was never tried | same class |
+| 318 | TTP variants | The variant is named after the task, carries the overridden weights, starts at version 1, leaves the base alone, and two tasks cannot collide in the shared store | `pytest tests/test_supervisor.py::TestPrepareTtpVariant -v` |
+| 347 | A retried task is runnable | `create_ttp` refuses an id that exists, so the first live retry died with "TTP ... already exists" before it started, making every retry impossible. The variant's content is a function of the task, so it is reused | same class |
+| 348 | Job discovery by observation | The supervisor finds its job by the task's unique TTP id, not from the Driver's handoff. A session ending `incomplete` produces no handoff, and the first live run failed a task with "the Driver finished without starting an optimization job" while that job was running fine | `pytest tests/test_supervisor.py::TestJobDiscovery -v` |
+| 349 | The Driver cannot end its own run | `stop_optimization` is withheld from a supervisor's Driver, along with the TTP writers and the fleet-steering tools. The first live run had the Driver poll 13 times in six minutes, decide the job had stalled, and stop it inside its first step — where there is nothing to checkpoint and no candidates | `pytest tests/test_supervisor.py::TestDriverToolBoundary -v` |
+| 350 | The Driver is told the pacing | The goal quotes how long a step takes and that a quiet run is normal, so its patience has a basis — without a number it cannot tell a slow step from a broken one | `pytest tests/test_supervisor.py::TestBuildGoal -v` |
+| 319 | Objective profile | The profile is the best *single molecule's* per-objective scores, not the best value seen per objective — the latter describes a compound nobody made | `pytest tests/test_supervisor.py::TestObjectiveProfile -v` |
+| 320 | A failed scorer is not a number | A `null` component is left out of the profile rather than becoming a coordinate on the front | same class |
+| 321 | The Driver's goal | Names the prepared TTP instead of restating the weights, passes the step budget as a ceiling, and tells a validation-tier task not to use the cache | `pytest tests/test_supervisor.py::TestBuildGoal -v` |
+| 322 | Task lifecycle | A successful task posts its profile; a failing one is reported and requeued; an empty queue is not work | `pytest tests/test_supervisor.py::TestSupervisorLoop -v` |
+| 323 | A lost lease posts nothing | A task taken from us is neither completed nor failed — either would overwrite the new holder's work | same class |
+| 324 | Heartbeating | The lease is renewed while the task runs and stops when the task does; a store outage mid-task is logged and retried rather than ending the run, because the work in flight is worth more than the ledger entry | same class |
+| 325 | Shutdown and outages | A drain wakes the empty-queue poll immediately instead of waiting it out, and an unreachable store backs off and retries instead of taking the pod down | same class |
+| 326 | Deadlines | A future deadline is the time remaining, a past one is zero rather than negative (a negative timeout would raise instead of stopping the task), a naive timestamp is read as UTC, and an unparseable one is ignored | `pytest tests/test_supervisor.py::TestDeadlines -v` |
+| 327 | Store client | 204 means nothing to claim, 409 is a lost lease rather than an outage (different problems: one means stop, the other means retry), connection and server errors are outages, and the owner is sent on every call | `pytest tests/test_supervisor.py::TestCampaignStoreClient -v` |
+
+### Campaign Store (`tests/test_campaign_store.py`)
+
+Tests for `services/campaign-store/app.py`: the fleet control-plane ledger —
+campaigns, the task queue, leases, results, the Pareto front, and the event
+feed. The module is imported per test against a `tmp_path` SQLite file, so
+there is no cluster, no GPU, and no shared state between tests.
+
+The two cases worth reading are #297 and #301: they are the ones that cost real
+GPU time when they regress.
+
+**Dependencies**: `fastapi`, `pydantic` (SQLite is in the standard library)
+
+| # | Test | What it verifies | Command |
+|---|------|------------------|---------|
+| 295 | Campaign lifecycle | Create, read back, 404 on unknown, objectives required so the front's dimensions cannot be empty, and deadlines derived from the dispatch and grace windows | `pytest tests/test_campaign_store.py::TestCampaigns -v` |
+| 296 | Close vs finalize | Closing shuts the queue to new tasks but leaves queued work claimable through the drain window; finalizing abandons whatever is still outstanding instead of leaving it queued forever | same class |
+| 297 | Concurrent claims | Eight supervisors claiming at once get eight *distinct* tasks. Verified to fail without `BEGIN IMMEDIATE`, where the same run handed out only 2 distinct tasks — four pairs of supervisors would have run identical weight vectors on separate GPUs | `pytest tests/test_campaign_store.py::TestClaims -v` |
+| 298 | Claim order and scope | Oldest task first, the spec the supervisor needs comes with it, a task is handed out only once, and `campaign_id` scopes the claim | same class |
+| 299 | Lease ownership | Heartbeat extends the lease, a stranger's heartbeat is refused, and a supervisor that lost its lease cannot post a result over the new holder's work | same class |
+| 300 | Lease expiry | An expired lease is requeued for the next supervisor, and a task that keeps losing its lease is abandoned rather than cycling through the pool forever | same class |
+| 301 | Pareto front | Dominated results are off the front, identical profiles both stay, and a missing or null objective is reported as ineligible rather than defaulted to zero — which would quietly park a run with a failed scorer at the bottom of the front | `pytest tests/test_campaign_store.py::TestParetoFront -v` |
+| 302 | Failures | A failure is requeued by default, can be marked terminal, and stops being requeued at the attempt limit | `pytest tests/test_campaign_store.py::TestResults -v` |
+| 303 | Event feed | Events record the task lifecycle in order and can be polled incrementally by last event id, with the cursor held when nothing is new | `pytest tests/test_campaign_store.py::TestEventsAndStatus -v` |
+| 304 | Status aggregate | Task counts, in-flight supervisors with their weight vectors and lease remaining, the front, and a window phase that follows the clock — so a conductor that missed its own deadline still sees that it should be draining | same class |
+| 305 | Status sweeps the dead | A supervisor whose lease expired is out of `in_flight` and its task back in `queued`, so in-flight means alive rather than "claimed by something, once" | same class |
+| 306 | Durability | The ledger survives a restart and specs round-trip as JSON, because the conductor rebuilds its loop by reading it back | `pytest tests/test_campaign_store.py::TestDurability -v` |
+| 344 | Concurrency is in the ledger | It can be changed and dropped to zero, and survives a conductor restart, so the pool the conductor scales to is always reconcilable | `pytest tests/test_campaign_store.py::TestCampaigns -v` |
+| 345 | Cancel overrides the holder | Deliberately not owner-checked — this is the conductor overriding a supervisor. The holder finds out on its next heartbeat, which already treats a lost lease as "stop and do not post a result"; a cancelled task is not handed out again, and a *finished* one cannot be cancelled because its result is already on the front | `pytest tests/test_campaign_store.py::TestClaims -v` |
 
 ### Boltz Gateway (`tests/test_boltz_gateway.py`)
 

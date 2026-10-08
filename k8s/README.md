@@ -34,6 +34,9 @@ containers as its own Deployment:
 | `dd-agentic-boltz-proxy` | `dd-agentic-boltz-proxy:8091` (internal) | no | no |
 | `dd-agentic-boltz-gateway` | `dd-agentic-boltz-gateway:8091` | no | yes |
 | `dd-agentic-reinvent-runner` | `dd-agentic-reinvent-runner:8086` | 1 | yes |
+| `dd-agentic-campaign-store` | `dd-agentic-campaign-store:8087` | no | yes |
+| `dd-agentic-supervisor` | — (a client, nothing dials it) | no | yes |
+| `dd-agentic-conductor` | — (reached by `kubectl exec`) | no | read-only |
 | `dd-agentic-posebusters` | `dd-agentic-posebusters:8082` | no | yes |
 | `dd-agentic-interaction-profiler` | `dd-agentic-interaction-profiler:8083` | no | yes |
 | `dd-agentic-admet` | `dd-agentic-admet:8084` | no | no |
@@ -581,6 +584,254 @@ Because the agent image has no REINVENT4 at all, `runner.enabled` is **not
 optional** in this deployment — both the ConfigMap and the baked
 `reinvent4_mcp_config.yaml` set it, and the in-process code path only exists on
 the runner now.
+
+### The fleet's ledger: campaign-store
+
+`dd-agentic-campaign-store` is the control plane for a conductor-led fleet: the
+queue of weight vectors still to try, who is holding which task and until when,
+what each supervisor achieved, and the Pareto front over those results. It is a
+FastAPI service over a SQLite file on `/shared`, so a conductor that restarts
+rebuilds its loop by reading the ledger rather than from memory.
+
+A word on vocabulary, because the agent code already uses it differently: in
+the store a **campaign** is the whole sweep (one goal, N supervisors, a
+wall-clock budget) and a **task** is one supervisor run — which is what
+`reinvent4_agent/coordinator.py` calls a campaign.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /campaigns` | Open a sweep: goal, base TTP, the objectives the front is computed over, dispatch and grace windows |
+| `POST /campaigns/{id}/tasks` | Enqueue one weight vector |
+| `POST /tasks/claim` | A supervisor takes the oldest queued task on a lease; `204` when idle |
+| `POST /tasks/{id}/heartbeat` | Extend the lease |
+| `POST /tasks/{id}/result` | Post the achieved objective profile and candidates |
+| `POST /tasks/{id}/fail` | Report a failure, requeued unless `requeue: false` |
+| `GET /campaigns/{id}/pareto` | The non-dominated front, plus results excluded for missing an objective |
+| `GET /campaigns/{id}/events?since=N` | The conductor's completion feed, polled by last event id |
+| `GET /campaigns/{id}/status` | The aggregate the REPL prints: task counts, in-flight supervisors with their weight vectors, the front, and time left in each window |
+| `POST /campaigns/{id}/close` / `finalize` | Enter the drain window; then close the ledger |
+
+Three properties are load-bearing and worth knowing before changing anything:
+
+- **One replica, and not provisionally.** The atomic claim relies on SQLite's
+  write lock. A second replica on another node would be a second process
+  writing the same file over a network filesystem, which is exactly where that
+  locking cannot be relied on — and two supervisors would be handed the same
+  weight vector and burn two GPUs on it. Hence `replicas: 1` and
+  `strategy: Recreate`.
+- **Claims take the write lock before they read.** `BEGIN IMMEDIATE`, not
+  sqlite3's default deferred begin. Without it, concurrent claims read the same
+  row as queued and all update it; the regression test for this measured 8
+  concurrent claims being handed only 2 distinct tasks.
+- **Leases, not assignments.** `DEFAULT_LEASE_SECONDS` is 3600, sized to
+  outlive a whole RL step even if the holder never heartbeats, since the
+  gateway will hold one scoring call for up to its 2100 s upstream timeout. A
+  supervisor that is evicted mid-task therefore gives it back without anyone
+  having to notice the crash, and `TASK_MAX_ATTEMPTS: 2` stops a task that
+  fails for its own reasons cycling through the whole pool.
+
+```bash
+kubectl --namespace "${PROJECT}" exec deployment/dd-agentic --container dd-agent \
+  -- python -c "import urllib.request; print(urllib.request.urlopen('http://dd-agentic-campaign-store:8087/health').read().decode())"
+```
+
+### The worker pool: dd-supervisor
+
+`dd-agentic-supervisor` is the headless half of the agent: it claims a task
+from the ledger, runs the same Driver + Reviewer pair the REPL runs, posts what
+it achieved, and claims the next one. It is **the `dd-agent` image with a
+different entrypoint** (`python -m reinvent4_agent.supervisor`) — a supervisor
+*is* the agent, so there is no supervisor image to build and no second copy of
+the agent to keep in step.
+
+It ships at **`replicas: 0`**, so applying the manifests does not start burning
+GPU against an empty queue. A campaign's concurrency `N` is the replica count:
+
+```bash
+kubectl --namespace "${PROJECT}" scale deployment/dd-agentic-supervisor --replicas=4
+```
+
+That is also how the conductor will drive it, through the `deployments/scale`
+permission `rbac.yaml` already grants, and it ports to Compose unchanged as
+`--scale dd-supervisor=N`.
+
+Two decisions are worth knowing because they are easy to undo by accident:
+
+- **The weight vector is applied in code, not asked for in prose.** A task
+  exists to try specific objective weights, so the supervisor reads the base
+  TTP, overrides the named weights and transforms, and persists the result as
+  a variant TTP (`<base>-<task_id>`) that the Driver is told to run *by id*.
+  Asking the Driver to "use weight 1.4 on affinity" invites it to round,
+  reinterpret or forget, and the campaign would then be comparing points it
+  cannot name. An override naming an objective the TTP does not have fails the
+  task rather than being ignored — otherwise the task would report a profile
+  for a weight vector it never ran. The variants are kept: they are the record
+  of what each task actually ran, which is why this pod mounts the same
+  `ttps` directory as the agent.
+- **The objective profile is the best *single molecule's* scores.** Not the
+  best value seen per objective, which would mix molecules and describe a
+  compound nobody made — useless on a front whose whole job is to show
+  achievable trade-offs.
+
+If a task has a deadline, the supervisor stops the job when it is reached
+rather than letting it run: `stop_optimization` asks REINVENT4 to checkpoint,
+so the GPU comes back and the work can be resumed instead of discarded. The
+partial candidates are still posted, with the deadline noted in the summary.
+
+A supervisor heartbeats its lease every 60 s against the store's 3600 s
+default, so a couple of missed beats cost nothing, and a pod that is evicted
+mid-task has its task requeued when the lease lapses. On SIGTERM it stops
+claiming and lets the task in hand run out the 120 s grace; anything still held
+goes back on the queue the same way.
+
+### The conductor
+
+`dd-agentic-conductor` opens a campaign, keeps `N` supervisors busy, reviews
+the Pareto front to decide what to try next, and closes the books when the
+clock runs out. It is the agent image again, kept interactive with `sleep
+infinity` so the REPL is reachable by `kubectl exec`, with the loop started per
+campaign:
+
+```bash
+# open a campaign and conduct it in one command
+kubectl --namespace "${PROJECT}" exec -it deployment/dd-agentic-conductor -- \
+  python -m reinvent4_agent.conductor --start \
+    --goal "improve BRD4 BD1 affinity without losing drug-likeness" \
+    --base-ttp brd4-bd1-lead-opt --concurrency 4 --hours 4 --grace-hours 1 \
+    --task-budget-hours 0.5 --max-steps 60
+
+# or attach to a campaign that is already open
+kubectl --namespace "${PROJECT}" exec -it deployment/dd-agentic-conductor -- \
+  python -m reinvent4_agent.conductor --task-budget-hours 0.5 --max-steps 60
+```
+
+The campaign id is optional in both directions. With `--start` a new one is
+opened and its id printed; without it, the loop attaches to **the only live
+campaign** and refuses to guess when several are running — conducting the wrong
+one would spend GPU against the wrong goal. Name an id explicitly when you do
+have several.
+
+`--objectives` is optional too, and defaulting it is worth knowing about:
+omitted, it uses every objective the base TTP declares. Typing them by hand is
+the easiest way to get a campaign wrong, because an objective the TTP does not
+have fails every task that references it — and the mistake surfaces minutes
+later as a task failure rather than as a typo.
+
+It also exposes eleven MCP tools so a conductor agent can do the same
+conversationally: `start_campaign`, `get_campaign_state`, `list_campaigns`,
+`enqueue_task`, `list_supervisors`, `get_supervisor_result`,
+`get_pareto_front`, `set_concurrency`, `cancel_supervisor`,
+`get_pool_capacity`, `close_campaign` and `finalize_campaign`.
+
+**It needs its own ServiceAccount, and this is a correction to the original
+plan.** Scaling the supervisor pool is how concurrency is expressed, which
+means calling the Kubernetes API. The `deployments/scale` grant in
+[`k8s/rbac.yaml`](rbac.yaml) is bound to the **`oidc:demo-lux` developer
+group**, so it authorises a human's `kubectl` and not a pod — there was no
+ServiceAccount anywhere in `k8s/` before this. The manifest therefore ships a
+ServiceAccount, Role and RoleBinding, with the Role scoped by `resourceNames`
+to `dd-agentic-supervisor` alone and granting only `get` and `patch`, so a
+conductor cannot scale Boltz or the runner. (`list` and `watch` are withheld
+because they cannot be restricted by name, and granting them would widen the
+scope to every Deployment.)
+
+Three things about how the loop behaves:
+
+- **It holds no campaign state.** Every decision comes from a fresh read of
+  the ledger, including which weight vectors have already been tried, so a
+  conductor restarted mid-campaign picks up where the ledger says it is rather
+  than re-dispatching the sweep. `tick()` is idempotent: running it twice
+  changes nothing.
+- **The soft stop is the task deadline, not a signal.** Each task is enqueued
+  with `deadline = min(now + task_budget, hard_stop_at)`, and the supervisor
+  turns that into a checkpointing stop of its own RL job. In the normal case
+  every in-flight task has therefore wound itself up *before* the hard stop,
+  with a checkpoint and a posted result.
+- **The hard stop also stops orphaned jobs.** What is left at the hard stop is
+  tasks that overran or whose supervisor died. Abandoning a task in the ledger
+  does **not** stop its RL job — the job lives in the runner and holds a GPU
+  until something tells it to stop, and the first live wind-down left two
+  running for exactly this reason. The conductor derives each task's TTP id
+  from the task id, finds the job running it, and stops it. The ledger is
+  closed first so a supervisor cannot post against a finished campaign, and
+  only then are the jobs stopped; freeing the GPUs is best-effort, so a runner
+  that cannot be reached does not block the wind-down.
+- **It asks before it dispatches.** Boltz is the binding constraint, not the
+  agent count, so the loop reads the gateway's queue depth and holds back when
+  it is above `max_queue_pressure` queued batches per healthy replica. A
+  gateway that does not answer is treated as *unknown*, not idle — but unknown
+  does not block dispatch, or an unreachable gateway would stall the campaign
+  indefinitely.
+
+The weight vectors come from a two-phase proposer. With no results it seeds the
+extremes — a balanced vector plus one per objective emphasised — because
+bounding the front early is what makes later refinement meaningful; refining
+around a single lucky point first would just explore one corner. With a front,
+it perturbs front members one objective at a time, since the front is by
+definition the set of trade-offs nothing else beats. It never re-proposes a
+vector already in the ledger, and an exhausted sweep dispatches nothing rather
+than paying twice for the same point.
+
+`replicas: 1`, and that one matters: two conductors would each top the pool up
+to `N` and the campaign would quietly run at `2N`. That is the one way to
+overcommit the GPUs the ledger cannot catch, because each individual dispatch
+is legitimate.
+
+### Watch the fleet
+
+```bash
+k8s/scripts/campaign-status.sh --namespace "${PROJECT}"            # once
+k8s/scripts/campaign-status.sh --namespace "${PROJECT}" --watch 30 # every 30s
+```
+
+It prints both halves, because **capacity and activity are different
+questions**: `kubectl get deploy` says how many supervisors *exist* and is what
+`kubectl scale` changes, while the ledger says how many are actually holding a
+task. An idle supervisor is a running pod with nothing claimed, and in
+`kubectl get pods` it looks exactly like a busy one.
+
+A healthy campaign has those two numbers equal. The two ways they diverge are
+worth recognising:
+
+- **`claimed` below the pod count** — supervisors are idle. Either the queue is
+  empty, or the conductor is holding dispatch back because the Boltz queue is
+  deep (it logs `holding dispatch:` when it does).
+- **`queued` above zero with every pod busy** — the campaign wants more
+  concurrency than the pool has pods. That is what happens when a campaign's
+  `concurrency` and `kubectl scale --replicas` were set to different numbers;
+  see below.
+
+To follow what the supervisors are actually doing, all of them at once:
+
+```bash
+kubectl --namespace "${PROJECT}" logs --selector app.kubernetes.io/name=dd-agentic-supervisor \
+  --prefix --tail=20 --follow
+```
+
+### Setting the concurrency N
+
+There are **two numbers**, and they have to agree:
+
+| Number | Where | What it does |
+|--------|-------|--------------|
+| `concurrency` | on the campaign, in the ledger | What the conductor *targets*: it tops the queue up until `queued + claimed == N` |
+| `replicas` | the `dd-agentic-supervisor` Deployment | How many supervisors actually exist to claim that work |
+
+Normally you set only the first and the conductor reconciles the second on its
+next tick. **Until the conductor's RBAC is applied that reconciliation gets a
+`403`, so set both by hand:**
+
+```bash
+# 1. the target, when the campaign is opened (or later via the set_concurrency tool)
+#    start_campaign(..., concurrency=4)
+# 2. the pods
+kubectl --namespace "${PROJECT}" scale deployment/dd-agentic-supervisor --replicas=4
+```
+
+If they disagree the campaign still works, it just runs at the smaller of the
+two with the difference sitting in `queued`. Leave the manifest at
+`replicas: 0` rather than baking `N` in, so applying the manifests never starts
+agents against an empty queue.
 
 ### Prove the structure handoff across pods
 

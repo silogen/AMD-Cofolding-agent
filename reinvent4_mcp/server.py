@@ -1069,6 +1069,308 @@ def fetch_compound(
 
 
 # ---------------------------------------------------------------------------
+# Tool: start_campaign
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def start_campaign(
+    goal: Annotated[
+        str,
+        Field(description="What the campaign is for, in a sentence"),
+    ],
+    base_ttp_id: Annotated[
+        str,
+        Field(
+            description=(
+                "TTP every task starts from. Each task runs a variant of it "
+                "with its own objective weights."
+            ),
+        ),
+    ],
+    objectives: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Objective names the Pareto front is computed over. Fixed at "
+                "creation, so the front's dimensions cannot drift later. Use "
+                "the names as they appear in the base TTP."
+            ),
+        ),
+    ],
+    concurrency: Annotated[
+        int,
+        Field(default=1, ge=1, description="Supervisors to hold in flight"),
+    ] = 1,
+    hours: Annotated[
+        float | None,
+        Field(default=None, gt=0, description="Dispatch window; omit for no deadline"),
+    ] = None,
+    grace_hours: Annotated[
+        float,
+        Field(
+            default=0.0, ge=0,
+            description="Drain window after the dispatch window closes, during "
+                        "which in-flight tasks finish but nothing new is queued",
+        ),
+    ] = 0.0,
+) -> str:
+    """Open a fleet campaign: a goal, a pool size, and a wall-clock budget.
+
+    This only opens the ledger entry. It dispatches no work and starts no
+    supervisors, so a campaign can be set up and inspected before it begins
+    spending GPU. The conductor loop is what fills it.
+    """
+
+    from reinvent4_mcp.tools.campaign import start_campaign as _impl
+
+    return json.dumps(
+        _impl(goal, base_ttp_id, objectives, concurrency, hours, grace_hours),
+        indent=2, default=_json_default,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_campaign_state
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_campaign_state(
+    campaign_id: Annotated[str, Field(description="Campaign to inspect")],
+) -> str:
+    """Everything about a campaign in one call.
+
+    Task counts by state, the supervisors currently holding tasks with their
+    weight vectors and lease remaining, the Pareto front, and how long is left
+    in the dispatch and drain windows.
+
+    ``window.phase`` follows the clock rather than the stored state, so a
+    campaign whose conductor missed its own deadline still reports that it
+    should be draining.
+    """
+
+    from reinvent4_mcp.tools.campaign import get_campaign_state as _impl
+
+    return json.dumps(_impl(campaign_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: list_campaigns
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_campaigns() -> str:
+    """List every campaign in the ledger, newest first."""
+
+    from reinvent4_mcp.tools.campaign import list_campaigns as _impl
+
+    return json.dumps(_impl(), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: enqueue_task
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def enqueue_task(
+    campaign_id: Annotated[
+        str,
+        Field(description="Campaign to add to; must still be dispatching"),
+    ],
+    weight_overrides: Annotated[
+        dict[str, float],
+        Field(
+            description=(
+                "Objective name to weight. Names must match the base TTP's "
+                "objectives -- an unknown name fails the task rather than "
+                "running silently with the wrong weights."
+            ),
+        ),
+    ],
+    fidelity_tier: Annotated[
+        str,
+        Field(
+            default="exploration",
+            description="'exploration' uses the scoring cache; 'validation' "
+                        "bypasses the read so a result is never a cached sample",
+        ),
+    ] = "exploration",
+    max_steps: Annotated[
+        int | None,
+        Field(default=None, gt=0, description="RL steps for this task"),
+    ] = None,
+) -> str:
+    """Queue one weight vector by hand.
+
+    For following a hunch about a trade-off the automatic proposer has not
+    reached. The conductor loop will not re-propose a vector already in the
+    ledger, so a task added here is not duplicated later.
+    """
+
+    from reinvent4_mcp.tools.campaign import enqueue_task as _impl
+
+    return json.dumps(
+        _impl(campaign_id, weight_overrides, None, fidelity_tier, max_steps),
+        indent=2, default=_json_default,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: list_supervisors
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_supervisors(
+    campaign_id: Annotated[str, Field(description="Campaign to inspect")],
+) -> str:
+    """The supervisors holding tasks right now, and what each is trying.
+
+    Expired leases are swept first, so this is who is actually alive rather
+    than who last claimed something.
+    """
+
+    from reinvent4_mcp.tools.campaign import list_supervisors as _impl
+
+    return json.dumps(_impl(campaign_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_supervisor_result
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_supervisor_result(
+    campaign_id: Annotated[str, Field(description="Campaign the task belongs to")],
+    task_id: Annotated[str, Field(description="Task whose result to fetch")],
+) -> str:
+    """What one finished task achieved: its objective profile and molecules."""
+
+    from reinvent4_mcp.tools.campaign import get_supervisor_result as _impl
+
+    return json.dumps(_impl(campaign_id, task_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_pareto_front
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_pareto_front(
+    campaign_id: Annotated[str, Field(description="Campaign to inspect")],
+) -> str:
+    """The non-dominated results: the trade-offs nothing else beats.
+
+    Also returns ``ineligible`` -- results left off the front for not
+    reporting every objective. That usually means a scorer failed, and is
+    worth looking at: those runs are not bad trade-offs, they are incomplete
+    measurements.
+    """
+
+    from reinvent4_mcp.tools.campaign import get_pareto_front as _impl
+
+    return json.dumps(_impl(campaign_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: set_concurrency
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def set_concurrency(
+    campaign_id: Annotated[str, Field(description="Campaign to adjust")],
+    concurrency: Annotated[
+        int,
+        Field(ge=0, description="Supervisors to hold in flight"),
+    ],
+) -> str:
+    """Change how many supervisors the campaign holds in flight.
+
+    Recorded in the ledger, so the number survives a conductor restart. The
+    conductor loop scales the supervisor Deployment to match on its next pass;
+    this call on its own does not move pods.
+    """
+
+    from reinvent4_mcp.tools.campaign import set_concurrency as _impl
+
+    return json.dumps(_impl(campaign_id, concurrency), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: cancel_supervisor
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def cancel_supervisor(
+    task_id: Annotated[str, Field(description="Task to take back")],
+) -> str:
+    """Take a task back from the supervisor running it.
+
+    The holder finds out on its next heartbeat and abandons the work without
+    posting a result. This does not stop its RL job -- use stop_optimization
+    on the job id if the GPU is what you need back.
+    """
+
+    from reinvent4_mcp.tools.campaign import cancel_supervisor as _impl
+
+    return json.dumps(_impl(task_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_pool_capacity
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_pool_capacity() -> str:
+    """Whether the fleet has room for more work, from the scorer's queue.
+
+    Boltz is the binding constraint, not the agent count, so capacity is a
+    question about its queue depth. A ``None`` queue_pressure means the
+    gateway did not answer, which is not the same as idle.
+    """
+
+    from reinvent4_mcp.tools.campaign import get_pool_capacity as _impl
+
+    return json.dumps(_impl(), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: close_campaign
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def close_campaign(
+    campaign_id: Annotated[str, Field(description="Campaign to stop dispatching")],
+) -> str:
+    """Stop dispatching, let in-flight tasks finish.
+
+    The drain window brought forward by hand. Queued tasks stay claimable, so
+    work already decided on still runs.
+    """
+
+    from reinvent4_mcp.tools.campaign import close_campaign as _impl
+
+    return json.dumps(_impl(campaign_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: finalize_campaign
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def finalize_campaign(
+    campaign_id: Annotated[str, Field(description="Campaign to close the books on")],
+) -> str:
+    """Close the books: abandon anything outstanding and end the campaign.
+
+    Tasks still queued or claimed are marked abandoned rather than left
+    looking like work someone will do.
+    """
+
+    from reinvent4_mcp.tools.campaign import finalize_campaign as _impl
+
+    return json.dumps(_impl(campaign_id), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

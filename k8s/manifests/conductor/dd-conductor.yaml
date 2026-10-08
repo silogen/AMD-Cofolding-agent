@@ -1,0 +1,173 @@
+# The conductor: one pod that opens a campaign, keeps N supervisors busy, and
+# closes the books when the clock runs out.
+#
+# It is the only workload in the fleet that talks to the Kubernetes API, because
+# scaling the supervisor pool is how concurrency is expressed. That needs a
+# ServiceAccount of its own: the deployments/scale grant in k8s/rbac.yaml is
+# bound to the `oidc:demo-lux` *developer group*, so it authorises a human's
+# kubectl and not a pod. The Role below is scoped by resourceNames to the
+# supervisor Deployment alone, so a conductor cannot scale Boltz or the runner.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dd-agentic-conductor
+  labels:
+    app.kubernetes.io/name: dd-agentic-conductor
+    app.kubernetes.io/component: conductor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dd-agentic-conductor
+  labels:
+    app.kubernetes.io/name: dd-agentic-conductor
+    app.kubernetes.io/component: conductor
+rules:
+  - apiGroups:
+      - apps
+    resources:
+      - deployments/scale
+    # Only the supervisor pool. `list` and `watch` cannot be restricted by
+    # name, so they are not granted -- the conductor reads the count it is
+    # about to change and nothing else.
+    resourceNames:
+      - dd-agentic-supervisor
+    verbs:
+      - get
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dd-agentic-conductor
+  labels:
+    app.kubernetes.io/name: dd-agentic-conductor
+    app.kubernetes.io/component: conductor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dd-agentic-conductor
+subjects:
+  - kind: ServiceAccount
+    name: dd-agentic-conductor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-conductor
+  labels:
+    app.kubernetes.io/name: dd-agentic-conductor
+    app.kubernetes.io/component: conductor
+spec:
+  # One. Two conductors would both top the pool up to N and the campaign would
+  # run at 2N, which is the one way to overcommit the GPUs that the ledger
+  # cannot catch: each dispatch is individually legitimate.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-conductor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-conductor
+        app.kubernetes.io/component: conductor
+    spec:
+      serviceAccountName: dd-agentic-conductor
+      # Nothing to drain: the loop holds no state, and a campaign in progress
+      # is entirely described by the ledger.
+      terminationGracePeriodSeconds: 30
+      containers:
+        # The agent image again, as with the supervisor. The conductor is the
+        # interactive entrypoint, so it keeps the REPL-friendly `sleep
+        # infinity` and the loop is started per campaign with
+        # `python -m reinvent4_agent.conductor <campaign_id>`.
+        - name: dd-conductor
+          image: dd-agent:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - sleep
+            - infinity
+          env:
+            - name: REINVENT4_MCP_CONFIG
+              value: /app/config/reinvent4_mcp_config.yaml
+            - name: CAMPAIGN_STORE_URL
+              value: http://dd-agentic-campaign-store:8087
+            # Admission control: Boltz is the binding constraint, so the
+            # conductor asks its queue depth before dispatching more work.
+            - name: BOLTZ_GATEWAY_STATS_URL
+              value: http://dd-agentic-boltz-gateway:8091/stats
+            - name: SUPERVISOR_DEPLOYMENT
+              value: dd-agentic-supervisor
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REINVENT4_AGENT_BACKEND
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_BACKEND
+            - name: REINVENT4_AGENT_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_MODEL
+            - name: REINVENT4_AGENT_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_BASE_URL
+            - name: REINVENT4_AGENT_NO_VERIFY_SSL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_NO_VERIFY_SSL
+            - name: REINVENT4_AGENT_LOG_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_LOG_DIR
+            - name: REINVENT4_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dd-agentic-llm
+                  key: REINVENT4_AGENT_API_KEY
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+          volumeMounts:
+            # Read-only: the conductor reviews results and reads TTPs, but the
+            # supervisors are what write job output and TTP variants. Mounting
+            # it writable would invite the conductor to edit a base TTP
+            # mid-campaign, which would silently change what later tasks mean.
+            - name: data
+              mountPath: /shared
+              subPath: shared
+              readOnly: true
+            - name: data
+              mountPath: /root/.reinvent4_mcp/ttps
+              subPath: ttps
+              readOnly: true
+            - name: data
+              mountPath: /data/reinvent4_mcp/jobs
+              subPath: jobs
+              readOnly: true
+            - name: agent-config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+        - name: agent-config
+          configMap:
+            name: dd-agentic-config
+            items:
+              - key: reinvent4_mcp_config.yaml
+                path: reinvent4_mcp_config.yaml

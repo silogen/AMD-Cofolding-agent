@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-supervisor
+  labels:
+    app.kubernetes.io/name: dd-agentic-supervisor
+    app.kubernetes.io/component: supervisor
+spec:
+  # The campaign's concurrency N. Driven by `kubectl scale`, which the
+  # conductor can do through the API with the deployments/scale permission
+  # rbac.yaml already grants -- and which ports to Compose unchanged as
+  # `--scale dd-supervisor=N`. Shipped at 0 so applying the manifests does not
+  # start burning GPU on an empty queue: a campaign begins by scaling up.
+  replicas: 0
+  # Supervisors are independent and idempotent against the ledger -- a task
+  # held by a pod being replaced goes back on the queue when its lease lapses
+  # -- so there is no reason to replace them one at a time.
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-supervisor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-supervisor
+        app.kubernetes.io/component: supervisor
+    spec:
+      # SIGTERM stops it claiming new work; the task in hand keeps running for
+      # this long and then the pod goes. Whatever it was holding returns to the
+      # queue when the lease lapses, so this is a trade between draining
+      # politely and freeing the node, not a correctness question.
+      terminationGracePeriodSeconds: 120
+      containers:
+        # The same image as the interactive agent. A supervisor *is* the agent
+        # with a different entrypoint, so there is no supervisor image to
+        # build and no second copy of the agent to keep in step.
+        - name: dd-supervisor
+          image: dd-agent:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - reinvent4_agent.supervisor
+          env:
+            - name: REINVENT4_MCP_CONFIG
+              value: /app/config/reinvent4_mcp_config.yaml
+            - name: CAMPAIGN_STORE_URL
+              value: http://dd-agentic-campaign-store:8087
+            # Identity in the ledger, so /status names the pod holding each
+            # task and a stuck supervisor can be found by name.
+            - name: SUPERVISOR_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Renewed well inside the store's 3600 s default lease, so a
+            # couple of missed heartbeats do not cost the task.
+            - name: SUPERVISOR_HEARTBEAT_SECONDS
+              value: "60"
+            # How long an idle supervisor waits before asking again. Cheap:
+            # these pods hold no GPU, so idling costs almost nothing.
+            - name: SUPERVISOR_POLL_SECONDS
+              value: "15"
+            - name: REINVENT4_AGENT_BACKEND
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_BACKEND
+            - name: REINVENT4_AGENT_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_MODEL
+            - name: REINVENT4_AGENT_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_BASE_URL
+            - name: REINVENT4_AGENT_NO_VERIFY_SSL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_NO_VERIFY_SSL
+            - name: REINVENT4_AGENT_LOG_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: REINVENT4_AGENT_LOG_DIR
+            - name: REINVENT4_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dd-agentic-llm
+                  key: REINVENT4_AGENT_API_KEY
+          resources:
+            # No amd.com/gpu, and this is the whole point of the Phase 2 split:
+            # N supervisors cost N CPU allocations, and the GPUs go to Boltz
+            # and the runner instead of being pinned one per agent.
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+            # The TTP store, shared with the agent: the base TTP is read from
+            # here and each task's weight-vector variant is written back,
+            # which is also the record of what every task actually ran.
+            - name: data
+              mountPath: /root/.reinvent4_mcp/ttps
+              subPath: ttps
+            - name: data
+              mountPath: /data/reinvent4_mcp/jobs
+              subPath: jobs
+            - name: data
+              mountPath: /data/reinvent4_mcp/logs
+              subPath: logs
+            - name: data
+              mountPath: /data/reinvent4_mcp/tb_logs
+              subPath: tb-logs
+            - name: data
+              mountPath: /logs
+              subPath: agent-logs
+            - name: agent-config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+        - name: agent-config
+          configMap:
+            name: dd-agentic-config
+            items:
+              - key: reinvent4_mcp_config.yaml
+                path: reinvent4_mcp_config.yaml

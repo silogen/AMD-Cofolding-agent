@@ -57,6 +57,8 @@ docker build --file services/interaction-profiler/Dockerfile \
     --tag "interaction-profiler:${TAG}" .
 docker build --file services/boltz-gateway/Dockerfile \
     --tag "boltz-gateway:${TAG}" services/boltz-gateway
+docker build --file services/campaign-store/Dockerfile \
+    --tag "campaign-store:${TAG}" services/campaign-store
 # Owns REINVENT4 + the Zenodo priors, so this is the slow one. Context is the
 # repo root, where REINVENT4/ and reinvent4_mcp/ live.
 docker build --file services/reinvent-runner/Dockerfile \
@@ -70,4 +72,5 @@ echo "  admet-predictor:${TAG}"
 echo "  retrodmta-predictor:${TAG}"
 echo "  interaction-profiler:${TAG}"
 echo "  boltz-gateway:${TAG}"
+echo "  campaign-store:${TAG}"
 echo "  reinvent-runner:${TAG}"
