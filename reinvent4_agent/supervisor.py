@@ -34,7 +34,15 @@ Env:
     SUPERVISOR_HEARTBEAT_SECONDS  how often to renew it while working
 
 Plus the REINVENT4_AGENT_* variables the CLI already reads, which configure the
-backend, model and budgets identically here.
+backend, model and budgets identically here. One of them changes the shape of a
+task rather than just its settings:
+
+    REINVENT4_AGENT_MULTI_AGENT=false runs the Driver alone. That halves the
+    token spend, since the Reviewer produces no molecules -- but note it also
+    replaces the monitoring loop, because ``monitor_campaign`` *is* the
+    Reviewer cycle (assess the run, hand the Driver a verdict). Without a
+    Reviewer the supervisor simply watches the job's state until it stops or
+    the task deadline fires.
 """
 
 from __future__ import annotations
@@ -560,37 +568,49 @@ class CoscientistTaskRunner:
                 name="driver", system_prompt=DRIVER_SYSTEM_PROMPT,
                 allowed_tools=driver_tools,
             )
-            reviewer = Agent(
-                mcp, _backend(REVIEWER_SYSTEM_PROMPT),
-                max_tokens=args.max_tokens, log_dir=args.log_dir,
-                name="reviewer", system_prompt=REVIEWER_SYSTEM_PROMPT,
-                allowed_tools=set(REVIEWER_READ_ONLY_TOOLS),
-            )
-            coordinator = Coordinator(
-                driver, reviewer,
-                max_turns=spec.get("max_turns") or args.max_turns,
-                token_budget=spec.get("token_budget") or args.token_budget,
-            )
+
+            coordinator = None
+            if getattr(args, "multi_agent", True):
+                reviewer = Agent(
+                    mcp, _backend(REVIEWER_SYSTEM_PROMPT),
+                    max_tokens=args.max_tokens, log_dir=args.log_dir,
+                    name="reviewer", system_prompt=REVIEWER_SYSTEM_PROMPT,
+                    allowed_tools=set(REVIEWER_READ_ONLY_TOOLS),
+                )
+                coordinator = Coordinator(
+                    driver, reviewer,
+                    max_turns=spec.get("max_turns") or args.max_turns,
+                    token_budget=spec.get("token_budget") or args.token_budget,
+                )
 
             started = time.monotonic()
-            result = await coordinator.run(goal)
+            if coordinator is not None:
+                result = await coordinator.run(goal)
+                verdict, turns = result.status, result.turns
+            else:
+                # One pass. There is no second agent to hand a verdict to, so
+                # there is nothing to take turns over.
+                await driver.chat(goal)
+                verdict, turns = "single-agent", 1
+
             job_id = job_for_ttp(ttp_id)
             if not job_id:
                 raise RuntimeError(
                     "no optimization job was started against TTP "
-                    f"'{ttp_id}' (verdict: {result.status})"
+                    f"'{ttp_id}' (verdict: {verdict})"
                 )
 
             remaining = None if budget is None else max(
                 0.0, budget - (time.monotonic() - started)
             )
             timed_out = await self._monitor(coordinator, goal, job_id, remaining)
+            tokens = driver.total_tokens if coordinator is None else result.total_tokens
 
-        return self._harvest(task, job_id, result, timed_out)
+        return self._harvest(task, job_id, verdict, turns, tokens, timed_out)
 
     async def _monitor(
         self,
-        coordinator: Any,
+        coordinator: Optional[Any],
         goal: str,
         job_id: str,
         remaining: Optional[float],
@@ -602,8 +622,12 @@ class CoscientistTaskRunner:
         resumed instead of thrown away.
         """
 
-        monitor = coordinator.monitor_campaign(
-            goal, job_id=job_id, interval=self.args.monitor_interval
+        monitor = (
+            coordinator.monitor_campaign(
+                goal, job_id=job_id, interval=self.args.monitor_interval
+            )
+            if coordinator is not None
+            else self._watch_job(job_id)
         )
         if remaining is None:
             await monitor
@@ -617,6 +641,29 @@ class CoscientistTaskRunner:
             return True
         return False
 
+    async def _watch_job(self, job_id: str) -> None:
+        """Wait for the job to stop running. The single-agent monitor.
+
+        ``monitor_campaign`` is the *Reviewer* cycle -- it assesses the run and
+        hands the Driver a verdict to act on -- so with no Reviewer there is
+        nobody to form that verdict and nothing to act on it. This watches the
+        state instead; the task deadline above is what bounds the wait.
+        """
+
+        from reinvent4_mcp.tools.results import get_optimization_status
+
+        while True:
+            status = await asyncio.to_thread(get_optimization_status, job_id)
+            state = status.get("state")
+            if state and state != "running":
+                logger.info("job %s finished as %s", job_id, state)
+                return
+            if "error" in status:
+                # A job the runner cannot describe is not one we can wait on.
+                logger.warning("job %s: %s", job_id, status["error"])
+                return
+            await asyncio.sleep(self.args.monitor_interval)
+
     @staticmethod
     def _stop_job(job_id: str) -> None:
         from reinvent4_mcp.tools.optimization import stop_optimization
@@ -626,7 +673,12 @@ class CoscientistTaskRunner:
 
     @staticmethod
     def _harvest(
-        task: dict[str, Any], job_id: str, result: Any, timed_out: bool
+        task: dict[str, Any],
+        job_id: str,
+        verdict: str,
+        turns: int,
+        tokens: int,
+        timed_out: bool,
     ) -> TaskOutcome:
         """Read the achieved profile out of the job's own results."""
 
@@ -646,8 +698,8 @@ class CoscientistTaskRunner:
             )
 
         summary = (
-            f"verdict={result.status}, turns={result.turns}, "
-            f"tokens={result.total_tokens}, candidates={len(candidates)}"
+            f"verdict={verdict}, turns={turns}, "
+            f"tokens={tokens}, candidates={len(candidates)}"
         )
         if timed_out:
             summary += ", stopped at the task deadline (checkpointed)"

@@ -86,6 +86,14 @@ spec:
                 configMapKeyRef:
                   name: dd-agentic-config
                   key: REINVENT4_AGENT_LOG_DIR
+            # Driver only, no Reviewer. Set here rather than read from the
+            # ConfigMap, whose value is "true" for the interactive agent --
+            # pointing at it would hand every supervisor a Reviewer that
+            # produces no molecules and roughly doubles the token spend. The
+            # trade is that the Reviewer cycle is also the monitoring loop, so
+            # the supervisor watches the job's state directly instead.
+            - name: REINVENT4_AGENT_MULTI_AGENT
+              value: "false"
             - name: REINVENT4_AGENT_API_KEY
               valueFrom:
                 secretKeyRef:

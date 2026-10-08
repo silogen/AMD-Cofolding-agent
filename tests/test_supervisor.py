@@ -702,6 +702,68 @@ class TestJobDiscovery:
             assert job_for_ttp("ttp-1") == "dated"
 
 
+class TestSingleAgentMode:
+    """REINVENT4_AGENT_MULTI_AGENT=false runs the Driver with no Reviewer.
+
+    The Reviewer produces no molecules and roughly doubles the token spend,
+    but turning it off is not purely a saving: ``monitor_campaign`` *is* the
+    Reviewer cycle, so the supervisor needs its own way to wait for the job.
+    """
+
+    @staticmethod
+    def _runner(monitor_interval: float = 0.01):
+        from reinvent4_agent.supervisor import CoscientistTaskRunner
+
+        args = MagicMock()
+        args.monitor_interval = monitor_interval
+        return CoscientistTaskRunner(args, MagicMock())
+
+    def test_it_waits_for_the_job_to_stop_running(self):
+        states = ["running", "running", "completed"]
+
+        with patch(
+            "reinvent4_mcp.tools.results.get_optimization_status",
+            side_effect=lambda job_id: {"state": states.pop(0)},
+        ):
+            asyncio.run(self._runner()._watch_job("job-1"))
+
+        assert states == [], "it should have polled until the job finished"
+
+    def test_a_failed_job_also_ends_the_wait(self):
+        """Any terminal state, not just success -- otherwise it waits forever."""
+        with patch(
+            "reinvent4_mcp.tools.results.get_optimization_status",
+            return_value={"state": "failed"},
+        ):
+            asyncio.run(self._runner()._watch_job("job-1"))
+
+    def test_an_undescribable_job_is_not_waited_on(self):
+        """A job the runner cannot report on is not one we can wait for."""
+        with patch(
+            "reinvent4_mcp.tools.results.get_optimization_status",
+            return_value={"error": "No job job-1"},
+        ):
+            asyncio.run(self._runner()._watch_job("job-1"))
+
+    def test_the_deadline_still_stops_the_job(self):
+        """The single-agent watch is bounded by the task deadline, as before."""
+        stopped: list[str] = []
+
+        async def _never_finishes(job_id):
+            await asyncio.sleep(10)
+
+        runner = self._runner()
+        with patch.object(runner, "_watch_job", _never_finishes), patch.object(
+            type(runner), "_stop_job", staticmethod(lambda job_id: stopped.append(job_id))
+        ):
+            timed_out = asyncio.run(
+                runner._monitor(None, "goal", "job-1", remaining=0.05)
+            )
+
+        assert timed_out is True
+        assert stopped == ["job-1"]
+
+
 class TestDeadlines:
 
     def test_a_future_deadline_is_the_time_remaining(self):

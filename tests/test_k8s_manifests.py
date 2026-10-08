@@ -708,6 +708,15 @@ class TestSupervisorPool:
         assert key["valueFrom"]["secretKeyRef"]["name"] == "dd-agentic-llm"
         assert "value" not in key
 
+    def test_supervisors_run_the_driver_alone(self, deployments, mcp_config):
+        # The Reviewer produces no molecules and roughly doubles the token
+        # spend per task. Set literally rather than read from the ConfigMap,
+        # whose "true" belongs to the interactive agent.
+        multi_agent = self._env(deployments)["REINVENT4_AGENT_MULTI_AGENT"]
+
+        assert multi_agent["value"] == "false"
+        assert "valueFrom" not in multi_agent
+
 
 # ---------------------------------------------------------------------------
 # TestConductor
@@ -818,6 +827,19 @@ class TestConductor:
         assert (
             _MANIFESTS.parents[1] / "reinvent4_agent" / "conductor.py"
         ).is_file()
+
+    def test_the_conductor_runs_without_a_reviewer(self, deployments):
+        # It steers a fleet; it does not need a second opinion on its own turn.
+        multi_agent = self._env(deployments)["REINVENT4_AGENT_MULTI_AGENT"]
+
+        assert multi_agent["value"] == "false"
+
+    def test_the_interactive_agent_keeps_its_reviewer(self, mcp_config):
+        # Turning it off for the fleet must not turn it off for the person at
+        # the REPL, which is what reading the shared ConfigMap key would do.
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]
+
+        assert configmap["data"]["REINVENT4_AGENT_MULTI_AGENT"] == "true"
 
 
 # ---------------------------------------------------------------------------

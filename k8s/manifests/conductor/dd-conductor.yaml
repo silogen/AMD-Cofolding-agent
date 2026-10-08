@@ -129,6 +129,11 @@ spec:
                 configMapKeyRef:
                   name: dd-agentic-config
                   key: REINVENT4_AGENT_LOG_DIR
+            # A conductor steers a fleet; it does not need a second opinion on
+            # its own turn. Hardcoded rather than read from the ConfigMap,
+            # whose "true" belongs to the interactive agent.
+            - name: REINVENT4_AGENT_MULTI_AGENT
+              value: "false"
             - name: REINVENT4_AGENT_API_KEY
               valueFrom:
                 secretKeyRef:
