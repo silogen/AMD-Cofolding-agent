@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # admet-predictor — Apptainer/Singularity definition.
 #
 # CPU service, HTTP server. Mirrors services/admet-predictor/Dockerfile. The base

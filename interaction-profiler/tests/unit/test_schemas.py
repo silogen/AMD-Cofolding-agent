@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for the v2 schemas and flattening."""
 
 from __future__ import annotations

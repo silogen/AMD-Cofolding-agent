@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Pipeline-aware scorer for artifact passing between external components.
 
 When a TTP has pipeline dependencies (e.g., PoseBusters ``depends_on`` Boltz

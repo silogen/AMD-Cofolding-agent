@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # ──────────────────────────────────────────────────────────────────────
 # Environment template for Drug Discovery Agent on Slurm.
 # Copy to env.local.sh and fill in your values.  Both setup.sh and the

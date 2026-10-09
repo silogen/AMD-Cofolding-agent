@@ -7,6 +7,9 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=4:00:00
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # ──────────────────────────────────────────────────────────────────────
 # Batch-mode agent job.  Feed input from a file or heredoc.
 #

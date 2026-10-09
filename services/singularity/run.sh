@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # ──────────────────────────────────────────────────────────────────────
 # Run the full dd_agentic stack under Apptainer/Singularity (no Docker).
 #
@@ -48,7 +51,7 @@ while [ $# -gt 0 ]; do
         --skip-agent)       SKIP_AGENT=1; shift ;;
         --dry-run)          DRY_RUN=1; shift ;;
         --)                 shift; AGENT_ARGS=("$@"); break ;;
-        -h|--help)          sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)          sed -n '5,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)                  echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done

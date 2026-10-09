@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # ──────────────────────────────────────────────────────────────────────
 # Build the dd_agentic Apptainer/Singularity images (no Docker daemon).
 #
@@ -33,7 +36,7 @@ CPU_SERVICES="posebusters retrodmta-predictor interaction-profiler"
 ALL_SERVICES="${GPU_SERVICES} ${CPU_SERVICES}"
 
 usage() {
-    sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 

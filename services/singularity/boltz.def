@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # boltz — Apptainer/Singularity definition.
 #
 # GPU service, HTTP server. Mirrors services/boltz2/Dockerfile. Vendor is

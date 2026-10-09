@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Generate REINVENT4 TOML configuration from TTP + process config.
 
 Converts the scorer config dict (from ``ttp_to_scorer_config``) and

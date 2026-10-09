@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Thin canonical vocabulary layer.
 
 v1 is near-identity: fragment names are lowercased and underscore-joined;

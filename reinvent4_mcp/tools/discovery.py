@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Discovery tools: list available scoring components, models, and external services."""
 
 from __future__ import annotations

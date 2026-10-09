@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Standardized ADMET inference: SMILES in -> per-endpoint mean +/- std across the three
 deployment models (XGBoost, Chemprop-MTL, CheMeleon-MTL), all trained on the full ADME data.
 

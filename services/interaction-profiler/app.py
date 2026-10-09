@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """FastAPI application exposing the interaction profiler over HTTP.
 
 Single service app (boltz2/posebusters convention): this is the only FastAPI app; the

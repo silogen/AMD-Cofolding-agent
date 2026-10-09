@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Pydantic output models for the interaction profiler (v2).
 
 One batch in -> one :class:`BatchResult` out. Every field is explicitly

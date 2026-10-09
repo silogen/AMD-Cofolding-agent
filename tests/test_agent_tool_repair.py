@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Regression tests for dangling ``tool_use`` repair.
 
 The Anthropic/Vertex (and OpenAI) APIs require every ``tool_use`` /

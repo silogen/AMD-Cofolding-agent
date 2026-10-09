@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Agent loop: user input -> LLM backend -> MCP tool calls -> display.
 
 Implements the agentic loop where the LLM reasons about the user request,

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for batch input parsing."""
 
 from __future__ import annotations

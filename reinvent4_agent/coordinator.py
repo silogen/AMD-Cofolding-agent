@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Two-agent co-scientist coordinator (Driver <-> Reviewer).
 
 Owns two :class:`~reinvent4_agent.agent.Agent` instances that share a single

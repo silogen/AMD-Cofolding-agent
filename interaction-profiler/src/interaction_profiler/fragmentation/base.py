@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Abstract interface for fragmentation backends."""
 
 from __future__ import annotations

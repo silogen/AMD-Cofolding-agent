@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # Drug Discovery MCP Server -- Process Configuration (Singularity / Apptainer)
 #
 # Identical to ../../reinvent4_mcp_config.yaml EXCEPT the external service URLs

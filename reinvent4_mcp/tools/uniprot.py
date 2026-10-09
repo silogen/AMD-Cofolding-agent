@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """UniProt target-lookup helper.
 
 Fetches canonical protein information from the UniProt REST API so the agent

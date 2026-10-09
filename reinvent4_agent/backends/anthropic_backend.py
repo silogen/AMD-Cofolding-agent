@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Anthropic Messages API backend with extended thinking support.
 
 Uses the ``anthropic`` SDK to talk to the Anthropic Messages API

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Adapter around ``accfg.AccFG`` for the unified fragmenter interface."""
 
 from __future__ import annotations

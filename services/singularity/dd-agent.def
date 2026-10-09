@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # dd-agent (reinvent4-mcp) — Apptainer/Singularity definition.
 #
 # GPU service. Mirrors services/dd-agent/Dockerfile. No server port; this image

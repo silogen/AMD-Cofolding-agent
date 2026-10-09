@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # Extends the REINVENT4 ROCm image with the MCP server + agent CLI.
 #
 # Build from the repo root:

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """LLM backend abstraction for the Drug Discovery Agent.
 
 Provides a common interface over Anthropic and OpenAI-compatible APIs

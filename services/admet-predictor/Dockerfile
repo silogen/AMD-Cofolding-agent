@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # admet-predictor REST service.
 #
 # Follows the services/<name>/ convention: this dir holds only the HTTP wrapper (app.py) +

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Load a complex with MDAnalysis and classify its components.
 
 Splits a structure into: small-molecule ligand candidate(s), the

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Custom geometric interaction detector.
 
 Given a prepared ligand Mol (explicit Hs, correct bonds) and an RDKit Mol

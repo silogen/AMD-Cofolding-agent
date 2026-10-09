@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for ExternalRESTScorer, pipeline artifact injection, and NaN propagation.
 
 Covers:

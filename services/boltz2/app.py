@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Boltz2 FastAPI wrapper — exposes cofolding + affinity prediction via REST."""
 
 from __future__ import annotations

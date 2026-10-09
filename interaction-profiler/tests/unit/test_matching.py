@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for input-mode classification and SMILES↔ligand matching helpers."""
 
 from __future__ import annotations
