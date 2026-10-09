@@ -135,11 +135,9 @@ dd_agentic/
 │   └── slurm/
 │       ├── run_interactive.sh      # Agent-only interactive Docker run
 │       ├── agent.sbatch            # Batch job submission
-│       ├── setup.sh                # Bare-metal venv install (no containers)
-│       └── llm_tunnel_relay.py     # Docker bridge -> host loopback relay for the SSH tunnel
+│       └── setup.sh                # Bare-metal venv install (no containers)
 ├── docker-compose.yml              # 6-service compose stack
 ├── reinvent4_mcp_config.yaml       # Process config (service URLs, RL defaults, storage paths)
-├── LLM_GATEWAY_TUNNEL.md           # SSH-tunnel recipe for reaching an LLM gateway
 ├── TESTING.md                      # Manual and scripted test scenarios
 ├── tests/                          # ~316 unit tests (REINVENT4 imports mocked, no GPU needed)
 │   ├── test_scoring.py             # Native + TTP scoring paths
@@ -285,7 +283,7 @@ export SLURM_PARTITION="batch"                    # your cluster partition
 
 > `env.local.sh` is gitignored, so secrets stay out of version control.
 
-If the compute node cannot reach the gateway directly, see [LLM_GATEWAY_TUNNEL.md](LLM_GATEWAY_TUNNEL.md) for the SSH reverse-tunnel setup.
+The compute node must be able to reach the LLM endpoint directly.
 
 ---
 
@@ -337,11 +335,7 @@ docker compose run --rm reinvent4-mcp
 
 This starts the five scoring services, waits for all of their health checks to pass, and then drops you into the agent chat with an interactive terminal. When you exit the chat the scoring services keep running.
 
-The container reaches the LLM gateway directly by DNS. Only if the node cannot, add the tunnel overlay (see [LLM_GATEWAY_TUNNEL.md](LLM_GATEWAY_TUNNEL.md)), which redirects the gateway hostname named by `LLM_GATEWAY_HOST` to the SSH relay on the Docker host:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.tunnel.yml run --rm reinvent4-mcp
-```
+The container reaches the LLM endpoint directly by DNS on the Compose bridge network.
 
 ```bash
 docker compose down          # stop all containers
@@ -408,7 +402,6 @@ Key differences from Compose:
 | `depends_on` + health checks | `apptainer instance start` + `/health` polling in `run.sh` |
 | named volumes / mounts | `--bind` (all services share one `/shared`) |
 | `runtime: amd` | `--rocm` (AMD) or `--nv` (NVIDIA), selected by `--vendor` |
-| `docker-compose.tunnel.yml` LLM relay | host loopback is shared directly — no relay needed |
 
 ### Build
 
@@ -439,7 +432,6 @@ bash services/singularity/run.sh --vendor amd        # or --vendor nvidia
 | `--vendor <amd\|nvidia>` | Required. Selects `--rocm`/`--nv` and the `*-<vendor>.sif` images |
 | `--data-dir <path>` | Host dir to bind (default `./data`) |
 | `--reinvent-gpu` / `--boltz-gpu` | GPU indices (default `0` and `1`) |
-| `--gateway-loopback` | Map the gateway hostname to `127.0.0.1` for an SSH tunnel |
 | `--skip-agent` | Start and health-gate the services only |
 | `--dry-run` | Print the `apptainer` commands without running them |
 
@@ -458,7 +450,7 @@ The agent uses `services/singularity/reinvent4_mcp_config.singularity.yaml`, a c
 
 Since SIF images are read-only, `run.sh` binds writable host directories under `--data-dir` for `/shared`, the job/log/tb dirs, TTP storage, and `/logs`, creating them if missing.
 
-For the SSH-tunnel workflow and validation steps, see [services/singularity/README.md](services/singularity/README.md).
+For the full Apptainer guide and validation steps, see [services/singularity/README.md](services/singularity/README.md).
 
 ---
 
@@ -999,7 +991,6 @@ All of these are set in `services/env.local.sh` and forwarded into the container
 | `REINVENT4_AGENT_BACKEND` | `anthropic` | `anthropic` or `openai` |
 | `REINVENT4_AGENT_MODEL` | `claude-sonnet-4.6` | Model name |
 | `REINVENT4_AGENT_BASE_URL` | — (SDK default) | LLM API base URL, e.g. `https://<your-gateway-host>/Anthropic`; use the gateway root for the OpenAI backend |
-| `LLM_GATEWAY_HOST` | — | Gateway hostname mapped onto the SSH relay by `docker-compose.tunnel.yml`; only needed with that overlay |
 | `REINVENT4_AGENT_API_VERSION` | `2024-12-01-preview` on Azure routes | Azure `api-version` (OpenAI); override for deployments needing a newer one |
 | `REINVENT4_AGENT_NO_VERIFY_SSL` | `true` | Disable TLS verification |
 | `REINVENT4_AGENT_THINKING_BUDGET` | `1024` | Extended-thinking token budget (Anthropic) |

@@ -31,12 +31,6 @@ export REINVENT4_AGENT_MODEL="${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}"
 export REINVENT4_AGENT_BASE_URL="${REINVENT4_AGENT_BASE_URL:-}"
 export REINVENT4_AGENT_NO_VERIFY_SSL="${REINVENT4_AGENT_NO_VERIFY_SSL:-true}"
 export REINVENT4_AGENT_THINKING_BUDGET="${REINVENT4_AGENT_THINKING_BUDGET:-1024}"
-
-# Hostname of the LLM gateway, used only by docker-compose.tunnel.yml to
-# map it onto the SSH relay on the Docker host.  Leave empty when the
-# gateway is reachable directly.
-export LLM_GATEWAY_HOST="${LLM_GATEWAY_HOST:-}"
-
 # --- OpenAI backend (ignored by the anthropic backend) ----------------
 # A gateway that publishes OpenAI models as Azure deployments takes the
 # gateway root and the deployment id; the backend appends

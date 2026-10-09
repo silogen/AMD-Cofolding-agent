@@ -143,9 +143,8 @@ def connection_failure_report(
     all_hints = [
         "Confirm the base URL path matches the endpoint "
         "(REINVENT4_AGENT_BASE_URL).",
-        "If the gateway is reached through an SSH tunnel, the base URL "
-        "must carry the tunnel port (e.g. https://host:9579/...); see "
-        "LLM_GATEWAY_TUNNEL.md.",
+        "If the endpoint listens on a non-standard port, the base URL "
+        "must carry it (e.g. https://host:8443/...).",
         *hints,
     ]
     lines += ["", "  Check:"]

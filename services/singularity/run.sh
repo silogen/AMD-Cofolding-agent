@@ -19,8 +19,6 @@
 #   --data-dir <path>       Host data dir to bind (default: ./data).
 #   --reinvent-gpu <id>     GPU index for the agent (default: $REINVENT_GPU or 0).
 #   --boltz-gpu <id>        GPU index for boltz    (default: $BOLTZ_GPU or 1).
-#   --gateway-loopback      Map the LLM gateway host -> 127.0.0.1 (SSH tunnel on
-#                           the host loopback). Default: gateway reached directly.
 #   --skip-agent            Start + health-gate services only, then wait (Ctrl-C).
 #   --dry-run               Print the apptainer commands without running them.
 #
@@ -36,7 +34,6 @@ VENDOR=""
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data}"
 REINVENT_GPU="${REINVENT_GPU:-0}"
 BOLTZ_GPU="${BOLTZ_GPU:-1}"
-GATEWAY_LOOPBACK=0
 SKIP_AGENT=0
 DRY_RUN=0
 AGENT_ARGS=()
@@ -48,11 +45,10 @@ while [ $# -gt 0 ]; do
         --data-dir)         DATA_DIR="$2"; shift 2 ;;
         --reinvent-gpu)     REINVENT_GPU="$2"; shift 2 ;;
         --boltz-gpu)        BOLTZ_GPU="$2"; shift 2 ;;
-        --gateway-loopback) GATEWAY_LOOPBACK=1; shift ;;
         --skip-agent)       SKIP_AGENT=1; shift ;;
         --dry-run)          DRY_RUN=1; shift ;;
         --)                 shift; AGENT_ARGS=("$@"); break ;;
-        -h|--help)          sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)          sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)                  echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -193,32 +189,6 @@ if [ "${SKIP_AGENT}" -eq 1 ]; then
     exit 0
 fi
 
-# --- LLM gateway reachability ----------------------------------------
-# With host networking the container shares the host loopback, so a gateway
-# reachable from the host (directly or via an SSH tunnel on 127.0.0.1) is
-# reachable from the agent. If --gateway-loopback is set we additionally point
-# the gateway hostname at 127.0.0.1 via a bound /etc/hosts (for tunnels that
-# terminate on the loopback and can't rely on public DNS).
-GATEWAY_BIND=()
-BASE_URL="${REINVENT4_AGENT_BASE_URL:-}"
-if [ "${GATEWAY_LOOPBACK}" -eq 1 ]; then
-    if [ -z "${BASE_URL}" ]; then
-        echo "error: --gateway-loopback needs REINVENT4_AGENT_BASE_URL set" \
-             "to the gateway URL (source services/env.local.sh first)" >&2
-        exit 1
-    fi
-    gw_host="$(echo "${BASE_URL}" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
-    hosts_file="$(mktemp)"
-    # Preserve baseline localhost entries, then map the gateway to loopback.
-    {
-        echo "127.0.0.1 localhost ${gw_host}"
-        echo "::1 localhost ip6-localhost"
-    } > "${hosts_file}"
-    GATEWAY_BIND=(--bind "${hosts_file}:/etc/hosts")
-    echo ""
-    echo "Gateway   : ${gw_host} -> 127.0.0.1 (loopback tunnel via ${hosts_file})"
-fi
-
 # --- Run the agent ----------------------------------------------------
 echo ""
 echo "=== Running agent ==="
@@ -246,7 +216,7 @@ AGENT_BINDS=(
 # Forward agent env into the container. REINVENT4_MCP_CONFIG + LOG_DIR are fixed
 # to the in-container paths; the rest (gateway URL, key, model, ...) pass through
 # from the host only when set — so `source services/env.local.sh` before
-# run.sh is enough to carry a tunnelled REINVENT4_AGENT_BASE_URL (with :PORT).
+# run.sh is enough to carry REINVENT4_AGENT_BASE_URL.
 AGENT_ENV=(
     --env "REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.singularity.yaml"
     --env "REINVENT4_AGENT_LOG_DIR=/logs"
@@ -269,5 +239,4 @@ run "${APPTAINER}" run \
     $(gpu_env_flag "${REINVENT_GPU}") \
     "${AGENT_ENV[@]}" \
     "${AGENT_BINDS[@]}" \
-    ${GATEWAY_BIND[@]+"${GATEWAY_BIND[@]}"} \
     "${AGENT_SIF}" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}

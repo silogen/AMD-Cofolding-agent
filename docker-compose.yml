@@ -65,9 +65,7 @@ services:
       # to force timestamps in `docker compose logs`; leave empty for a clean
       # interactive session.
       - REINVENT4_AGENT_LOG_TIMESTAMPS=${REINVENT4_AGENT_LOG_TIMESTAMPS:-}
-    # No extra_hosts: the gateway is reached directly by DNS. Nodes that
-    # cannot resolve/reach it need the SSH tunnel, which is opt-in via
-    # `-f docker-compose.yml -f docker-compose.tunnel.yml`.
+    # The LLM endpoint is reached directly by DNS from the bridge network.
     depends_on:
       boltz:
         condition: service_healthy

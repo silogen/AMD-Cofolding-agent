@@ -101,8 +101,7 @@ print('FINAL env OK; externalrestscorer registered; numpy', numpy.__version__, '
     # Custom REINVENT4 plugins on the path (server + RL worker subprocess).
     export PYTHONPATH=/app/reinvent4_mcp/_plugins:${PYTHONPATH}
     # Agent defaults. Guarded with :- so host env (e.g. from env.local.sh,
-    # which Apptainer forwards by default) or run.sh --env values win — e.g. a
-    # tunnelled REINVENT4_AGENT_BASE_URL with a :PORT is NOT clobbered.
+    # which Apptainer forwards by default) or run.sh --env values win.
     # No endpoint is baked in: set REINVENT4_AGENT_BASE_URL for your own.
     export REINVENT4_AGENT_BACKEND="${REINVENT4_AGENT_BACKEND:-anthropic}"
     export REINVENT4_AGENT_MODEL="${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}"
