@@ -185,6 +185,73 @@ class TestExternalRESTScorer:
         assert all(np.isnan(s) for s in result.scores[0])
 
     @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_the_metadata_schema_is_fixed_by_the_first_batch(self, mock_post):
+        """REINVENT writes the results CSV header once and appends rows.
+
+        The metadata keys are unioned across whichever molecules are in a
+        batch, so one carrying a `skip_reason` brings keys the others do not.
+        A later batch with extra keys makes rows wider than the header and the
+        whole file stops being parseable -- seen live as "Expected 24 fields
+        in line 18, saw 26", which cost the run its trajectory.
+        """
+        scorer = ExternalRESTScorer(_make_params())
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.5], "metadata": {"confidence": [0.9]}}
+        )
+        first = scorer(["CCO"])
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.6], "metadata": {"confidence": [0.8], "skip_reason": ["x"]}}
+        )
+        second = scorer(["CCC"])
+
+        assert list(first.metadata) == ["confidence"]
+        assert list(second.metadata) == ["confidence"], (
+            "a later batch must not widen the CSV"
+        )
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_a_missing_key_is_padded_rather_than_dropped(self, mock_post):
+        """A narrower batch would otherwise make rows *narrower* than the header."""
+        scorer = ExternalRESTScorer(_make_params())
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.5], "metadata": {"confidence": [0.9], "note": ["hi"]}}
+        )
+        scorer(["CCO"])
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.6], "metadata": {"confidence": [0.8]}}
+        )
+        second = scorer(["CCC"])
+
+        assert list(second.metadata) == ["confidence", "note"]
+        assert second.metadata["note"] == [None]
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_a_batch_with_no_metadata_still_fills_the_columns(self, mock_post):
+        scorer = ExternalRESTScorer(_make_params())
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.5], "metadata": {"confidence": [0.9]}}
+        )
+        scorer(["CCO"])
+
+        mock_post.return_value = _mock_response({"scores": [0.6, 0.7]})
+        second = scorer(["CCC", "CCCC"])
+
+        assert second.metadata == {"confidence": [None, None]}
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_no_metadata_at_all_stays_none(self, mock_post):
+        """Nothing to stabilise, so no empty columns are invented."""
+        scorer = ExternalRESTScorer(_make_params())
+        mock_post.return_value = _mock_response({"scores": [0.5]})
+
+        assert scorer(["CCO"]).metadata is None
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
     def test_stop_request_is_not_swallowed(self, mock_post):
         """A stop request has to reach REINVENT's checkpoint-writing handler.
 

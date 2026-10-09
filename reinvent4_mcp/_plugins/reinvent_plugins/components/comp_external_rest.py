@@ -208,6 +208,9 @@ class ExternalRESTScorer:
                 self.request_params[key] = val
 
         self.last_artifacts: dict | None = None
+        # Metadata column order, fixed by the first batch to match the one
+        # header REINVENT writes. See _stabilise_metadata.
+        self._metadata_keys: list[str] = []
 
         # REINVENT4 only logs the component class, so a TTP with several
         # external objectives produces a run of identical "Creating scoring
@@ -440,4 +443,48 @@ class ExternalRESTScorer:
             } or None
         else:
             metadata = None
+
+        metadata = self._stabilise_metadata(metadata, len(scores))
         return ComponentResults(scores=[scores], metadata=metadata)
+
+    def _stabilise_metadata(
+        self, metadata: Optional[dict[str, Any]], n: int
+    ) -> Optional[dict[str, Any]]:
+        """Hold the metadata keys steady for the life of the run.
+
+        REINVENT writes the results CSV header once, from the first batch, and
+        appends rows thereafter -- so a batch that reports *more* metadata keys
+        than the first produces rows wider than the header, and the whole file
+        stops being parseable. Observed live as "Expected 24 fields in line 18,
+        saw 26", which silently cost the run its trajectory and would have
+        failed the task at harvest with an unreadable CSV.
+
+        The keys vary legitimately: they are unioned across whichever
+        molecules are in a batch, so one carrying a ``skip_reason`` brings keys
+        the others do not have. Rather than let that reshape the file, the
+        first batch fixes the schema -- later extras are dropped and absent
+        ones padded with None, which is what REINVENT's own writer assumes.
+        """
+
+        if metadata is None:
+            # Nothing to record, but the columns still have to exist or the
+            # next row would be narrower than the header.
+            if not self._metadata_keys:
+                return None
+            return {key: [None] * n for key in self._metadata_keys}
+
+        if not self._metadata_keys:
+            self._metadata_keys = list(metadata)
+            return metadata
+
+        dropped = [key for key in metadata if key not in self._metadata_keys]
+        if dropped:
+            logger.info(
+                "%s reported metadata %s after the results schema was set; "
+                "dropping it to keep the CSV parseable", self.service, dropped,
+            )
+
+        return {
+            key: metadata.get(key) or [None] * n
+            for key in self._metadata_keys
+        }

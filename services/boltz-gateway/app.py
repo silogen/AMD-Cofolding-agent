@@ -483,6 +483,9 @@ class Batcher:
         self._first_enqueued: dict[str, float] = {}
         self._inflight_molecules: dict[tuple[str, str], asyncio.Future] = {}
         self._dispatchers: dict[str, asyncio.Task] = {}
+        # In-flight upstream calls. Held only so the tasks are not garbage
+        # collected while running; concurrency is bounded by the semaphore.
+        self._running: set[asyncio.Task] = set()
         self._slots: Optional[asyncio.Semaphore] = None
         self._slot_limit = 0
         self._lock = asyncio.Lock()
@@ -560,22 +563,61 @@ class Batcher:
                 await asyncio.sleep(min(0.25, COALESCE_WINDOW_SECONDS))
                 continue
 
+            # Acquired before the batch is taken, so the loop parks here while
+            # every replica is busy instead of building a queue of its own.
             semaphore = self._semaphore()
-            async with semaphore:
-                async with self._lock:
-                    waiting = self._pending.get(key) or []
-                    batch = waiting[:COALESCE_MAX_MOLECULES]
-                    remaining = waiting[len(batch):]
-                    if remaining:
-                        self._pending[key] = remaining
-                        self._first_enqueued[key] = time.monotonic()
-                    else:
-                        self._pending.pop(key, None)
-                        self._first_enqueued.pop(key, None)
-                    params = self._params.get(key)
-                if not batch or params is None:
-                    continue
-                await self._run_batch(key, params, batch)
+            await semaphore.acquire()
+
+            async with self._lock:
+                waiting = self._pending.get(key) or []
+                batch = waiting[:COALESCE_MAX_MOLECULES]
+                remaining = waiting[len(batch):]
+                if remaining:
+                    self._pending[key] = remaining
+                    self._first_enqueued[key] = time.monotonic()
+                else:
+                    self._pending.pop(key, None)
+                    self._first_enqueued.pop(key, None)
+                params = self._params.get(key)
+
+            if not batch or params is None:
+                semaphore.release()
+                continue
+
+            # Deliberately not awaited. There is one dispatch loop per
+            # coalescing key, and a sweep puts every supervisor on the same
+            # target with the same predict params -- so all of the fleet's
+            # traffic shares one key. Awaiting the call here served those
+            # batches strictly one at a time and left every replica but one
+            # idle, whatever the semaphore allowed: measured as upstream_p50
+            # 393 s against request_p50 752 s, with 16 molecules in flight and
+            # 16 waiting on two healthy replicas. Concurrency is the
+            # semaphore's job, not the loop's.
+            task = asyncio.create_task(
+                self._run_and_release(semaphore, key, params, batch)
+            )
+            # Hold a reference: a bare task can be garbage collected mid-flight.
+            self._running.add(task)
+            task.add_done_callback(self._running.discard)
+
+    async def _run_and_release(
+        self,
+        semaphore: asyncio.Semaphore,
+        key: str,
+        params: ScoreParams,
+        batch: list[Waiter],
+    ) -> None:
+        """Run one batch and give its replica slot back.
+
+        Releases the semaphore it was given rather than the current one: a
+        replica count change swaps in a fresh semaphore, and outstanding calls
+        have to return the slot they actually took.
+        """
+
+        try:
+            await self._run_batch(key, params, batch)
+        finally:
+            semaphore.release()
 
     async def _run_batch(
         self,

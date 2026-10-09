@@ -1358,6 +1358,107 @@ class TestJobManagerStop:
 
 class TestJobManagerTopCandidates:
 
+    def _completed_job(self, manager, df: pd.DataFrame):
+        """A completed job whose results CSV is `df`."""
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        job = manager._jobs[result["job_id"]]
+        job.state = JobState.COMPLETED
+        df.to_csv(job.csv_path, index=False)
+        return result["job_id"]
+
+    def test_a_ragged_csv_still_yields_its_good_rows(self, manager):
+        """REINVENT appends rows under one header written from the first batch.
+
+        A scorer reporting more metadata keys on a later batch makes those
+        rows wider than the header, and pandas then refuses the whole file --
+        observed live as "Expected 24 fields in line 18, saw 26", which cost
+        the run its trajectory and would have failed the task at harvest.
+
+        The surplus fields are inserted rather than appended (`step` stays
+        last), so a wide row cannot be realigned to the header: truncating it
+        would read None as the step and shift every metadata value. The rows
+        are dropped instead -- partial but accurate.
+        """
+        job_id = self._completed_job(manager, pd.DataFrame({
+            "SMILES": ["a", "b"],
+            "SMILES_state": [1, 1],
+            "Score": [0.4, 0.9],
+            "step": [1, 1],
+        }))
+        job = manager._jobs[job_id]
+        # A second step that reports one extra metadata column.
+        with open(job.csv_path, "a") as handle:
+            handle.write("c,1,0.7,extra_metadata,2\n")
+
+        candidates = manager.get_top_candidates(job_id, top_n=5)["candidates"]
+
+        assert [c["smiles"] for c in candidates] == ["b", "a"]
+        assert "error" not in manager.get_top_candidates(job_id, top_n=5)
+
+    def test_reinvents_own_score_column_is_recognised(self, manager):
+        """REINVENT writes the aggregate as `Score`, not `total_score`.
+
+        Resolving only `total_score` found nothing in a real RL results file,
+        so the rows were never sorted and "top" candidates came back as the
+        first N in the CSV -- the earliest and therefore worst molecules --
+        with no `total_score` on them at all.
+        """
+        job_id = self._completed_job(manager, pd.DataFrame({
+            "SMILES": ["worst", "best", "middling"],
+            "SMILES_state": [1, 1, 1],
+            "Agent": [26.4, 31.1, 28.0],
+            "Prior": [26.5, 31.1, 28.1],
+            "Target": [92.4, 75.9, 80.0],
+            "Score": [0.11, 0.93, 0.50],
+            "QED": [0.2, 0.88, 0.5],
+        }))
+
+        candidates = manager.get_top_candidates(job_id, top_n=3)["candidates"]
+
+        assert [c["smiles"] for c in candidates] == ["best", "middling", "worst"]
+        assert candidates[0]["total_score"] == 0.93
+
+    def test_the_bookkeeping_columns_are_not_objectives(self, manager):
+        """Agent, Prior, Target and Score are REINVENT's own, not components.
+
+        Reported as components they show up as objectives beside the real
+        ones, and the supervisor would put them on a Pareto front.
+        """
+        job_id = self._completed_job(manager, pd.DataFrame({
+            "SMILES": ["CCO"],
+            "SMILES_state": [1],
+            "Agent": [26.4],
+            "Prior": [26.5],
+            "Target": [92.4],
+            "Score": [0.93],
+            "Scaffold": [0.0],
+            "QED": [0.88],
+        }))
+
+        components = manager.get_top_candidates(job_id, top_n=1)[
+            "candidates"
+        ][0]["components"]
+
+        assert set(components) == {"QED"}
+
+    def test_the_older_total_score_column_still_works(self, manager):
+        """Transfer-learning output and older CSVs use that name."""
+        job_id = self._completed_job(manager, pd.DataFrame({
+            "SMILES": ["low", "high"],
+            "SMILES_state": [1, 1],
+            "total_score": [0.2, 0.8],
+        }))
+
+        candidates = manager.get_top_candidates(job_id, top_n=2)["candidates"]
+
+        assert [c["smiles"] for c in candidates] == ["high", "low"]
+
     def test_top_candidates(self, manager):
         with patch.object(manager, "_start_process"):
             result = manager.create_and_start(

@@ -1,0 +1,65 @@
+# A throwaway pod for loading locally built images onto a node's kubelet.
+#
+# The node is not reachable over ssh, so k8s/load-images.sh (which must run
+# *on* the node) cannot be used. This pod is the way in: it mounts the node's
+# containerd socket and the node's own `ctr` binary, so an image tar copied
+# into it can be imported into the same containerd the kubelet pulls from.
+#
+#   kubectl apply -f k8s/scripts/image-importer.yaml
+#   kubectl -n demo-lux wait --for=condition=Ready pod/image-importer --timeout=5m
+#   kubectl cp <image>.tar demo-lux/image-importer:/tmp/<image>.tar
+#   kubectl -n demo-lux exec image-importer -- \
+#     /host-bin/ctr --address /run/k3s/containerd/containerd.sock \
+#       --namespace k8s.io images import --digests=false /tmp/<image>.tar
+#
+# Tracked because it was previously kept in /tmp and lost to a tmp clean in the
+# middle of an 11 GiB transfer.
+#
+# `ctr` comes from the node rather than the container: the client has to match
+# the server, and this cluster runs containerd 2.1.4-k3s2 under RKE2, whose
+# binary lives at /var/lib/rancher/rke2/bin.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-importer
+  namespace: demo-lux
+  labels:
+    app.kubernetes.io/name: image-importer
+spec:
+  restartPolicy: Never
+  # Must be the node whose kubelet will run the images, and the same node the
+  # rest of the fleet is pinned to.
+  nodeSelector:
+    kubernetes.io/hostname: useocpm2m-silogen-007
+  containers:
+    - name: importer
+      # Already in this node's kubelet store, so nothing is pulled.
+      image: posebusters:local
+      imagePullPolicy: IfNotPresent
+      # Long enough to outlast an 11 GiB copy on a slow link; the pod is
+      # Never-restart, so it simply ends when this does.
+      command: ["sleep", "36000"]
+      securityContext:
+        runAsUser: 0
+      resources:
+        requests:
+          cpu: "250m"
+          memory: 512Mi
+        limits:
+          cpu: "4"
+          memory: 8Gi
+      volumeMounts:
+        - name: containerd-sock
+          mountPath: /run/k3s/containerd/containerd.sock
+        - name: rke2-bin
+          mountPath: /host-bin
+          readOnly: true
+  volumes:
+    - name: containerd-sock
+      hostPath:
+        path: /run/k3s/containerd/containerd.sock
+        type: Socket
+    - name: rke2-bin
+      hostPath:
+        path: /var/lib/rancher/rke2/bin
+        type: Directory

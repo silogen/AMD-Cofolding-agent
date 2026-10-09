@@ -595,9 +595,18 @@ class CoscientistTaskRunner:
 
             job_id = job_for_ttp(ttp_id)
             if not job_id:
-                raise RuntimeError(
-                    "no optimization job was started against TTP "
-                    f"'{ttp_id}' (verdict: {verdict})"
+                # The agent finished without starting the run. With a Reviewer
+                # the Coordinator took several turns, so there were more
+                # chances; a single pass gets one. Nothing about the call is
+                # the agent's decision anyway -- the TTP and the step count
+                # both come from the task -- so start it here rather than ask
+                # again and hope.
+                logger.warning(
+                    "the agent did not start a run for TTP '%s' (verdict: %s); "
+                    "starting it directly", ttp_id, verdict,
+                )
+                job_id = await asyncio.to_thread(
+                    self._start_job, ttp_id, spec.get("max_steps")
                 )
 
             remaining = None if budget is None else max(
@@ -606,7 +615,38 @@ class CoscientistTaskRunner:
             timed_out = await self._monitor(coordinator, goal, job_id, remaining)
             tokens = driver.total_tokens if coordinator is None else result.total_tokens
 
-        return self._harvest(task, job_id, verdict, turns, tokens, timed_out)
+        return await self._harvest_or_release(
+            task, job_id, verdict, turns, tokens, timed_out
+        )
+
+    async def _harvest_or_release(
+        self,
+        task: dict[str, Any],
+        job_id: str,
+        verdict: str,
+        turns: int,
+        tokens: int,
+        timed_out: bool,
+    ) -> TaskOutcome:
+        """Read the result, and release the job if there is no result to read.
+
+        Once the task is failing nothing waits on its job, but it still holds
+        a GPU and one of the runner's concurrency slots -- which is how two
+        abandoned jobs came to block every later task in a campaign with
+        "Maximum concurrent jobs (2) already active".
+        """
+
+        try:
+            return self._harvest(task, job_id, verdict, turns, tokens, timed_out)
+        except Exception:
+            logger.warning(
+                "task %s failed; stopping its job %s", task["task_id"], job_id
+            )
+            # The task's own failure is the useful one to report, so a stop
+            # that also fails must not replace it.
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self._stop_job, job_id)
+            raise
 
     async def _monitor(
         self,
@@ -650,19 +690,58 @@ class CoscientistTaskRunner:
         state instead; the task deadline above is what bounds the wait.
         """
 
+        from reinvent4_mcp.jobs.manager import ACTIVE_JOB_STATES
         from reinvent4_mcp.tools.results import get_optimization_status
+
+        # A job owes a result while it is queued *or* running. Waiting only on
+        # "running" exits on the first poll, because a job is queued for the
+        # moment before it starts -- which harvested a 0-byte CSV and failed
+        # the task while its job carried on folding molecules.
+        unfinished = {state.value for state in ACTIVE_JOB_STATES}
 
         while True:
             status = await asyncio.to_thread(get_optimization_status, job_id)
+
+            # Drive off `state`, which is the authoritative field. Testing for
+            # an "error" *key* does not work: a job's to_dict() always carries
+            # one, set to None when nothing is wrong, so that test is true for
+            # every job and returned on the first poll -- harvesting a 0-byte
+            # CSV while the job was happily folding molecules.
             state = status.get("state")
-            if state and state != "running":
+            if not state:
+                logger.warning(
+                    "job %s cannot be described (%s); not waiting on it",
+                    job_id, status.get("error") or "no state reported",
+                )
+                return
+            if state not in unfinished:
                 logger.info("job %s finished as %s", job_id, state)
                 return
-            if "error" in status:
-                # A job the runner cannot describe is not one we can wait on.
-                logger.warning("job %s: %s", job_id, status["error"])
-                return
             await asyncio.sleep(self.args.monitor_interval)
+
+    @staticmethod
+    def _start_job(ttp_id: str, max_steps: Optional[int]) -> str:
+        """Start the task's run without the agent. Returns the job id."""
+
+        from reinvent4_mcp.tools.optimization import run_optimization
+
+        kwargs: dict[str, Any] = {"ttp_id": ttp_id}
+        if max_steps:
+            kwargs["max_steps"] = max_steps
+
+        result = run_optimization(**kwargs)
+        if "error" in result and result["error"]:
+            raise RuntimeError(
+                f"could not start a run for TTP '{ttp_id}': {result['error']}"
+            )
+        job_id = result.get("job_id")
+        if not job_id:
+            raise RuntimeError(
+                f"starting a run for TTP '{ttp_id}' returned no job id: {result}"
+            )
+
+        logger.info("started job %s for TTP %s directly", job_id, ttp_id)
+        return job_id
 
     @staticmethod
     def _stop_job(job_id: str) -> None:

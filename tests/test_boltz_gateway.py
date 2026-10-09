@@ -20,6 +20,8 @@ is needed. The cache is pointed at a tmp_path.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib.util
 import sys
 import threading
@@ -154,6 +156,96 @@ def _poll(client: TestClient, task_id: str, timeout: float = 15.0):
 # ---------------------------------------------------------------------------
 # TestCacheKeying
 # ---------------------------------------------------------------------------
+
+
+class TestReplicaParallelism:
+    """Batches for one key must occupy every replica, not queue behind each other.
+
+    There is one dispatch loop per coalescing key, and a fleet sweep puts
+    every supervisor on the same target with the same predict params -- so
+    all of its traffic shares one key. Awaiting each upstream call inside the
+    loop served those batches strictly one at a time and left every replica
+    but one idle, whatever the semaphore allowed. Measured live as
+    upstream_p50 393 s against request_p50 752 s, with 16 molecules in flight
+    and 16 waiting on two healthy replicas.
+    """
+
+    @staticmethod
+    def _concurrency_probe(limit: int):
+        """An upstream that reports the most calls it ever saw at once."""
+
+        state = {"now": 0, "peak": 0}
+        started = asyncio.Event()
+
+        async def _call(key, params, batch):
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+            if state["now"] >= limit:
+                started.set()
+            try:
+                # Long enough that a serialising loop cannot overlap by luck.
+                await asyncio.sleep(0.2)
+            finally:
+                state["now"] -= 1
+
+        return _call, state, started
+
+    def _peak_concurrency(self, monkeypatch, batches: int, replicas: int) -> int:
+        """Most batches ever upstream at once, given `batches` waiting."""
+
+        batcher = gateway.Batcher()
+        run, state, _ = self._concurrency_probe(replicas)
+        monkeypatch.setattr(batcher, "_run_batch", run)
+
+        async def scenario():
+            # One semaphore for the whole run. Production caches it in
+            # `_slots`; handing back a new one per call would bound nothing.
+            slots = asyncio.Semaphore(replicas)
+            monkeypatch.setattr(batcher, "_semaphore", lambda: slots)
+
+            params = gateway.ScoreParams(protein_sequence="MVL")
+            key = gateway.coalesce_key(params)
+            async with batcher._lock:
+                batcher._params[key] = params
+                batcher._pending[key] = [
+                    gateway.Waiter(
+                        digest=f"d{i}",
+                        canonical=f"C{i}",
+                        future=asyncio.get_running_loop().create_future(),
+                    )
+                    for i in range(gateway.COALESCE_MAX_MOLECULES * batches)
+                ]
+                batcher._first_enqueued[key] = 0.0
+
+            loop = asyncio.create_task(batcher._dispatch_loop(key))
+            await asyncio.sleep(0.1)
+            loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop
+            # Let the spawned calls finish so nothing is left pending.
+            await asyncio.gather(*batcher._running, return_exceptions=True)
+
+        asyncio.run(scenario())
+        return state["peak"]
+
+    def test_two_batches_for_one_key_run_at_once(self, monkeypatch):
+        peak = self._peak_concurrency(monkeypatch, batches=2, replicas=2)
+
+        assert peak == 2, (
+            f"only {peak} batch(es) ran at once; the second replica was idle"
+        )
+
+    def test_concurrency_is_still_capped_by_the_replica_count(self, monkeypatch):
+        """More waiting batches than replicas must not oversubscribe the GPUs."""
+        peak = self._peak_concurrency(monkeypatch, batches=5, replicas=2)
+
+        assert peak <= 2, f"{peak} batches ran at once against 2 replicas"
+
+    def test_one_replica_still_means_one_call(self, monkeypatch):
+        """The bound is the replica count, not a fixed number."""
+        peak = self._peak_concurrency(monkeypatch, batches=4, replicas=1)
+
+        assert peak == 1, f"{peak} batches ran at once against 1 replica"
 
 
 class TestCacheKeying:

@@ -12,6 +12,12 @@ from typing import Any, Optional
 
 import numpy as np
 
+from reinvent4_mcp.jobs.manager import (
+    NON_COMPONENT_COLUMNS,
+    read_results_csv,
+    score_column,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,7 +130,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
     try:
         import pandas as pd
 
-        df = pd.read_csv(path)
+        df = read_results_csv(path)
     except Exception as exc:
         return {"error": f"Failed to read CSV: {exc}"}
 
@@ -138,7 +144,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
     }
 
     smiles_col = "SMILES" if "SMILES" in df.columns else None
-    total_col = "total_score" if "total_score" in df.columns else None
+    total_col = score_column(df.columns)
 
     if smiles_col:
         n_unique = df[smiles_col].nunique()
@@ -167,7 +173,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
 
     score_cols = [
         c for c in df.columns
-        if c not in ("SMILES", "SMILES_state", "Step", "step", "batch", "total_score")
+        if c not in NON_COMPONENT_COLUMNS
         and "(raw)" not in c
         and df[c].dtype in ("float64", "float32")
     ]
@@ -220,7 +226,7 @@ def _parse_csv_candidates(
     try:
         import pandas as pd
 
-        df = pd.read_csv(path)
+        df = read_results_csv(path)
     except Exception as exc:
         return {"error": f"Failed to read CSV: {exc}"}
 
@@ -228,7 +234,7 @@ def _parse_csv_candidates(
         return {"candidates": [], "n_total": 0}
 
     smiles_col = "SMILES" if "SMILES" in df.columns else None
-    total_col = "total_score" if "total_score" in df.columns else None
+    total_col = score_column(df.columns)
 
     if smiles_col is None:
         return {"error": "CSV has no SMILES column"}

@@ -105,6 +105,30 @@ def rl_jobs(status):
         )
 
 
+def failures(campaign_id):
+    """Why the failed and abandoned tasks failed.
+
+    The task counts say *that* something failed, which on its own sends you
+    off to read pod logs. The reason is already in the ledger, and most of
+    these never reach a pod log at all -- a task that names an objective the
+    TTP does not have fails before any job starts.
+    """
+
+    dead = [
+        t for t in store.tasks(campaign_id)
+        if t["state"] in ("failed", "abandoned")
+    ]
+    if not dead:
+        return
+
+    print(f"  failures ({len(dead)}):")
+    for task in dead:
+        weights = (task["spec"] or {}).get("weight_overrides") or {}
+        print(f"    {task['task_id']}  {task['state']}  "
+              f"after {task['attempts']} attempt(s)  {weights}")
+        print(f"      {(task['error'] or 'no reason recorded')[:160]}")
+
+
 store = CampaignStoreClient()
 wanted = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
 
@@ -127,6 +151,7 @@ else:
         if status["in_flight"]:
             print("  RL jobs:")
             rl_jobs(status)
+        failures(campaign_id)
         print()
 PY
 }

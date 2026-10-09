@@ -8,6 +8,7 @@ a results CSV -- is testable with no LLM, no MCP server and no GPU.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -728,6 +729,198 @@ class TestSingleAgentMode:
             asyncio.run(self._runner()._watch_job("job-1"))
 
         assert states == [], "it should have polled until the job finished"
+
+    def test_a_queued_job_is_not_mistaken_for_a_finished_one(self):
+        """A job is queued for a moment before it runs.
+
+        Waiting only on "running" exited on the first poll, so the task
+        harvested a 0-byte results CSV, failed with "No columns to parse from
+        file", and left its job folding molecules as an orphan.
+        """
+        states = ["queued", "queued", "running", "completed"]
+
+        with patch(
+            "reinvent4_mcp.tools.results.get_optimization_status",
+            side_effect=lambda job_id: {"state": states.pop(0)},
+        ):
+            asyncio.run(self._runner()._watch_job("job-1"))
+
+        assert states == [], "queued and running both mean the job owes a result"
+
+    def test_the_wait_tracks_the_managers_own_active_states(self):
+        """So a new job state cannot silently become 'finished' here."""
+        from reinvent4_mcp.jobs.manager import ACTIVE_JOB_STATES
+
+        assert {s.value for s in ACTIVE_JOB_STATES} == {"queued", "running"}
+
+    def test_a_healthy_job_carries_a_null_error_and_is_still_waited_on(self):
+        """The real status dict always has an "error" key, set to None.
+
+        Testing for the key rather than its value was true for every job, so
+        the wait returned on the first poll and harvested a 0-byte CSV while
+        the job ran on. The earlier tests here passed a bare {"state": ...},
+        which is why they never caught it -- so this one uses the shape the
+        job manager actually produces.
+        """
+        states = ["running", "running", "completed"]
+
+        def _status(job_id):
+            return {
+                "job_id": job_id,
+                "state": states.pop(0),
+                "error": None,
+                "exit_code": None,
+                "trajectory": {"current_step": 1},
+            }
+
+        with patch(
+            "reinvent4_mcp.tools.results.get_optimization_status", side_effect=_status
+        ):
+            asyncio.run(self._runner()._watch_job("job-1"))
+
+        assert states == [], "a null error must not end the wait"
+
+    def test_a_status_with_no_state_is_not_waited_on(self):
+        """A job the runner cannot describe at all."""
+        with patch(
+            "reinvent4_mcp.tools.results.get_optimization_status",
+            return_value={"error": "No job job-1"},
+        ):
+            asyncio.run(self._runner()._watch_job("job-1"))
+
+
+class TestFailedTaskReleasesItsJob:
+    """A task that fails must not leave its RL job running.
+
+    Nothing waits on the job once the task is failing, but it still holds a
+    GPU and one of the runner's concurrency slots. Two abandoned jobs blocked
+    every later task in a campaign with "Maximum concurrent jobs (2) already
+    active".
+    """
+
+    @staticmethod
+    def _runner():
+        from reinvent4_agent.supervisor import CoscientistTaskRunner
+
+        return CoscientistTaskRunner(MagicMock(), MagicMock())
+
+    def _release(self, runner, harvest, stop):
+        return patch.object(
+            type(runner), "_harvest", staticmethod(harvest)
+        ), patch.object(type(runner), "_stop_job", staticmethod(stop))
+
+    def test_a_good_harvest_leaves_the_job_alone(self):
+        runner = self._runner()
+        outcome = TaskOutcome(objective_profile={"QED": 0.8})
+        stopped: list[str] = []
+
+        harvest, stop = self._release(
+            runner, lambda *a: outcome, lambda j: stopped.append(j)
+        )
+        with harvest, stop:
+            got = asyncio.run(
+                runner._harvest_or_release(_task(), "job-1", "ok", 1, 0, False)
+            )
+
+        assert got is outcome
+        assert stopped == []
+
+    def test_a_failed_harvest_stops_the_job(self):
+        runner = self._runner()
+        stopped: list[str] = []
+
+        def _no_results(*args):
+            raise RuntimeError("produced no readable results")
+
+        harvest, stop = self._release(runner, _no_results, lambda j: stopped.append(j))
+        with harvest, stop:
+            with pytest.raises(RuntimeError, match="no readable results"):
+                asyncio.run(
+                    runner._harvest_or_release(_task(), "job-1", "ok", 1, 0, False)
+                )
+
+        assert stopped == ["job-1"]
+
+    def test_a_stop_that_fails_does_not_mask_the_real_error(self):
+        """The task's own failure is the one worth reporting."""
+        runner = self._runner()
+
+        def _no_results(*args):
+            raise RuntimeError("produced no readable results")
+
+        def _unreachable(job_id):
+            raise RuntimeError("runner unreachable")
+
+        harvest, stop = self._release(runner, _no_results, _unreachable)
+        with harvest, stop:
+            with pytest.raises(RuntimeError, match="no readable results"):
+                asyncio.run(
+                    runner._harvest_or_release(_task(), "job-1", "ok", 1, 0, False)
+                )
+
+
+class TestStartingTheRunDirectly:
+    """What happens when the agent does not start the run itself.
+
+    With a Reviewer the Coordinator took several turns, so a Driver that got
+    distracted had more chances; a single pass gets one. Nothing about the
+    call is the agent's decision -- the TTP and step count both come from the
+    task -- so the supervisor starts it rather than asking again and hoping.
+    """
+
+    @staticmethod
+    def _runner():
+        from reinvent4_agent.supervisor import CoscientistTaskRunner
+
+        return CoscientistTaskRunner(MagicMock(), MagicMock())
+
+    def test_it_starts_the_run_from_the_task(self):
+        calls: list[dict[str, Any]] = []
+
+        def _run(**kwargs):
+            calls.append(kwargs)
+            return {"job_id": "job-9", "error": None}
+
+        with patch("reinvent4_mcp.tools.optimization.run_optimization", _run):
+            assert self._runner()._start_job("ttp-1", 5) == "job-9"
+
+        assert calls == [{"ttp_id": "ttp-1", "max_steps": 5}]
+
+    def test_no_step_budget_is_left_to_the_default(self):
+        calls: list[dict[str, Any]] = []
+
+        def _run(**kwargs):
+            calls.append(kwargs)
+            return {"job_id": "job-9"}
+
+        with patch("reinvent4_mcp.tools.optimization.run_optimization", _run):
+            self._runner()._start_job("ttp-1", None)
+
+        assert calls == [{"ttp_id": "ttp-1"}]
+
+    def test_a_refused_run_is_an_error(self):
+        """e.g. the concurrency cap, which names the jobs to stop."""
+        with patch(
+            "reinvent4_mcp.tools.optimization.run_optimization",
+            return_value={"error": "Maximum concurrent jobs (2) reached"},
+        ):
+            with pytest.raises(RuntimeError, match="Maximum concurrent jobs"):
+                self._runner()._start_job("ttp-1", 5)
+
+    def test_a_null_error_is_not_a_failure(self):
+        """Same trap as the status dict: the key is always there."""
+        with patch(
+            "reinvent4_mcp.tools.optimization.run_optimization",
+            return_value={"job_id": "job-9", "error": None},
+        ):
+            assert self._runner()._start_job("ttp-1", 5) == "job-9"
+
+    def test_a_response_without_a_job_id_is_an_error(self):
+        with patch(
+            "reinvent4_mcp.tools.optimization.run_optimization", return_value={}
+        ):
+            with pytest.raises(RuntimeError, match="no job id"):
+                self._runner()._start_job("ttp-1", 5)
 
     def test_a_failed_job_also_ends_the_wait(self):
         """Any terminal state, not just success -- otherwise it waits forever."""

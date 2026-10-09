@@ -47,6 +47,64 @@ class JobState(str, enum.Enum):
 # capacity check.
 ACTIVE_JOB_STATES = frozenset({JobState.QUEUED, JobState.RUNNING})
 
+# The aggregated score, by the names it can appear under. REINVENT writes
+# "Score"; "total_score" is kept first because older CSVs and the TL output
+# use it. Resolving only "total_score" meant the column was never found in an
+# RL results file, so "top" candidates came back as the first N rows of the
+# CSV -- the earliest and therefore worst molecules -- and the trajectory's
+# score statistics were silently never computed.
+SCORE_COLUMNS = ("total_score", "Score")
+
+# REINVENT's own bookkeeping columns, which are not scoring components.
+# Without excluding them, "Agent", "Prior" and "Target" are reported as
+# objectives alongside the real ones.
+NON_COMPONENT_COLUMNS = frozenset({
+    "SMILES", "SMILES_state", "Step", "step", "batch", "Scaffold",
+    "Agent", "Prior", "Target", *SCORE_COLUMNS,
+})
+
+
+def score_column(columns: Any) -> Optional[str]:
+    """The aggregated-score column present in `columns`, if any."""
+
+    return next((name for name in SCORE_COLUMNS if name in columns), None)
+
+
+def read_results_csv(path: Any) -> Any:
+    """Read a results CSV, tolerating rows wider than the header.
+
+    REINVENT writes the header once and appends rows, so a scorer that reports
+    more metadata keys on a later batch produces rows the header cannot
+    describe and pandas refuses the whole file -- "Expected 24 fields in line
+    18, saw 26". Losing a finished run's results to that is far worse than
+    losing the surplus fields, which are per-molecule diagnostics rather than
+    scores.
+
+    The schema is held steady at the source as well (see the external scorer's
+    metadata handling); this is what rescues files written before that.
+    """
+
+    # Imported here, as everywhere else in this module: pandas is a heavy
+    # import and the agent process does not need it to manage jobs.
+    import pandas as pd
+
+    try:
+        return pd.read_csv(path)
+    except pd.errors.ParserError as exc:
+        logger.warning(
+            "results CSV %s has rows wider than its header (%s); "
+            "skipping those rows -- the steps they belong to will be missing",
+            path, exc,
+        )
+
+    # The surplus fields are *inserted*, not appended: the metadata block grows
+    # and `step` stays last, so in a wide row `step` sits beyond the header
+    # width. Truncating to that width would therefore read None as the step and
+    # shift every metadata value -- complete but wrong. Dropping the rows loses
+    # the later steps, which is a real cost since those hold the better
+    # molecules, but everything that survives is accurate.
+    return pd.read_csv(path, on_bad_lines="skip", engine="python")
+
 
 class JobType(str, enum.Enum):
     OPTIMIZATION = "optimization"
@@ -789,7 +847,7 @@ class JobManager:
         try:
             import pandas as pd
 
-            df = pd.read_csv(csv_path)
+            df = read_results_csv(csv_path)
         except Exception as exc:
             logger.warning("Failed to parse CSV for job %s: %s", job.job_id, exc)
             return None
@@ -797,7 +855,7 @@ class JobManager:
         if df.empty:
             return {"current_step": 0, "n_molecules_total": 0}
 
-        total_col = "total_score" if "total_score" in df.columns else None
+        total_col = score_column(df.columns)
 
         step_col = None
         for candidate in ("Step", "step", "batch"):
@@ -867,7 +925,7 @@ class JobManager:
         try:
             import pandas as pd
 
-            df = pd.read_csv(csv_path)
+            df = read_results_csv(csv_path)
         except Exception as exc:
             return {"error": f"Failed to read results CSV: {exc}"}
 
@@ -875,7 +933,7 @@ class JobManager:
             return {"candidates": [], "n_total": 0}
 
         smiles_col = "SMILES" if "SMILES" in df.columns else None
-        total_col = "total_score" if "total_score" in df.columns else None
+        total_col = score_column(df.columns)
 
         if smiles_col is None:
             return {"error": "CSV has no SMILES column"}
@@ -894,7 +952,7 @@ class JobManager:
 
         score_columns = [
             c for c in df.columns
-            if c not in (smiles_col, "SMILES_state", "Step", "step", "batch")
+            if c not in NON_COMPONENT_COLUMNS
             and df[c].dtype in ("float64", "float32", "int64", "int32")
         ]
 
@@ -1106,7 +1164,7 @@ def _per_component_stats(df: Any) -> dict[str, dict[str, Any]]:
     """Compute per-component summary statistics from the CSV."""
     stats: dict[str, dict[str, Any]] = {}
 
-    skip_cols = {"SMILES", "SMILES_state", "Step", "step", "batch", "total_score"}
+    skip_cols = NON_COMPONENT_COLUMNS
     for col in df.columns:
         if col in skip_cols or "(raw)" in col:
             continue
@@ -1189,7 +1247,7 @@ def _per_component_trajectory(
     if step_col is None or step_col not in df.columns:
         return None
 
-    skip_cols = {"SMILES", "SMILES_state", "Step", "step", "batch", "total_score"}
+    skip_cols = NON_COMPONENT_COLUMNS
     comp_cols = [
         c for c in df.columns
         if c not in skip_cols and "(raw)" not in c
@@ -1381,7 +1439,7 @@ def _component_health(df: Any) -> dict[str, dict[str, Any]]:
     as 'failing' or 'degraded'.
     """
 
-    skip_cols = {"SMILES", "SMILES_state", "Step", "step", "batch", "total_score"}
+    skip_cols = NON_COMPONENT_COLUMNS
     health: dict[str, dict[str, Any]] = {}
 
     for col in df.columns:
