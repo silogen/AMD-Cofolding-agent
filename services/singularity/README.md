@@ -129,23 +129,23 @@ loopback). Compare:
 # Apptainer: container -> 127.0.0.1:PORT (ssh -R) -> laptop -> gateway      (no relay)
 ```
 
-Workflow (see `../../TENSORWAVE_INSTRUCTIONS.md` for the full Docker version):
+Workflow (see `../../LLM_GATEWAY_TUNNEL.md` for the full Docker version):
 
 1. Open the reverse tunnel to the **compute node that runs Apptainer** (loopback
    is per-host, so it must be the same node — same caveat as Docker):
    ```bash
-   ssh -R 127.0.0.1:9579:llm-api.amd.com:443 <node>
+   ssh -R 127.0.0.1:9579:<gateway-host>:443 <node>
    ```
 2. Point the agent at the tunnel port and keep TLS verification on (the hostname
    matches the real cert; connecting by IP/`localhost` would fail cert checks):
    ```bash
    export LLM_GATEWAY_KEY=...
-   export REINVENT4_AGENT_BASE_URL="https://llm-api.amd.com:9579/Anthropic"
+   export REINVENT4_AGENT_BASE_URL="https://<gateway-host>:9579/Anthropic"
    export REINVENT4_AGENT_NO_VERIFY_SSL="false"
    ```
    (These live in `env.local.sh`; sourcing it is enough.)
 3. Run with `--gateway-loopback` so `run.sh` binds a `/etc/hosts` mapping
-   `llm-api.amd.com -> 127.0.0.1` into the agent (replacing Compose's
+   `<gateway-host> -> 127.0.0.1` into the agent (replacing Compose's
    `extra_hosts`), letting the hostname resolve to the loopback tunnel:
    ```bash
    bash services/singularity/run.sh --vendor amd --gateway-loopback

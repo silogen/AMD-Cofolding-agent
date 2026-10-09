@@ -1,10 +1,11 @@
 """OpenAI Chat Completions API backend.
 
-Uses the ``openai`` SDK against any OpenAI-compatible endpoint: the AMD
-LLM gateway, OpenAI itself, vLLM, Ollama, LiteLLM, and so on.
+Uses the ``openai`` SDK against any OpenAI-compatible endpoint: a
+private LLM gateway, OpenAI itself, vLLM, Ollama, LiteLLM, and so on.
 
-The gateway publishes OpenAI models as Azure deployments, so a gateway
-key — like an ``*.openai.azure.com`` host — selects ``AzureOpenAI``: an
+A gateway that publishes OpenAI models as Azure deployments is addressed
+accordingly, so a gateway key — like an ``*.openai.azure.com`` host —
+selects ``AzureOpenAI``: an
 ``api-version`` query parameter and a per-deployment base URL of
 ``<root>/openai/deployments/<model>``.  Every other endpoint uses the
 plain ``openai.OpenAI`` client with the base URL as given, as does a URL
@@ -43,7 +44,7 @@ DEFAULT_API_VERSION = "2024-12-01-preview"
 
 #: Reasoning models: they reject ``max_tokens``, and the cap they do take
 #: covers hidden reasoning as well as the reply.  Matched on the model or
-#: deployment id, which is often prefixed (``amd-gpt-5``) or versioned
+#: deployment id, which is often prefixed (``my-gpt-5``) or versioned
 #: (``GPT-5.4``, ``o3-mini``).
 _REASONING_MODEL_RE = re.compile(
     r"(?:^|[-._/])(gpt-?5|o[1345])(?:[-._]|$)",
@@ -75,13 +76,13 @@ class OpenAIBackend(LLMBackend):
         Model name, or the deployment id on an Azure-style endpoint
         (e.g. ``gpt-5-mini``, ``GPT-4.1-mini``, ``o1``).
     base_url:
-        API endpoint.  On the gateway this is the root
-        (``https://llm-api.amd.com``), since the deployment path is
-        appended.  ``None`` → default ``api.openai.com``.
+        API endpoint.  On a gateway this is the root
+        (``https://llm-gateway.example.com``), since the deployment path
+        is appended.  ``None`` → default ``api.openai.com``.
     api_key:
         API key / bearer token.  Falls back to ``gateway_key``.
     gateway_key:
-        AMD gateway subscription key.  The gateway authenticates on the
+        Gateway subscription key.  The gateway authenticates on the
         ``Ocp-Apim-Subscription-Key`` header; it is also passed as the
         bearer token because the SDK requires a key.
     api_version:
@@ -142,7 +143,7 @@ class OpenAIBackend(LLMBackend):
             if not base_url:
                 raise ValueError(
                     "An Azure-style endpoint (api_version) requires a base "
-                    "URL, e.g. https://llm-api.amd.com — set "
+                    "URL, e.g. https://llm-gateway.example.com — set "
                     "REINVENT4_AGENT_BASE_URL or --base-url."
                 )
             # The Azure samples authenticate purely through the gateway
@@ -359,8 +360,8 @@ class OpenAIBackend(LLMBackend):
                     self._endpoint_label(),
                     verify_ssl=self._verify_ssl,
                     hints=[
-                        "On the AMD gateway, OpenAI models live under "
-                        "/openai/v1; older Azure deployments need "
+                        "A gateway typically serves OpenAI models under "
+                        "/openai/v1; Azure deployments need "
                         "--api-version instead.",
                         "If the endpoint uses a private CA, retry with "
                         "--no-verify-ssl.",
@@ -374,9 +375,10 @@ class OpenAIBackend(LLMBackend):
                     self._endpoint_label(),
                     hints=[
                         "Check LLM_GATEWAY_KEY / REINVENT4_AGENT_API_KEY.",
-                        "The AMD gateway requires the 'user' header to be "
-                        "your NTID for service-application keys; it is "
-                        f"currently sent as '{_get_username()}'.",
+                        "A gateway may require the 'user' header to be "
+                        "your own account id for service-application "
+                        f"keys; it is currently sent as "
+                        f"'{_get_username()}'.",
                     ],
                 )
             ) from exc
@@ -517,9 +519,9 @@ def _use_azure_route(
     """Whether to address the endpoint as Azure deployments.
 
     An explicit ``api_version`` always selects it.  Otherwise it is
-    implied by a gateway key (the AMD gateway publishes OpenAI models as
-    deployments) or by an Azure OpenAI hostname — unless the URL names
-    the OpenAI-compatible route, which wins.
+    implied by a gateway key (a gateway fronting Azure publishes OpenAI
+    models as deployments) or by an Azure OpenAI hostname — unless the
+    URL names the OpenAI-compatible route, which wins.
     """
     if api_version:
         return True

@@ -1,13 +1,14 @@
-# Overlay for nodes that cannot reach the AMD LLM gateway directly and go
-# through the SSH reverse tunnel described in TENSORWAVE_INSTRUCTIONS.md.
+# Overlay for nodes that cannot reach the LLM gateway directly and go
+# through the SSH reverse tunnel described in LLM_GATEWAY_TUNNEL.md.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml \
+#   LLM_GATEWAY_HOST=<gateway-host> docker compose \
+#       -f docker-compose.yml -f docker-compose.tunnel.yml \
 #       run --rm reinvent4-mcp
 #
 # It points the gateway hostname at the Docker host, where the relay is
 # listening, so TLS still validates against the real certificate. The
 # tunnel port belongs in the URL, e.g.
-#   REINVENT4_AGENT_BASE_URL=https://llm-api.amd.com:9579/Anthropic
+#   REINVENT4_AGENT_BASE_URL=https://<gateway-host>:9579/Anthropic
 #
 # Do NOT apply this overlay when the node reaches the gateway directly:
 # the hostname would resolve to the Docker host, where nothing serves
@@ -15,4 +16,4 @@
 services:
   reinvent4-mcp:
     extra_hosts:
-      - "llm-api.amd.com:host-gateway"
+      - "${LLM_GATEWAY_HOST:?set LLM_GATEWAY_HOST to the gateway hostname}:host-gateway"

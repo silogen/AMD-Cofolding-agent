@@ -200,8 +200,13 @@ fi
 # the gateway hostname at 127.0.0.1 via a bound /etc/hosts (for tunnels that
 # terminate on the loopback and can't rely on public DNS).
 GATEWAY_BIND=()
-BASE_URL="${REINVENT4_AGENT_BASE_URL:-https://llm-api.amd.com/Anthropic}"
+BASE_URL="${REINVENT4_AGENT_BASE_URL:-}"
 if [ "${GATEWAY_LOOPBACK}" -eq 1 ]; then
+    if [ -z "${BASE_URL}" ]; then
+        echo "error: --gateway-loopback needs REINVENT4_AGENT_BASE_URL set" \
+             "to the gateway URL (source services/env.local.sh first)" >&2
+        exit 1
+    fi
     gw_host="$(echo "${BASE_URL}" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
     hosts_file="$(mktemp)"
     # Preserve baseline localhost entries, then map the gateway to loopback.

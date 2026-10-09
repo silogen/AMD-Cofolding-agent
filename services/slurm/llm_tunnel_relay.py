@@ -4,9 +4,9 @@
 Bridges the docker network to an SSH RemoteForward that binds only to the
 host loopback (the default when sshd `GatewayPorts` cannot be changed).
 
-    container --(llm-api.amd.com:PORT via extra_hosts host-gateway)-->
+    container --(GATEWAY_HOST:PORT via extra_hosts host-gateway)-->
     host BRIDGE_IP:PORT (this relay) --> 127.0.0.1:PORT (ssh -R tunnel) -->
-    laptop --> llm-api.amd.com:443
+    laptop --> GATEWAY_HOST:443
 
 Usage:
     python3 services/slurm/llm_tunnel_relay.py            # defaults below

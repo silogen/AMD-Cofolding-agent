@@ -41,13 +41,14 @@ services:
       - ${DATA_DIR:-./data}/agent_logs:/logs
     environment:
       - LLM_GATEWAY_KEY=${LLM_GATEWAY_KEY:-}
-      # Used instead of LLM_GATEWAY_KEY for non-AMD endpoints (Azure, Anthropic).
+      # Used instead of LLM_GATEWAY_KEY for endpoints that take a plain
+      # API key rather than gateway headers (Azure, Anthropic, ...).
       - REINVENT4_AGENT_API_KEY=${REINVENT4_AGENT_API_KEY:-}
       - AMD_VISIBLE_DEVICES=${REINVENT_GPU}
       - HIP_VISIBLE_DEVICES=${REINVENT_GPU}
       - REINVENT4_AGENT_BACKEND=${REINVENT4_AGENT_BACKEND:-anthropic}
       - REINVENT4_AGENT_MODEL=${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}
-      - REINVENT4_AGENT_BASE_URL=${REINVENT4_AGENT_BASE_URL:-https://llm-api.amd.com/Anthropic}
+      - REINVENT4_AGENT_BASE_URL=${REINVENT4_AGENT_BASE_URL:-}
       # OpenAI backend only: an api-version (or LLM_GATEWAY_KEY) selects the
       # Azure deployments endpoint <base-url>/openai/deployments/<model>.
       - REINVENT4_AGENT_API_VERSION=${REINVENT4_AGENT_API_VERSION:-}
