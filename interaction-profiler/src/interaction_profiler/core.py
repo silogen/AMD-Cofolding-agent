@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Public API: :func:`profile_batch`, :func:`profile_molecule`, :func:`to_table`.
 
 Pipeline per molecule:

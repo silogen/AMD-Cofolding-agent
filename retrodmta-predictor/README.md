@@ -32,7 +32,7 @@ Single FastAPI app in [../services/retrodmta-predictor/app.py](../services/retro
 
 ## Install
 
-Model weights are **not** in git. First restore the central model dir from the SharePoint zip
+Model weights are **not** in git. First restore the central model dir from the model weights archive
 (so `dd_agentic/models/retrodmta/` exists), then build (models baked in from `dd_agentic/models/retrodmta`):
 
 ```bash
@@ -47,7 +47,7 @@ docker build -f services/retrodmta-predictor/Dockerfile -t retrodmta-predictor:l
 # from dd_agentic/
 pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 pip install ./retrodmta-predictor
-export MODELS_DIR=$PWD/models/retrodmta   # central model dir (restore from SharePoint zip)
+export MODELS_DIR=$PWD/models/retrodmta   # central model dir (restore from the weights archive)
 ```
 </details>
 

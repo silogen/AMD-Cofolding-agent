@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Preparation: clean ligand + receptor protonation, pH-aware, stereo-checked."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Shared test fixtures / import shims.
 
 The custom REINVENT4 scoring components live in a PEP-420 namespace-package

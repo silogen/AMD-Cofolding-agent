@@ -69,11 +69,10 @@ python scripts/service_benchmark.py --batch examples/example_batch.json \
 The image bases on `micromamba` and pulls the scientific stack
 (RDKit / OpenMM / MDAnalysis) from conda-forge.
 
-> **Cluster note:** do not build images on the head node (`tw-head`). On the
-> Tensorwave cluster, run the build through the SLURM allocation wrapper so it
-> lands on the reserved node:
+> **Cluster note:** do not build images on the head/login node. Submit the
+> build through Slurm so it lands on an allocated compute node, e.g.:
 > ```bash
-> ~/.cursor/skills/slurm-allocation/scripts/run-on-allocation.sh \
+> srun --partition=<partition> --cpus-per-task=8 --mem=32G --time=1:00:00 \
 >   docker build -t interaction-profiler:latest .
 > ```
 
@@ -271,6 +270,6 @@ triples = result["triples"]   # (fragment, residue, interaction) rows
   PDBFixer/OpenMM prep; every later ligand against that target is fast
   (~0.1 s). The cache lives outside `/shared`, so the artifact volume can be
   mounted read-only and concurrent workers won't collide.
-- Benchmark (60 crystal complexes, warm cache, tw046 / 1 GPU / 8 CPU):
+- Benchmark (60 crystal complexes, warm cache, 1 GPU / 8 CPU compute node):
   ~471 complexes/min single-worker serial; ~934/min at 4 workers with 8-way
   client concurrency (1.93×). See `scripts/service_benchmark.py`.

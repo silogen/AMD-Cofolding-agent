@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """interaction-profiler (v2): batch medchem taxonomy + structure interaction profiling.
 
 Given a batch of molecules (SMILES and/or structures), emit per molecule:

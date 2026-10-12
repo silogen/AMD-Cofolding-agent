@@ -135,11 +135,9 @@ dd_agentic/
 │   └── slurm/
 │       ├── run_interactive.sh      # Agent-only interactive Docker run
 │       ├── agent.sbatch            # Batch job submission
-│       ├── setup.sh                # Bare-metal venv install (no containers)
-│       └── llm_tunnel_relay.py     # Docker bridge -> host loopback relay for the SSH tunnel
+│       └── setup.sh                # Bare-metal venv install (no containers)
 ├── docker-compose.yml              # 6-service compose stack
 ├── reinvent4_mcp_config.yaml       # Process config (service URLs, RL defaults, storage paths)
-├── TENSORWAVE_INSTRUCTIONS.md      # SSH-tunnel recipe for reaching the AMD LLM gateway
 ├── TESTING.md                      # Manual and scripted test scenarios
 ├── tests/                          # ~316 unit tests (REINVENT4 imports mocked, no GPU needed)
 │   ├── test_scoring.py             # Native + TTP scoring paths
@@ -155,7 +153,7 @@ dd_agentic/
 ├── REINVENT4/                      # REINVENT4 source tree
 ├── boltz2/                         # Boltz2 source
 ├── posebusters/                    # PoseBusters source
-├── models/                         # ADMET + RetroDMTA weights (from the SharePoint zip)
+├── models/                         # ADMET + RetroDMTA weights (from the model weights archive)
 ├── data/                           # Runtime state bind-mounted into the containers
 │                                   #   shared/ ttps/ jobs/ logs/ tb_logs/ agent_logs/
 └── services/env.local.sh           # Your keys and cluster-specific overrides
@@ -168,14 +166,14 @@ dd_agentic/
 `REINVENT4/`, `boltz2/`, `posebusters/`, and `models/` are gitignored because they are large external artifacts. From the project root:
 
 ```bash
-cd refm-core-private/examples/dd_agentic
+cd dd_agentic
 
 git clone https://github.com/MolecularAI/REINVENT4.git   # native scoring + RL
 git clone https://github.com/jwohlwend/boltz.git boltz2   # cofolding + affinity
 git clone https://github.com/maabuu/posebusters.git       # pose validation
 ```
 
-The ADMET and RetroDMTA services need trained model weights, distributed as a SharePoint zip rather than in git. Unzip it so that `models/admet/` and `models/retrodmta/` exist — the Dockerfiles bake them into the images at build time:
+The ADMET and RetroDMTA services need trained model weights, distributed as a separate archive rather than in git. Unzip it so that `models/admet/` and `models/retrodmta/` exist — the Dockerfiles bake them into the images at build time:
 
 ```bash
 unzip dd_agentic_models.zip          # provides ./models/
@@ -214,27 +212,27 @@ cp services/env.sh services/env.local.sh
 
 You must provide **exactly one** of two credentials, depending on which endpoint you use.
 
-**AMD LLM Gateway** — set `LLM_GATEWAY_KEY`. It is sent as the `Ocp-Apim-Subscription-Key` header, together with the `user` and `anthropic-version` headers the gateway requires:
+**An API-management LLM gateway** — set `LLM_GATEWAY_KEY`. It is sent as the `Ocp-Apim-Subscription-Key` header, together with the `user` and `anthropic-version` headers such gateways typically require:
 
 ```bash
 export LLM_GATEWAY_KEY="your-gateway-subscription-key"
 export REINVENT4_AGENT_BACKEND="anthropic"
 export REINVENT4_AGENT_MODEL="claude-sonnet-4.6"
-export REINVENT4_AGENT_BASE_URL="https://llm-api.amd.com/Anthropic"
+export REINVENT4_AGENT_BASE_URL="https://<your-gateway-host>/Anthropic"
 ```
 
-The gateway publishes OpenAI models as **Azure deployments**, so point the base URL at the gateway root and use the deployment id as the model name. The backend appends `/openai/deployments/<model>` and sends `api-version=2024-12-01-preview` by default. Authentication uses the same `Ocp-Apim-Subscription-Key` and `user` headers as the Anthropic route:
+When the gateway publishes OpenAI models as **Azure deployments**, point the base URL at the gateway root and use the deployment id as the model name. The backend appends `/openai/deployments/<model>` and sends `api-version=2024-12-01-preview` by default. Authentication uses the same `Ocp-Apim-Subscription-Key` and `user` headers as the Anthropic route:
 
 ```bash
 export LLM_GATEWAY_KEY="your-gateway-subscription-key"
 export REINVENT4_AGENT_BACKEND="openai"
 export REINVENT4_AGENT_MODEL="GPT-5.4"            # Azure deployment id
-export REINVENT4_AGENT_BASE_URL="https://llm-api.amd.com"
+export REINVENT4_AGENT_BASE_URL="https://<your-gateway-host>"
 ```
 
-Override `REINVENT4_AGENT_API_VERSION` if a deployment needs a newer version. If your gateway also exposes the plain OpenAI-compatible route, name it in the base URL (`https://llm-api.amd.com/openai/v1`) and the backend uses the standard client instead.
+Override `REINVENT4_AGENT_API_VERSION` if a deployment needs a newer version. If your gateway also exposes the plain OpenAI-compatible route, name it in the base URL (`https://<your-gateway-host>/openai/v1`) and the backend uses the standard client instead.
 
-**Any non-AMD endpoint (Azure OpenAI, Anthropic direct, or another OpenAI-compatible gateway)** — leave `LLM_GATEWAY_KEY` empty and set `REINVENT4_AGENT_API_KEY` instead. This is the plain bearer/API key for the endpoint and is passed straight to the SDK; no gateway headers are added:
+**Any endpoint without gateway headers (Azure OpenAI, Anthropic direct, or another OpenAI-compatible gateway)** — leave `LLM_GATEWAY_KEY` empty and set `REINVENT4_AGENT_API_KEY` instead. This is the plain bearer/API key for the endpoint and is passed straight to the SDK; no gateway headers are added:
 
 ```bash
 # Anthropic direct
@@ -285,7 +283,7 @@ export SLURM_PARTITION="batch"                    # your cluster partition
 
 > `env.local.sh` is gitignored, so secrets stay out of version control.
 
-If the compute node cannot reach the AMD gateway directly, see [TENSORWAVE_INSTRUCTIONS.md](TENSORWAVE_INSTRUCTIONS.md) for the SSH reverse-tunnel setup.
+The compute node must be able to reach the LLM endpoint directly.
 
 ---
 
@@ -337,11 +335,7 @@ docker compose run --rm reinvent4-mcp
 
 This starts the five scoring services, waits for all of their health checks to pass, and then drops you into the agent chat with an interactive terminal. When you exit the chat the scoring services keep running.
 
-The container reaches the LLM gateway directly by DNS. Only if the node cannot, add the tunnel overlay (see [TENSORWAVE_INSTRUCTIONS.md](TENSORWAVE_INSTRUCTIONS.md)), which redirects the gateway hostname to the SSH relay on the Docker host:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.tunnel.yml run --rm reinvent4-mcp
-```
+The container reaches the LLM endpoint directly by DNS on the Compose bridge network.
 
 ```bash
 docker compose down          # stop all containers
@@ -408,7 +402,6 @@ Key differences from Compose:
 | `depends_on` + health checks | `apptainer instance start` + `/health` polling in `run.sh` |
 | named volumes / mounts | `--bind` (all services share one `/shared`) |
 | `runtime: amd` | `--rocm` (AMD) or `--nv` (NVIDIA), selected by `--vendor` |
-| `docker-compose.tunnel.yml` LLM relay | host loopback is shared directly — no relay needed |
 
 ### Build
 
@@ -439,7 +432,6 @@ bash services/singularity/run.sh --vendor amd        # or --vendor nvidia
 | `--vendor <amd\|nvidia>` | Required. Selects `--rocm`/`--nv` and the `*-<vendor>.sif` images |
 | `--data-dir <path>` | Host dir to bind (default `./data`) |
 | `--reinvent-gpu` / `--boltz-gpu` | GPU indices (default `0` and `1`) |
-| `--gateway-loopback` | Map the gateway hostname to `127.0.0.1` for an SSH tunnel |
 | `--skip-agent` | Start and health-gate the services only |
 | `--dry-run` | Print the `apptainer` commands without running them |
 
@@ -458,7 +450,7 @@ The agent uses `services/singularity/reinvent4_mcp_config.singularity.yaml`, a c
 
 Since SIF images are read-only, `run.sh` binds writable host directories under `--data-dir` for `/shared`, the job/log/tb dirs, TTP storage, and `/logs`, creating them if missing.
 
-For the SSH-tunnel workflow and validation steps, see [services/singularity/README.md](services/singularity/README.md).
+For the full Apptainer guide and validation steps, see [services/singularity/README.md](services/singularity/README.md).
 
 ---
 
@@ -516,7 +508,7 @@ dd-agent [OPTIONS]
 | `--model` | `claude-sonnet-4` | Model name as the endpoint knows it |
 | `--base-url` | — | Base URL of the LLM endpoint (omit for the SDK default) |
 | `--api-key` | — | API key for a non-gateway endpoint |
-| `--gateway-key` | — | AMD LLM Gateway subscription key (`Ocp-Apim-Subscription-Key`) |
+| `--gateway-key` | — | LLM gateway subscription key (`Ocp-Apim-Subscription-Key`) |
 | `--api-version` | `2024-12-01-preview` on Azure routes | Azure `api-version` (OpenAI only). A gateway key or an `*.openai.azure.com` host selects the `<base-url>/openai/deployments/<model>` route; override only if a deployment needs a newer version |
 | `--no-verify-ssl` | `false` | Disable TLS certificate verification |
 | `--thinking-budget` | — | Extended-thinking token budget (Anthropic only; omit to disable) |
@@ -552,9 +544,9 @@ dd-agent [OPTIONS]
 dd-agent --no-multi-agent --backend openai --model gpt-4o \
          --base-url https://my-endpoint.example.com/v1
 
-# OpenAI model on the AMD gateway (Azure deployments route)
+# OpenAI model on a gateway (Azure deployments route)
 dd-agent --backend openai --model GPT-5.4 \
-         --base-url https://llm-api.amd.com \
+         --base-url https://<your-gateway-host> \
          --gateway-key "$LLM_GATEWAY_KEY" --no-verify-ssl
 
 # Anthropic with extended thinking and a larger response budget
@@ -988,8 +980,8 @@ All of these are set in `services/env.local.sh` and forwarded into the container
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_GATEWAY_KEY` | — | AMD LLM Gateway subscription key (`Ocp-Apim-Subscription-Key`) |
-| `REINVENT4_AGENT_API_KEY` | — | Direct API key for any non-AMD endpoint (Azure, Anthropic, …) |
+| `LLM_GATEWAY_KEY` | — | LLM gateway subscription key (`Ocp-Apim-Subscription-Key`) |
+| `REINVENT4_AGENT_API_KEY` | — | Direct API key for an endpoint without gateway headers (Azure, Anthropic, …) |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | — | SDK-standard fallbacks; not forwarded into containers |
 
 **LLM backend**
@@ -998,7 +990,7 @@ All of these are set in `services/env.local.sh` and forwarded into the container
 |----------|---------|-------------|
 | `REINVENT4_AGENT_BACKEND` | `anthropic` | `anthropic` or `openai` |
 | `REINVENT4_AGENT_MODEL` | `claude-sonnet-4.6` | Model name |
-| `REINVENT4_AGENT_BASE_URL` | `https://llm-api.amd.com/Anthropic` | LLM API base URL; use the gateway root `https://llm-api.amd.com` for the OpenAI backend |
+| `REINVENT4_AGENT_BASE_URL` | — (SDK default) | LLM API base URL, e.g. `https://<your-gateway-host>/Anthropic`; use the gateway root for the OpenAI backend |
 | `REINVENT4_AGENT_API_VERSION` | `2024-12-01-preview` on Azure routes | Azure `api-version` (OpenAI); override for deployments needing a newer one |
 | `REINVENT4_AGENT_NO_VERIFY_SSL` | `true` | Disable TLS verification |
 | `REINVENT4_AGENT_THINKING_BUDGET` | `1024` | Extended-thinking token budget (Anthropic) |

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Stereochemistry perception and validation for a prepared ligand."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Custom geometric interaction detection (v2).
 
 The v1 ProLIF backend is gone: ProLIF only reliably yielded

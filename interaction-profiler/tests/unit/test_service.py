@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Contract tests for the FastAPI service (SMILES-only paths, no OpenMM).
 
 Structure-based profiling is exercised by the integration tests and the

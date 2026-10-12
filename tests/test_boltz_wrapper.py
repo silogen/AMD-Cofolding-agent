@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for the Boltz2 FastAPI wrapper service.
 
 Covers:

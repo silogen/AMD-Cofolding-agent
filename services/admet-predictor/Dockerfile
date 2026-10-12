@@ -1,9 +1,12 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # admet-predictor REST service.
 #
 # Follows the services/<name>/ convention: this dir holds only the HTTP wrapper (app.py) +
 # this Dockerfile. The library lives in the sibling package dd_agentic/admet-predictor.
 # Model weights are NOT in git: they live centrally in dd_agentic/models/ (gitignored),
-# restored from the SharePoint zip, and baked in here from dd_agentic/models/admet.
+# restored from the model weights archive, and baked in here from dd_agentic/models/admet.
 #
 # Build with dd_agentic/ as the build context (package + wrapper + models must be present):
 #   docker build -f services/admet-predictor/Dockerfile -t admet-predictor:latest .

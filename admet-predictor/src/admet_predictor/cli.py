@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """CLI entry point for batch ADMET prediction (delegates to core.main)."""
 from admet_predictor.core import main
 

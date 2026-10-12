@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for geometry kernels (no heavy deps beyond numpy)."""
 
 from __future__ import annotations

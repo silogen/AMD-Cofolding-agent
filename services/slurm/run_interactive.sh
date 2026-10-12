@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # ──────────────────────────────────────────────────────────────────────
 # Run the agent interactively via Docker on a Slurm compute node.
 #

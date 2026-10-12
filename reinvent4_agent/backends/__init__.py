@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """LLM backend abstraction for the Drug Discovery Agent.
 
 Provides a common interface over Anthropic and OpenAI-compatible APIs
@@ -143,9 +146,8 @@ def connection_failure_report(
     all_hints = [
         "Confirm the base URL path matches the endpoint "
         "(REINVENT4_AGENT_BASE_URL).",
-        "If the gateway is reached through an SSH tunnel, the base URL "
-        "must carry the tunnel port (e.g. https://host:9579/...); see "
-        "TENSORWAVE_INSTRUCTIONS.md.",
+        "If the endpoint listens on a non-standard port, the base URL "
+        "must carry it (e.g. https://host:8443/...).",
         *hints,
     ]
     lines += ["", "  Check:"]
@@ -316,11 +318,12 @@ def create_backend(
     model:
         Model name as the endpoint knows it (e.g. ``claude-sonnet-4.6``).
     base_url:
-        Custom API endpoint (e.g. ``https://llm-api.amd.com/Anthropic``).
+        Custom API endpoint
+        (e.g. ``https://llm-gateway.example.com/Anthropic``).
     api_key:
         API key (or ``"dummy"`` when gateway auth is used).
     gateway_key:
-        Value for the ``Ocp-Apim-Subscription-Key`` header (AMD gateway).
+        Value for the ``Ocp-Apim-Subscription-Key`` header.
     api_version:
         Azure ``api-version`` (OpenAI only); selects the Azure-style
         deployments endpoint.

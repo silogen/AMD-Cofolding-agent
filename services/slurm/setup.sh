@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # ──────────────────────────────────────────────────────────────────────
 # One-time setup: create a virtualenv and install REINVENT4 (with ROCm
 # PyTorch) + dd-mcp + dd-agent.

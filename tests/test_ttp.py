@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for TTP schema, store, and mapper."""
 
 from __future__ import annotations
