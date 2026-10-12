@@ -987,22 +987,32 @@ def list_jobs() -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def list_shared_assets() -> str:
+def list_shared_assets(prefix: str = "", limit: int = 10) -> str:
     """List usable files on the shared volume (structures, MSAs, cofold outputs).
 
     Use this to GROUND any path before profiling or cofolding -- never guess or
     invent a file path. Returns categorized, /shared-relative paths:
-    - ``structures``: protein/complex PDB/mmCIF files (feed to
+    - ``structures``: hand-placed protein/complex PDB/mmCIF files (feed to
       ``profile_interactions`` structure_paths).
     - ``msas``: precomputed alignments (.a3m/.fasta/...) usable as a TTP
       target ``msa_path``.
-    - ``cofold_outputs``: structures produced by Boltz (under ``predictions/``).
+    - ``cofold_outputs``: structures produced by Boltz (under
+      ``predictions/``), newest first.
+
+    At most ``limit`` paths are named per category, because the volume holds
+    one cofold output per predicted molecule and naming thousands of them
+    overflows the context. ``counts`` is always the true total, and
+    ``not_listed`` says how many were withheld. Pass ``prefix`` to reach one
+    job's files (``predictions/out_035c34d9``) or raise ``limit``.
+
     Returns an empty (non-error) result when nothing is present.
     """
 
     from reinvent4_mcp.tools.external import list_shared_assets as _impl
 
-    return json.dumps(_impl(), indent=2, default=_json_default)
+    return json.dumps(
+        _impl(prefix=prefix or None, limit=limit), indent=2, default=_json_default
+    )
 
 
 # ---------------------------------------------------------------------------

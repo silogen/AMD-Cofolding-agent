@@ -220,6 +220,22 @@ class TestPodSplit:
         assert _gpus(deployments[RUNNER_DEPLOYMENT]) == 1
         assert _gpus(deployments[AGENT_DEPLOYMENT]) == 0
 
+    def test_the_readme_quotes_the_shipped_boltz_replica_count(self, deployments):
+        """M is written in prose in two places and silently goes stale.
+
+        The README's GPU budget is what a reader checks their node against
+        before applying, so a stale number there sends them to a Pending pod.
+        """
+        readme = (_ROOT / "k8s" / "README.md").read_text()
+        replicas = deployments[BOLTZ_DEPLOYMENT]["spec"]["replicas"]
+
+        claims = re.findall(
+            r"shipped `replicas: (\d+)` on `dd-agentic-boltz`", readme
+        ) + re.findall(r"`dd-agentic-boltz` replica \((\d+) by default\)", readme)
+
+        assert claims, "the README no longer states the Boltz replica count"
+        assert [int(c) for c in claims] == [replicas] * len(claims)
+
     def test_gpu_deployments_never_surge(self, deployments):
         for name, deployment in deployments.items():
             if not _gpus(deployment):
@@ -843,6 +859,137 @@ class TestConductor:
 
 
 # ---------------------------------------------------------------------------
+# TestAimTiers
+# ---------------------------------------------------------------------------
+
+
+class TestAimTiers:
+    """Two LLM endpoints, because the two roles want opposite things.
+
+    The conductor takes one turn with a person waiting on it (latency); the
+    supervisors are N agents grinding through tool calls with nobody watching
+    any single response (throughput). B10 was that the original single
+    AIMService is sized for one interactive session, which is the opposite of
+    what N supervisors do.
+    """
+
+    @pytest.fixture(scope="class")
+    def aim_services(self) -> dict[str, dict[str, Any]]:
+        return _by_kind("AIMService")
+
+    def test_there_are_two_tiers(self, aim_services):
+        assert set(aim_services) == {
+            "dd-agentic-aim-conductor", "dd-agentic-aim-supervisor",
+        }
+
+    def test_each_tier_has_a_stable_service(self, services):
+        # AIM Engine generates a KServe Service name; these select the same
+        # predictor pods so the agents have a repeatable base URL.
+        for tier in ("dd-agentic-aim-conductor", "dd-agentic-aim-supervisor"):
+            assert tier in services
+            assert services[tier]["spec"]["selector"][
+                "aim.eai.amd.com/service.name"
+            ] == tier
+
+    def test_the_conductor_tier_is_tuned_for_latency(self, aim_services):
+        profile = aim_services["dd-agentic-aim-conductor"]["spec"]["profile"]["name"]
+
+        assert "laten" in profile
+        assert "tp1" in profile, "an 8-GPU conductor model would starve Boltz"
+
+    def test_the_supervisor_tier_is_tuned_for_throughput(self, aim_services):
+        # The half of the split that matters: the shared endpoint they used to
+        # have was tuned for the opposite workload.
+        profile = aim_services["dd-agentic-aim-supervisor"]["spec"]["profile"]["name"]
+
+        assert "throu" in profile
+        assert "tp1" in profile
+
+    def test_both_tiers_fit_one_gpu_each(self, aim_services):
+        # What keeps the split affordable: §3.4 budgets 1 GPU per tier against
+        # 5 for Boltz, and Boltz is the measured bottleneck.
+        for name, svc in aim_services.items():
+            assert "tp1" in svc["spec"]["profile"]["name"], name
+            assert svc["spec"]["replicas"] >= 1, name
+
+    def test_the_conductor_dials_the_conductor_tier(self, deployments, mcp_config):
+        env = {
+            var["name"]: var
+            for var in _containers(deployments[CONDUCTOR_DEPLOYMENT])[0]["env"]
+        }
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]["data"]
+
+        assert env["REINVENT4_AGENT_BASE_URL"]["valueFrom"]["configMapKeyRef"][
+            "key"
+        ] == "CONDUCTOR_AGENT_BASE_URL"
+        assert configmap["CONDUCTOR_AGENT_BASE_URL"] == (
+            "http://dd-agentic-aim-conductor/v1"
+        )
+
+    def test_the_supervisors_dial_the_throughput_tier(self, deployments):
+        env = {
+            var["name"]: var
+            for var in _containers(deployments[SUPERVISOR_DEPLOYMENT])[0]["env"]
+        }
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]["data"]
+
+        assert env["REINVENT4_AGENT_BASE_URL"]["valueFrom"]["configMapKeyRef"][
+            "key"
+        ] == "REINVENT4_AGENT_BASE_URL"
+        assert configmap["REINVENT4_AGENT_BASE_URL"] == (
+            "http://dd-agentic-aim-supervisor/v1"
+        )
+
+    def test_the_two_tiers_are_not_the_same_endpoint(self):
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]["data"]
+
+        assert (
+            configmap["CONDUCTOR_AGENT_BASE_URL"]
+            != configmap["REINVENT4_AGENT_BASE_URL"]
+        ), "splitting the tiers is pointless if both dial one endpoint"
+
+    def test_nothing_still_dials_the_old_single_endpoint(self):
+        # The pre-split Service was `dd-agentic-aim`; a leftover reference
+        # would resolve to nothing now.
+        for path in _manifest_files():
+            body = path.read_text()
+            assert "http://dd-agentic-aim/v1" not in body, path
+
+    def test_the_conductor_gets_the_models_whole_context(self, aim_services):
+        """32768 was the profile's choice; the weights go to 131072.
+
+        vLLM derives ``max_tokens`` as max-model-len minus the prompt, so the
+        profile default turned a front-plus-molecules question into
+        "max_tokens must be at least 1, got -72257".
+        """
+        overrides = aim_services["dd-agentic-aim-conductor"]["spec"][
+            "profileOverrides"
+        ]["engineArgs"]
+
+        assert overrides["max-model-len"] == 131072
+
+    def test_the_conductor_needs_no_rope_scaling_to_get_there(self, aim_services):
+        """Unlike Qwen3-32B, gpt-oss-120b carries its own YaRN in config.json.
+
+        Supplying hf-overrides here would fight the shipped weights rather
+        than extend them.
+        """
+        overrides = aim_services["dd-agentic-aim-conductor"]["spec"][
+            "profileOverrides"
+        ]["engineArgs"]
+
+        assert "hf-overrides" not in overrides
+
+    def test_the_context_bump_is_not_copied_to_the_supervisors(self, aim_services):
+        """Context trades against batch slots, and N supervisors need slots."""
+        supervisor = aim_services["dd-agentic-aim-supervisor"]["spec"][
+            "profileOverrides"
+        ]["engineArgs"]
+
+        assert supervisor["max-model-len"] < 131072
+
+
+# ---------------------------------------------------------------------------
 # TestConfigMapServiceUrls
 # ---------------------------------------------------------------------------
 
@@ -1076,13 +1223,46 @@ class TestScriptTargets:
             assert deployment in SHARED_VOLUME_DEPLOYMENTS
             assert container in [c["name"] for c in _containers(deployments[deployment])]
 
-    def test_uat_and_model_switch_target_the_agent(self, deployments):
+    def test_uat_targets_the_agent(self, deployments):
         uat = (_ROOT / "k8s" / "scripts" / "uat-scoring.sh").read_text()
-        switch = (_ROOT / "k8s" / "scripts" / "switch-aim-model.py").read_text()
 
         assert f'DEPLOYMENT="{AGENT_DEPLOYMENT}"' in uat
         assert 'CONTAINER="dd-agent"' in uat
-        assert f'DEPLOYMENT_NAME = "{AGENT_DEPLOYMENT}"' in switch
 
         names = [c["name"] for c in _containers(deployments[AGENT_DEPLOYMENT])]
         assert names == ["dd-agent"]
+
+    def test_the_model_switch_names_both_tiers(self, deployments):
+        """It drives two endpoints, so nothing in it may be a single default."""
+        switch = (_ROOT / "k8s" / "scripts" / "switch-aim-model.py").read_text()
+
+        assert '"--tier"' in switch
+        assert "TIERS" in switch
+        # A leftover single-service constant would silently repoint the wrong
+        # endpoint while reporting the one that was asked for.
+        assert "AIM_SERVICE_NAME" not in switch
+        assert "DEPLOYMENT_NAME" not in switch
+
+    def test_each_tier_names_real_objects(self, deployments):
+        """A tier whose clients are misnamed leaves them on the old model.
+
+        Read from the script's own TIERS table rather than grepped, so the
+        test fails when the table drifts rather than when the file's prose
+        changes.
+        """
+        import importlib.util
+
+        path = _ROOT / "k8s" / "scripts" / "switch-aim-model.py"
+        spec = importlib.util.spec_from_file_location("switch_aim_model", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        aim_services = _by_kind("AIMService")
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]["data"]
+
+        assert set(module.TIERS) == {"conductor", "supervisor"}
+        for tier, wiring in module.TIERS.items():
+            assert wiring["service"] in aim_services, tier
+            assert wiring["model_key"] in configmap, tier
+            for deployment in wiring["deployments"]:
+                assert deployment in deployments, f"{tier}: {deployment}"

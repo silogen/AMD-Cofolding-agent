@@ -188,7 +188,12 @@ def list_supervisors(campaign_id: str) -> dict[str, Any]:
 
 
 def get_supervisor_result(campaign_id: str, task_id: str) -> dict[str, Any]:
-    """What one finished task achieved: its objective profile and molecules."""
+    """What one finished task achieved: its objective profile and molecules.
+
+    Scores are narrowed to the campaign's declared objectives. A scorer also
+    emits per-molecule diagnostics, which are in the job's results CSV via
+    ``read_results`` rather than here.
+    """
 
     results = _guard(
         f"Could not read results for campaign {campaign_id}",

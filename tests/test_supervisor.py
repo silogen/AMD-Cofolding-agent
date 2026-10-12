@@ -957,6 +957,53 @@ class TestStartingTheRunDirectly:
         assert stopped == ["job-1"]
 
 
+class TestHarvestedProfileIsScopedToTheCampaign:
+    """The profile reports the campaign's objectives, not every scored column.
+
+    A results CSV carries a column per scorer diagnostic -- std,
+    confidence_score, affinity_probability_binary and friends -- and reporting
+    those as objectives put a dozen keys on every point of the front where
+    three belonged, and bloated the stored results.
+    """
+
+    @staticmethod
+    def _runner(campaign: dict[str, Any] | Exception):
+        from reinvent4_agent.supervisor import CoscientistTaskRunner
+
+        store = MagicMock()
+        if isinstance(campaign, Exception):
+            store.campaign.side_effect = campaign
+        else:
+            store.campaign.return_value = campaign
+        return CoscientistTaskRunner(MagicMock(), store)
+
+    def test_it_reads_the_objectives_off_the_campaign(self):
+        runner = self._runner({"objectives": ["BoltzAffinity", "QED"]})
+
+        assert runner._objectives(_task()) == ["BoltzAffinity", "QED"]
+
+    def test_an_unreadable_campaign_falls_back_to_every_column(self):
+        """Reporting nothing would fail the task; reporting extra only clutters."""
+        runner = self._runner(RuntimeError("store down"))
+
+        assert runner._objectives(_task()) is None
+
+    def test_the_profile_drops_the_diagnostic_columns(self):
+        candidates = [{
+            "total_score": 0.9,
+            "components": {
+                "BoltzAffinity": {"transformed": 0.9},
+                "QED": {"transformed": 0.8},
+                "confidence_score (BoltzAffinity)": {"transformed": 0.87},
+                "std (logD)": {"transformed": 0.18},
+            },
+        }]
+
+        scoped = objective_profile(candidates, ["BoltzAffinity", "QED"])
+
+        assert set(scoped) == {"BoltzAffinity", "QED"}
+
+
 class TestDeadlines:
 
     def test_a_future_deadline_is_the_time_remaining(self):

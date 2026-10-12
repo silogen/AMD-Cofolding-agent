@@ -506,6 +506,22 @@ class CoscientistTaskRunner:
         # to each of its tasks.
         self.store = store
 
+    def _objectives(self, task: dict[str, Any]) -> Optional[list[str]]:
+        """The campaign's objectives, or None if they cannot be read.
+
+        None keeps the old behaviour -- report whatever the CSV scored --
+        rather than reporting nothing, which would fail the task.
+        """
+
+        try:
+            return self.store.campaign(task["campaign_id"]).get("objectives")
+        except Exception:
+            logger.warning(
+                "could not read campaign %s objectives; reporting every scored "
+                "column", task.get("campaign_id"), exc_info=True,
+            )
+            return None
+
     def _base_ttp_id(self, task: dict[str, Any]) -> str:
         campaign = self.store.campaign(task["campaign_id"])
         base_ttp_id = campaign.get("base_ttp_id")
@@ -750,8 +766,8 @@ class CoscientistTaskRunner:
         result = stop_optimization(job_id)
         logger.info("stopped job %s: %s", job_id, result.get("message") or result)
 
-    @staticmethod
     def _harvest(
+        self,
         task: dict[str, Any],
         job_id: str,
         verdict: str,
@@ -769,7 +785,12 @@ class CoscientistTaskRunner:
                                f"{top['error']}")
 
         candidates = top.get("candidates") or []
-        profile = objective_profile(candidates)
+        # Restricted to the campaign's own objectives. A results CSV carries a
+        # column per scorer diagnostic too -- std, confidence_score,
+        # affinity_probability_binary and friends -- and reporting those as
+        # objectives put a dozen keys on every point of the front where three
+        # belonged.
+        profile = objective_profile(candidates, self._objectives(task))
         if not profile:
             raise RuntimeError(
                 f"job {job_id} returned {len(candidates)} candidate(s) but no "

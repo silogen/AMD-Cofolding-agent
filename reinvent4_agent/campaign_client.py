@@ -168,8 +168,13 @@ class CampaignStoreClient:
     def pareto(self, campaign_id: str) -> dict[str, Any]:
         return self._get(f"/campaigns/{campaign_id}/pareto")
 
-    def results(self, campaign_id: str) -> list[dict[str, Any]]:
-        return self._get(f"/campaigns/{campaign_id}/results")
+    def results(
+        self, campaign_id: str, full: bool = False
+    ) -> list[dict[str, Any]]:
+        """Finished results. ``full`` keeps every scorer diagnostic."""
+
+        query = "?full=1" if full else ""
+        return self._get(f"/campaigns/{campaign_id}/results{query}")
 
     def tasks(
         self, campaign_id: str, state: Optional[str] = None

@@ -815,15 +815,126 @@ def fail_task(task_id: str, body: FailurePost) -> dict[str, Any]:
 
 # -- results, front, events -------------------------------------------------
 
+# Scorer columns that say whether an objective's value means anything, as
+# opposed to re-expressing it. Kept beside the objectives they qualify: an
+# affinity from a failed fold is not a good score, and a reader who cannot see
+# that is worse off than one who sees no affinity at all.
+VALIDITY_METRICS = ("skip_reason", "confidence_score", "ligand_iptm")
+
+
+def _objective_scores(
+    components: dict[str, Any], objectives: list[str]
+) -> dict[str, Any]:
+    """An objective's own score plus whatever qualifies it."""
+
+    scores = {name: components[name] for name in objectives if name in components}
+    for objective in objectives:
+        for metric in VALIDITY_METRICS:
+            key = f"{metric} ({objective})"
+            value = components.get(key)
+            if value is None:
+                continue
+            # A null ``transformed`` is the scorer saying "nothing to report",
+            # which for skip_reason is the good case and not worth the tokens.
+            if isinstance(value, dict) and value.get("transformed") is None:
+                continue
+            scores[key] = value
+    return scores
+
+
+def _scored_candidate(
+    candidate: dict[str, Any], objectives: list[str]
+) -> dict[str, Any]:
+    """One molecule with the scores the campaign is actually steering on.
+
+    A harvested candidate carries every column the scorer emitted, which for
+    Boltz is ten per-molecule columns beside the one objective they explain.
+    That is 906 characters per molecule, so a 25-molecule result is ~22k --
+    two of them overflow the conductor's 32768-token context on their own.
+
+    What is dropped is the redundant half: six ``affinity_pred_value*`` and
+    ``affinity_probability_binary*`` re-expressions of the same prediction.
+    What is kept is the objectives and the validity signals above, because a
+    conductor shown an affinity with no confidence beside it will narrate a
+    quality gate it cannot see -- one did, inventing PoseBusters numbers for
+    a campaign that never ran PoseBusters.
+    """
+
+    components = candidate.get("components") or {}
+    return {
+        "smiles": candidate.get("smiles"),
+        "total_score": candidate.get("total_score"),
+        "components": _objective_scores(components, objectives),
+    }
+
+
 @app.get("/campaigns/{campaign_id}/results")
-def list_results(campaign_id: str) -> list[dict[str, Any]]:
+def list_results(campaign_id: str, full: bool = False) -> list[dict[str, Any]]:
+    """Finished results, narrowed to the campaign's objectives.
+
+    ``full=true`` returns the stored record untouched, including every scorer
+    diagnostic. The ledger keeps all of it; this endpoint defaults to the
+    narrow view because its caller is an LLM with a bounded context.
+    """
+
     with _read() as conn:
-        _get_campaign(conn, campaign_id)
+        campaign = _get_campaign(conn, campaign_id)
+        objectives = json.loads(campaign["objectives"])
         rows = conn.execute(
             "SELECT * FROM results WHERE campaign_id = ? ORDER BY posted_at",
             (campaign_id,),
         ).fetchall()
-    return [_result_row(r) for r in rows]
+
+    results = [_result_row(r) for r in rows]
+    if full:
+        return results
+
+    narrowed = []
+    for result in results:
+        candidates = result.get("candidates") or []
+        narrowed.append({
+            **result,
+            "objective_profile": _objective_scores(
+                result["objective_profile"], objectives
+            ),
+            "candidates": [
+                _scored_candidate(c, objectives) for c in candidates
+            ],
+            "detail_hint": (
+                "These are the campaign's objectives and the signals that "
+                "qualify them. The scorer's remaining per-molecule columns "
+                "are in the job's results CSV via read_results(job_id)."
+            ),
+        })
+    return narrowed
+
+
+def _front_entry(result: dict[str, Any], objectives: list[str]) -> dict[str, Any]:
+    """One front member as coordinates, not molecules.
+
+    The front answers "which trade-offs are worth looking at"; the molecules
+    behind a point are a follow-up question, answered by the result endpoint
+    for that one task. Returning them inline made this response ~42k tokens
+    for a three-member front -- larger on its own than the conductor model's
+    32768-token context, so asking about the front failed outright with
+    "max_tokens must be at least 1, got -72257".
+
+    The profile is also narrowed to the campaign's declared objectives. A
+    stored profile can carry a scorer's per-molecule diagnostics alongside
+    them, and those are not axes of the front.
+    """
+
+    profile = result["objective_profile"]
+    return {
+        "task_id": result["task_id"],
+        "job_id": result["job_id"],
+        "objective_profile": {
+            name: profile[name] for name in objectives if name in profile
+        },
+        "n_candidates": len(result.get("candidates") or []),
+        "summary": result.get("summary"),
+        "posted_at": result.get("posted_at"),
+    }
 
 
 @app.get("/campaigns/{campaign_id}/pareto")
@@ -840,8 +951,16 @@ def get_pareto(campaign_id: str) -> dict[str, Any]:
         "campaign_id": campaign_id,
         "objectives": objectives,
         "n_results": len(rows),
-        "front": front,
-        "ineligible": ineligible,
+        "front": [_front_entry(r, objectives) for r in front],
+        "ineligible": [
+            {**_front_entry(r, objectives),
+             "missing_objectives": r.get("missing_objectives")}
+            for r in ineligible
+        ],
+        "molecules_hint": (
+            "Use get_supervisor_result(campaign_id, task_id) for the molecules "
+            "behind a point."
+        ),
     }
 
 

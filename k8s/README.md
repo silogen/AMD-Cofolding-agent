@@ -47,8 +47,9 @@ are those Service names, unqualified so they resolve in whichever namespace
 `apply.sh --namespace` deploys into. They were `http://127.0.0.1:<port>` while
 everything shared one pod.
 
-GPU demand is **one per Boltz replica plus one for the runner**, so the
-shipped `replicas: 2` on `dd-agentic-boltz` needs three free `amd.com/gpu`. The
+GPU demand on this node is **one per Boltz replica plus one for the runner**,
+so the shipped `replicas: 4` on `dd-agentic-boltz` needs five free
+`amd.com/gpu` here; the two AIM tiers cost one each on the *other* node. The
 agent holds none: REINVENT4 moved to `dd-agentic-reinvent-runner`, which is what
 lets agent count and RL capacity scale independently. No GPU workload may surge
 during a rollout, since the extra pod would ask for another GPU and stay
@@ -59,16 +60,133 @@ keeps the others serving.
 Scoring traffic goes to **`dd-agentic-boltz-gateway`**, not to the replicas.
 See [Place batches on idle Boltz replicas](#place-batches-on-idle-boltz-replicas).
 
-AIM is a separate `AIMService` and can use **1 GPU** (the Qwen3-32B example) or
-**8 GPUs** (a tensor-parallel catalog profile). It does not have to share a
-node with the rest: `apply.sh --node` pins every Deployment, and AIM lands
-wherever `acceleratorCount` GPUs are free (often the other GPU node). Images
-for the Deployments are imported onto **that node** — nothing is pushed to a
-registry. AIM pulls its catalog image as usual.
+AIM is **two** `AIMService`s, one per role, because the conductor and the
+supervisors want opposite things from an LLM:
 
-The agent talks to AIM at `http://dd-agentic-aim/v1`. Set
-`REINVENT4_AGENT_MODEL` to the served-model `id` from `/v1/models` (commonly
-`Qwen/Qwen3-32B-FP8` when the AIM profile is fp8).
+| Tier | Model | Profile | Who dials it |
+|------|-------|---------|--------------|
+| `dd-agentic-aim-conductor` | `openai/gpt-oss-120b` | MI300X ×1, fp4, **latency** | `dd-agentic-conductor` |
+| `dd-agentic-aim-supervisor` | `Qwen/Qwen3-32B` | MI300X ×1, fp8, **throughput** | `dd-agentic-supervisor`, `dd-agentic` |
+
+The conductor takes one turn at a time with a person waiting on it; the
+supervisors are N agents grinding through tool calls with nobody watching any
+single response. Serving both from one latency-tuned endpoint is what this
+README already warned against for concurrent sessions — and N supervisors are
+exactly that.
+
+**Both tiers are single-GPU profiles**, which is what makes the split
+affordable. A tensor-parallel conductor model (8 GPUs) would consume a whole
+node and leave nothing for Boltz. Each tier costs 1 GPU, so the split costs
+one GPU more than the single endpoint did — budget it against §3.4, which
+allocates 1 per tier against **5 for Boltz**, since Boltz is the measured
+bottleneck (both replicas were observed at 100% while a third job waited).
+
+AIM does not have to share a node with the rest: `apply.sh --node` pins every
+Deployment, and AIM lands wherever `acceleratorCount` GPUs are free (often the
+other GPU node). Images for the Deployments are imported onto **that node** —
+nothing is pushed to a registry. AIM pulls its catalog image as usual.
+
+#### Keeping AIM off the Boltz node — and why the order you apply in matters
+
+The layout this deployment wants is AIM on one node and the GPU-hungry
+scorers on the other:
+
+| Node | Workloads | GPUs |
+|------|-----------|------|
+| `useocpm2m-silogen-017` | `aim-conductor`, `aim-supervisor` | 1 each |
+| `useocpm2m-silogen-007` | `boltz` ×M, `reinvent-runner` | 1 each |
+
+The second row is **enforced**. `apply.sh --node` stamps
+`nodeSelector[kubernetes.io/hostname]` onto every Deployment, and those
+workloads have to be together anyway because the `dd-agentic-data` claim is
+`ReadWriteOnce` and attached to that node.
+
+The first row is **not enforced, and cannot be.** An `AIMService` has no
+placement field: its `template` takes only `name`/`allowUnoptimized` and its
+`overrides` only `hardware`/`metric`/`precision`. Neither
+`AIMClusterRuntimeConfig` nor `AIMClusterServiceTemplate` has one either. And
+a `nodeSelector` patched onto the predictor Deployment that AIM generates is
+**stripped by the operator within about 20 seconds**. Where both nodes are the
+same accelerator model, the profile's hardware requirement cannot separate
+them either.
+
+What places AIM is therefore the scheduler, which means **capacity at the
+moment the AIMService is created**. So when migrating to this layout, create
+the new tiers *before* deleting the old AIMService:
+
+```bash
+# 1. With the Boltz node full, a new AIMService cannot fit there and must
+#    land on the other node.
+kubectl --namespace "${PROJECT}" apply -f manifests/aim-service.yaml
+kubectl --namespace "${PROJECT}" get aimservice --watch   # ~10 min each
+
+# 2. Only now release the old endpoint's GPU.
+kubectl --namespace "${PROJECT}" delete aimservice dd-agentic-aim
+kubectl --namespace "${PROJECT}" delete service dd-agentic-aim
+
+# 3. The freed GPU goes to the bottleneck.
+kubectl --namespace "${PROJECT}" scale deployment/dd-agentic-boltz --replicas=3
+```
+
+Done in the other order, deleting first leaves a free GPU on the Boltz node
+and a new tier may land there — taking a GPU that Boltz wants and putting the
+LLM where it was not meant to be.
+
+**The consequence to remember:** because nothing enforces it, an AIM tier
+recreated while the Boltz node has a spare GPU may settle on the wrong node,
+and the only symptom is Boltz quietly having one fewer replica available to
+scale into. This is not hypothetical — raising the conductor's context
+(below) recreated its predictor at a moment when this node had exactly one
+GPU free, and it landed here. Check with:
+
+```bash
+kubectl --namespace "${PROJECT}" get pods \
+  --selector app.kubernetes.io/component=inference \
+  --output custom-columns='NAME:.metadata.name,NODE:.spec.nodeName'
+```
+
+Making it durable needs cluster-admin: either a Kyverno mutation injecting the
+`nodeSelector` into AIM predictor pods, or a taint on the Boltz node that the
+pinned Deployments tolerate and AIM does not.
+
+#### Moving an AIM tier that landed on the wrong node
+
+`kubectl rollout restart` on the generated predictor Deployment does **not**
+work, even though its `maxUnavailable` resolves to 0 and the surge pod would
+have had to go elsewhere. The operator strips the `restartedAt` annotation the
+same way it strips `nodeSelector`, and no new pod is ever created. The
+AIMService is the only lever.
+
+Deleting and recreating it frees the GPU, so something must be **waiting** to
+claim it or the new tier lands right back here. A pending Boltz replica is the
+right claimant: it carries the `nodeSelector` for this node, so it can go
+nowhere else and is first in line the moment the GPU frees.
+
+```bash
+# 1. Queue the claim. This pod stays Pending with
+#    "Insufficient amd.com/gpu" -- that is the point.
+kubectl --namespace "${PROJECT}" scale deployment/dd-agentic-boltz --replicas=4
+
+# 2. Release the GPU. The pending replica takes it within seconds.
+kubectl --namespace "${PROJECT}" delete aimservice dd-agentic-aim-conductor
+
+# 3. Confirm this node is full again *before* recreating the tier.
+kubectl --namespace "${PROJECT}" get pods --all-namespaces \
+  --field-selector spec.nodeName=useocpm2m-silogen-007
+
+# 4. With nowhere else to go, the tier lands on the AIM node (~3-4 min).
+kubectl --namespace "${PROJECT}" apply -f manifests/aim-service.yaml
+```
+
+Keep the stable `Service` out of step 2: it selects on labels, so it picks up
+the new predictor pod on its own and the agents' base URL never changes. The
+conductor is down from step 2 until the new predictor reports `Running`.
+
+Each tier has its own ConfigMap keys, so one `kubectl get configmap` shows
+which model each is on: `CONDUCTOR_AGENT_MODEL`/`CONDUCTOR_AGENT_BASE_URL` and
+`REINVENT4_AGENT_MODEL`/`REINVENT4_AGENT_BASE_URL`. Set the model to the
+served-model `id` from that tier's `/v1/models` (commonly `Qwen/Qwen3-32B-FP8`
+when the profile is fp8) — `switch-aim-model.sh --tier` does this for you.
 
 AIM is configured for **latency** and **fp8** on **1 GPU**. That matches
 dd-agent: one interactive session, sequential Driver/Reviewer tool-call turns,
@@ -78,6 +196,59 @@ unless several concurrent agent sessions share the same AIM replica. Keep
 fp8/fp16/bf16; omitting precision can select a throughput or higher-precision
 profile. `throughput` (or unset metric) is an environment-specific override,
 not the default for this example.
+
+### Context size
+
+A discovered profile's `max-model-len` is a **serving choice, not the model's
+limit**, and both tiers override it:
+
+| tier | model's ceiling | profile ships | deployed | how |
+|------|-----------------|---------------|----------|-----|
+| conductor | 131072 | 32768 | **131072** | `max-model-len` alone |
+| supervisor | 32768 | 32768 | **65536** | `max-model-len` + YaRN `hf-overrides` |
+
+The asymmetry is the point. gpt-oss-120b declares
+`max_position_embeddings: 131072` and carries its own YaRN scaling in
+`config.json` (factor 32 over an original 4096), so raising the arg is all it
+takes. Qwen3-32B is *natively* 32768, so exceeding that needs RoPE scaling
+supplied alongside — which is why only the supervisor tier has
+`hf-overrides`. Adding them to the conductor would fight the shipped weights
+rather than extend them.
+
+The conductor's 32768 was not enough in practice: a Pareto front with the
+molecules behind each point sent ~42k tokens of tool results, and since vLLM
+derives `max_tokens` as `max-model-len` minus the prompt, the request failed
+with `max_tokens must be at least 1, got -72257`. Those payloads were
+narrowed to ~8k, so the bump is headroom rather than the fix.
+
+**It costs concurrency, not memory.** vLLM pre-allocates the KV pool at
+`gpu-memory-utilization` (0.95 here, so the GPU reads ~196 of 206 GB at any
+context length); raising the limit only changes how much of that pool one
+sequence may take. For gpt-oss-120b that is 36 KiB/token — low because 18 of
+its 36 layers use a 128-token sliding window, leaving 18 full-attention
+layers — so 1.21 GB per sequence at 32768 against 4.83 GB at 131072. A single
+interactive conductor can spend batch slots on context; **do not copy the
+bump to the supervisor tier**, where N agents need the slots.
+
+Check what is actually served, which is the only number that matters:
+
+```bash
+kubectl --namespace "${PROJECT}" exec deployment/dd-agentic-conductor \
+  --container dd-conductor -- python -c \
+  'import json,urllib.request; print(json.load(urllib.request.urlopen(
+   "http://dd-agentic-aim-conductor/v1/models"))["data"][0]["max_model_len"])'
+```
+
+**What cannot be changed this way.** `profileOverrides.engineArgs`
+shallow-merges and can only replace *matching* keys — there is no way to
+express "drop this one". The conductor profile disables prefix caching with
+the negative flag `no-enable-prefix-caching`, so adding `enable-prefix-caching`
+beside it just renders both, and the args are emitted alphabetically, which
+puts the negative last and wins. Enabling it needs a forked profile, and
+`aimclusterprofiles` is cluster-scoped and admin-only. Worth asking an admin
+for: with caching off, every REPL turn re-prefills the whole transcript, which
+a longer context makes more expensive, and an interactive conductor's prefix
+is stable between turns.
 
 ### Configuration (not `env.local.sh`)
 
@@ -89,19 +260,19 @@ only for Compose, Apptainer, and Slurm. The `dd-agent` container reads
 |----------------|------------|
 | `REINVENT4_AGENT_BACKEND`, `MODEL`, `BASE_URL`, `MULTI_AGENT`, SSL, log dir | ConfigMap `dd-agentic-config` in [`manifests/configmap.yaml`](manifests/configmap.yaml) |
 | `LLM_GATEWAY_KEY` / `REINVENT4_AGENT_API_KEY` | Secret `dd-agentic-llm` in [`manifests/llm-secret.yaml`](manifests/llm-secret.yaml) |
-| Gateway URL (`https://llm-api.amd.com/...`) | In-cluster AIM: `http://dd-agentic-aim/v1` |
+| Gateway URL (`https://llm-api.amd.com/...`) | In-cluster AIM: `http://dd-agentic-aim-supervisor/v1` (or `-conductor`) |
 
 The example ConfigMap is:
 
 ```
 REINVENT4_AGENT_BACKEND=openai
-REINVENT4_AGENT_BASE_URL=http://dd-agentic-aim/v1
+REINVENT4_AGENT_BASE_URL=http://dd-agentic-aim-supervisor/v1
 REINVENT4_AGENT_MODEL=Qwen/Qwen3-32B-FP8
 ```
 
 `REINVENT4_AGENT_MODEL` must match the served `/v1/models` **id** (often
 `Qwen/Qwen3-32B-FP8` when the AIM profile is fp8). The LLM is
-`AIMService/dd-agentic-aim` ([`manifests/aim-service.yaml`](manifests/aim-service.yaml)),
+the two `AIMService`s ([`manifests/aim-service.yaml`](manifests/aim-service.yaml)),
 not the AMD gateway. Do not set `LLM_GATEWAY_KEY` for AIM.
 
 The in-cluster AIM endpoint typically needs no real key. The OpenAI client
@@ -120,8 +291,8 @@ Bearer token.
 - A Qwen3-32B `AIMClusterModel` (or another catalog model you will set in
   `manifests/aim-service.yaml`).
 - A GPU node with enough free `amd.com/gpu` for the GPU workloads: one per
-  `dd-agentic-boltz` replica (2 by default) plus one for
-  `dd-agentic-reinvent-runner`, so **three** as shipped. The agent itself needs
+  `dd-agentic-boltz` replica (4 by default) plus one for
+  `dd-agentic-reinvent-runner`, so **five** as shipped. The agent itself needs
   none any more. All the `*:local` images must be in that node's kubelet store.
   AIM needs `acceleratorCount` free GPUs on **one** node (1 for the Qwen3-32B
   example, 8 for an 8-way profile). That can be a different node; see
@@ -254,8 +425,8 @@ Watch AIM separately (cache warm can take several minutes). Confirm the
 `AIMService` object exists and the Service has endpoints before chatting:
 
 ```bash
-kubectl --namespace "${PROJECT}" get aimservice dd-agentic-aim --watch
-kubectl --namespace "${PROJECT}" get endpoints dd-agentic-aim
+kubectl --namespace "${PROJECT}" get aimservice --watch   # both tiers
+kubectl --namespace "${PROJECT}" get endpoints dd-agentic-aim-conductor dd-agentic-aim-supervisor
 ```
 
 Confirm the served model id, then start the interactive agent:
@@ -263,7 +434,7 @@ Confirm the served model id, then start the interactive agent:
 ```bash
 kubectl --namespace "${PROJECT}" exec deployment/dd-agentic \
   --container dd-agent -- python -c \
-  'import json,urllib.request; print(urllib.request.urlopen("http://dd-agentic-aim/v1/models").read().decode())'
+  'import json,urllib.request; print(urllib.request.urlopen("http://dd-agentic-aim-supervisor/v1/models").read().decode())'
 
 kubectl --namespace "${PROJECT}" exec \
   --stdin --tty deployment/dd-agentic \
@@ -837,7 +1008,7 @@ campaign.
 `--down` takes the runner with it, and RL jobs live in the runner's pod, so
 anything still running is killed rather than checkpointed — stop the jobs first
 if the work matters. AIM is left alone either way: it is reconciled by the
-`dd-agentic-aim` AIMService, so scaling its Deployment would simply be undone.
+`dd-agentic-aim-*` AIMServices, so scaling their Deployments would simply be undone.
 
 ### Watch the fleet
 
@@ -967,7 +1138,7 @@ proves the same thing without spending another prediction:
 
 The dd-agentic Deployments and `AIMService/dd-agentic-aim` are scheduled
 independently. The agent pod talks to AIM over the in-cluster Service
-`http://dd-agentic-aim/v1` (any node). `AIMService` has **no** nodeSelector
+`http://dd-agentic-aim-{conductor,supervisor}/v1` (any node). `AIMService` has **no** nodeSelector
 in this API; the predictor lands where `spec.profile.selector.acceleratorCount`
 GPUs are free on a **single** node.
 
@@ -1030,7 +1201,7 @@ GPUs are packed (same as a model change; `switch-aim-model.sh` does that when
 ```bash
 kubectl --namespace "${PROJECT}" get pods --selector aim.eai.amd.com/service.name=dd-agentic-aim \
   --output wide
-kubectl --namespace "${PROJECT}" get endpoints dd-agentic-aim
+kubectl --namespace "${PROJECT}" get endpoints dd-agentic-aim-conductor dd-agentic-aim-supervisor
 ```
 
 Do not `kubectl cordon` a GPU node unless you intend to drain every other

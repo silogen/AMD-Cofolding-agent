@@ -43,6 +43,14 @@ def _shared_root() -> Path:
     return Path(os.environ.get("IP_SHARED_DIR", "/shared"))
 
 
+def _mtime(path: Path) -> float:
+    """Modification time, or 0.0 for a file that went away mid-scan."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _a3m_query_length(path: Path) -> Optional[int]:
     """Length of the query (first) sequence of an a3m/fasta MSA, or None.
 
@@ -70,16 +78,39 @@ def _a3m_query_length(path: Path) -> Optional[int]:
         return None
 
 
-def list_shared_assets() -> dict[str, Any]:
+#: How many paths to name per category. The volume accumulates one cofold
+#: output per predicted molecule, so this list grows with every batch: at 1763
+#: of them it came to 138k tokens, more than the conductor model's entire
+#: 131072-token context, and the call failed with "max_tokens must be at least
+#: 1, got -31572". The counts below are always exact; only the naming is cut.
+SHARED_ASSET_SAMPLE = 10
+
+
+def list_shared_assets(
+    prefix: Optional[str] = None, limit: int = SHARED_ASSET_SAMPLE
+) -> dict[str, Any]:
     """List usable files on the shared volume, categorized and /shared-relative.
 
     Scans the shared mount for the artifacts the agent needs so it never has
-    to guess a path: protein/complex ``structures`` (PDB/mmCIF), ``msas``
-    (.a3m/.fasta/...), and Boltz ``cofold_outputs`` (anything under a
-    ``predictions/`` directory). Every returned path is expressed relative to
-    ``/shared`` -- exactly the form ``profile_interactions`` and TTP
+    to guess a path: hand-placed protein/complex ``structures`` (PDB/mmCIF),
+    ``msas`` (.a3m/.fasta/...), and Boltz ``cofold_outputs`` (structures under
+    a ``predictions/`` directory). Every returned path is expressed relative
+    to ``/shared`` -- exactly the form ``profile_interactions`` and TTP
     ``msa_path`` accept. Returns an empty (non-error) result when nothing is
     found.
+
+    A structure is in exactly one of ``structures`` and ``cofold_outputs``,
+    by whether a run produced it. Cofold outputs are newest first, since the
+    one worth naming is usually the one the last job just wrote.
+
+    Parameters
+    ----------
+    prefix:
+        Only consider paths starting with this, for finding the outputs of
+        one job rather than every job: ``predictions/out_035c34d9``.
+    limit:
+        How many paths to name per category. ``counts`` reports how many
+        there really are, so a cut is always visible.
     """
     root = _shared_root()
     result: dict[str, Any] = {
@@ -89,9 +120,16 @@ def list_shared_assets() -> dict[str, Any]:
         "msa_details": [],
         "cofold_outputs": [],
     }
+    if prefix:
+        result["prefix"] = prefix
     if not root.exists() or not root.is_dir():
         result["note"] = f"Shared directory {root} does not exist or is empty."
         return result
+
+    structures: list[str] = []
+    cofold: list[tuple[float, str]] = []
+    msas: list[str] = []
+    msa_details: list[dict[str, Any]] = []
 
     for path in sorted(root.rglob("*")):
         if not path.is_file():
@@ -100,30 +138,54 @@ def list_shared_assets() -> dict[str, Any]:
             rel = str(path.relative_to(root))
         except ValueError:
             continue
+        if prefix and not rel.startswith(prefix):
+            continue
         ext = path.suffix.lower()
-        in_predictions = "predictions" in path.parts
 
         if ext in _STRUCTURE_EXTS:
-            result["structures"].append(rel)
-            if in_predictions:
-                result["cofold_outputs"].append(rel)
+            if "predictions" in path.parts:
+                cofold.append((_mtime(path), rel))
+            else:
+                structures.append(rel)
         elif ext in _MSA_EXTS:
-            result["msas"].append(rel)
+            msas.append(rel)
             # Report the query-sequence length so the agent pairs the MSA with
             # a matching-length target sequence (a domain MSA must go with the
             # domain sequence, not the full-length protein).
-            result["msa_details"].append({
+            msa_details.append({
                 "path": rel,
                 "query_length": _a3m_query_length(path),
             })
 
+    cofold.sort(key=lambda pair: pair[0], reverse=True)
+    cofold_paths = [rel for _, rel in cofold]
+
+    result["structures"] = structures[:limit]
+    result["msas"] = msas[:limit]
+    result["msa_details"] = msa_details[:limit]
+    result["cofold_outputs"] = cofold_paths[:limit]
     result["counts"] = {
-        "structures": len(result["structures"]),
-        "msas": len(result["msas"]),
-        "cofold_outputs": len(result["cofold_outputs"]),
+        "structures": len(structures),
+        "msas": len(msas),
+        "cofold_outputs": len(cofold_paths),
     }
+
+    withheld = {
+        name: count - limit
+        for name, count in result["counts"].items()
+        if count > limit
+    }
+    if withheld:
+        result["not_listed"] = withheld
+        result["more"] = (
+            "Narrow with prefix= to reach a specific job's files, or raise "
+            "limit= to name more. Every count above is exact."
+        )
     if not any(result["counts"].values()):
-        result["note"] = f"No structures, MSAs, or cofold outputs found under {root}."
+        result["note"] = (
+            f"No structures, MSAs, or cofold outputs found under {root}"
+            + (f" matching {prefix!r}." if prefix else ".")
+        )
     return result
 
 

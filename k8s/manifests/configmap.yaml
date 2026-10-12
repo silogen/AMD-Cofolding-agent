@@ -4,8 +4,16 @@ metadata:
   name: dd-agentic-config
 data:
   REINVENT4_AGENT_BACKEND: openai
+  # The interactive agent and the supervisors share the throughput tier: both
+  # are "many turns, nobody waiting on any one of them". The conductor has its
+  # own keys below, because a person *is* waiting on its turns.
   REINVENT4_AGENT_MODEL: "Qwen/Qwen3-32B-FP8"
-  REINVENT4_AGENT_BASE_URL: http://dd-agentic-aim/v1
+  REINVENT4_AGENT_BASE_URL: http://dd-agentic-aim-supervisor/v1
+  # The conductor tier: a bigger model on a latency profile. Separate keys
+  # rather than a separate ConfigMap so one `kubectl get configmap` still
+  # shows which model each tier is on.
+  CONDUCTOR_AGENT_MODEL: "openai/gpt-oss-120b"
+  CONDUCTOR_AGENT_BASE_URL: http://dd-agentic-aim-conductor/v1
   REINVENT4_AGENT_NO_VERIFY_SSL: "false"
   REINVENT4_AGENT_MULTI_AGENT: "true"
   REINVENT4_AGENT_LOG_DIR: /logs
@@ -73,8 +81,13 @@ data:
       working_dir: "/data/reinvent4_mcp/jobs"
       # Several RL jobs per runner GPU: a step is mostly spent waiting on the
       # scoring call, so memory is the limit rather than compute. Raise only on
-      # measured headroom.
-      max_concurrent_jobs: 2
+      # measured headroom -- a job was measured using 1528 MiB of the MI300X's
+      # 196 GB, so the ceiling here is the supervisor count, not the GPU.
+      #
+      # Must be at least the campaign's concurrency, or the surplus
+      # supervisors have their tasks refused with "Maximum concurrent jobs
+      # (N) already active" and burn their retries doing it.
+      max_concurrent_jobs: 3
       checkpoint_on_stop: true
 
     # Not optional in this deployment: dd-agent:local is CPU-only and carries no

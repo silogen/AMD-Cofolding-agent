@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import inspect
+import os
 import re
 import sys
 from pathlib import Path
@@ -532,6 +533,124 @@ class TestSubmitThenPoll:
 # ---------------------------------------------------------------------------
 # TestListExternalServices
 # ---------------------------------------------------------------------------
+
+
+class TestListSharedAssets:
+    """What the volume holds, in a form that fits a context window.
+
+    One cofold output lands per predicted molecule, so this listing grows with
+    every batch. At 1763 of them it came to 138k tokens -- more than the
+    conductor model's entire 131072-token context -- and the call failed
+    outright with "max_tokens must be at least 1, got -31572".
+    """
+
+    def _volume(self, tmp_path, n_predictions=0, n_structures=0):
+        for i in range(n_structures):
+            (tmp_path / f"ref_{i}.pdb").write_text("ATOM\n")
+        for i in range(n_predictions):
+            out = tmp_path / f"predictions/out_{i:04d}/predictions/mol_0"
+            out.mkdir(parents=True)
+            (out / "mol_0_model_0.pdb").write_text("ATOM\n")
+        return tmp_path
+
+    def _assets(self, tmp_path, **kwargs):
+        from reinvent4_mcp.tools.external import list_shared_assets
+
+        with patch.dict(os.environ, {"IP_SHARED_DIR": str(tmp_path)}):
+            return list_shared_assets(**kwargs)
+
+    def test_a_prediction_is_not_listed_as_a_structure_as_well(self, tmp_path):
+        """``structures`` and ``cofold_outputs`` came back byte-identical.
+
+        Every Boltz output was appended to both, so the one useful listing was
+        paid for twice.
+        """
+        self._volume(tmp_path, n_predictions=3, n_structures=1)
+
+        assets = self._assets(tmp_path)
+
+        assert assets["counts"] == {
+            "structures": 1, "msas": 0, "cofold_outputs": 3
+        }
+        assert assets["structures"] == ["ref_0.pdb"]
+        assert all("predictions" in p for p in assets["cofold_outputs"])
+
+    def test_the_listing_is_bounded_however_many_files_there_are(self, tmp_path):
+        self._volume(tmp_path, n_predictions=50)
+
+        assets = self._assets(tmp_path, limit=10)
+
+        assert len(assets["cofold_outputs"]) == 10
+
+    def test_the_true_total_is_reported_so_a_cut_is_visible(self, tmp_path):
+        """A sample that hides its own incompleteness is worse than a count."""
+        self._volume(tmp_path, n_predictions=50)
+
+        assets = self._assets(tmp_path, limit=10)
+
+        assert assets["counts"]["cofold_outputs"] == 50
+        assert assets["not_listed"] == {"cofold_outputs": 40}
+        assert "prefix" in assets["more"]
+
+    def test_nothing_is_withheld_when_everything_fits(self, tmp_path):
+        self._volume(tmp_path, n_predictions=3)
+
+        assets = self._assets(tmp_path, limit=10)
+
+        assert "not_listed" not in assets
+        assert "more" not in assets
+
+    def test_cofold_outputs_are_newest_first(self, tmp_path):
+        """The output worth naming is the one the last job just wrote."""
+        self._volume(tmp_path, n_predictions=3)
+        paths = sorted(tmp_path.rglob("*.pdb"))
+        for i, path in enumerate(paths):
+            os.utime(path, (0, 1000 + i * 100))
+
+        assets = self._assets(tmp_path, limit=10)
+
+        assert assets["cofold_outputs"][0] == str(
+            paths[-1].relative_to(tmp_path)
+        )
+
+    def test_prefix_reaches_one_jobs_outputs(self, tmp_path):
+        self._volume(tmp_path, n_predictions=5)
+
+        assets = self._assets(tmp_path, prefix="predictions/out_0003")
+
+        assert assets["counts"]["cofold_outputs"] == 1
+        assert assets["cofold_outputs"][0].startswith("predictions/out_0003")
+        assert assets["prefix"] == "predictions/out_0003"
+
+    def test_an_msa_still_reports_its_query_length(self, tmp_path):
+        """What pairs an MSA with the right target sequence."""
+        (tmp_path / "brd4_bd1.a3m").write_text(">query\nMSAES\n>hit\nMSAES\n")
+
+        assets = self._assets(tmp_path)
+
+        assert assets["msas"] == ["brd4_bd1.a3m"]
+        assert assets["msa_details"][0]["query_length"] == 5
+
+    def test_an_empty_volume_is_not_an_error(self, tmp_path):
+        assets = self._assets(tmp_path)
+
+        assert assets["counts"] == {
+            "structures": 0, "msas": 0, "cofold_outputs": 0
+        }
+        assert "No structures" in assets["note"]
+
+    def test_a_prefix_that_matches_nothing_says_so(self, tmp_path):
+        self._volume(tmp_path, n_predictions=2)
+
+        assets = self._assets(tmp_path, prefix="predictions/out_9999")
+
+        assert assets["cofold_outputs"] == []
+        assert "out_9999" in assets["note"]
+
+    def test_a_missing_volume_is_reported_not_raised(self, tmp_path):
+        assets = self._assets(tmp_path / "absent")
+
+        assert "does not exist" in assets["note"]
 
 
 class TestListExternalServices:

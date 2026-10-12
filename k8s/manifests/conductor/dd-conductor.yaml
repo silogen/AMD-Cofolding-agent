@@ -109,16 +109,20 @@ spec:
                 configMapKeyRef:
                   name: dd-agentic-config
                   key: REINVENT4_AGENT_BACKEND
+            # The conductor's own tier: a bigger model on a latency profile,
+            # because a person is waiting on each of its turns. The env names
+            # stay REINVENT4_AGENT_* (that is what the CLI reads) while the
+            # ConfigMap keys name the tier.
             - name: REINVENT4_AGENT_MODEL
               valueFrom:
                 configMapKeyRef:
                   name: dd-agentic-config
-                  key: REINVENT4_AGENT_MODEL
+                  key: CONDUCTOR_AGENT_MODEL
             - name: REINVENT4_AGENT_BASE_URL
               valueFrom:
                 configMapKeyRef:
                   name: dd-agentic-config
-                  key: REINVENT4_AGENT_BASE_URL
+                  key: CONDUCTOR_AGENT_BASE_URL
             - name: REINVENT4_AGENT_NO_VERIFY_SSL
               valueFrom:
                 configMapKeyRef:

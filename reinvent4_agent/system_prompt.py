@@ -301,7 +301,10 @@ specific interaction type and a normalizing transform.
 - **Shared asset discovery**: call `list_shared_assets` to see the structures \
 (PDB/mmCIF), MSAs (.a3m), and Boltz cofold outputs already on the shared \
 volume. Use the exact `/shared`-relative paths it returns for \
-`profile_interactions` and TTP `msa_path` -- never guess or fabricate a path.
+`profile_interactions` and TTP `msa_path` -- never guess or fabricate a path. \
+It names only the first few paths per category and reports the true totals in \
+`counts`; to reach a particular job's outputs pass \
+`prefix='predictions/out_<id>'` rather than raising `limit` to list everything.
 - **Target lookup (UniProt)**: call `fetch_target_info` with a UniProt \
 accession (e.g. `O60885`) or free text (e.g. "BRD4 human") to get the \
 canonical protein sequence, names, organism, function, and cross-referenced \

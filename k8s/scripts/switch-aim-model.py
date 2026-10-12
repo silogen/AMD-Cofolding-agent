@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Switch dd-agentic-aim to another catalog AIMClusterModel.
+"""Switch one AIM tier to another catalog AIMClusterModel.
+
+There are two endpoints, because the conductor and the supervisors want
+opposite things from an LLM: one interactive turn with a person waiting
+(latency) versus N agents grinding through tool calls (throughput). Each is a
+separate AIMService with its own ConfigMap keys and its own clients to restart,
+so every operation here takes a --tier.
 
 Invoked by switch-aim-model.sh (same directory). Patches k8s/manifests/.
 No third-party deps.
@@ -17,9 +23,24 @@ K8S_DIR = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = K8S_DIR / "manifests"
 AIM_SERVICE_FILE = MANIFESTS_DIR / "aim-service.yaml"
 CONFIGMAP_FILE = MANIFESTS_DIR / "configmap.yaml"
-AIM_SERVICE_NAME = "dd-agentic-aim"
-DEPLOYMENT_NAME = "dd-agentic"
 CONFIGMAP_NAME = "dd-agentic-config"
+
+# Per tier: which AIMService to repoint, which ConfigMap key records the served
+# model id, and which Deployments read it. The interactive agent sits on the
+# supervisor tier because it has the same shape of workload -- many turns, no
+# single response being waited on.
+TIERS: dict[str, dict[str, Any]] = {
+    "conductor": {
+        "service": "dd-agentic-aim-conductor",
+        "model_key": "CONDUCTOR_AGENT_MODEL",
+        "deployments": ["dd-agentic-conductor"],
+    },
+    "supervisor": {
+        "service": "dd-agentic-aim-supervisor",
+        "model_key": "REINVENT4_AGENT_MODEL",
+        "deployments": ["dd-agentic-supervisor", "dd-agentic"],
+    },
+}
 SOURCE_MODEL_LABEL = "aim.eai.amd.com/source-model"
 PROFILE_ROLE_LABEL = "aim.eai.amd.com/profile-role"
 
@@ -196,18 +217,20 @@ def patch_aim_service(path: Path, model_name: str, count: int, precision: str, m
     path.write_text("".join(out))
 
 
-def patch_configmap_file(path: Path, served_id: str) -> None:
+def patch_configmap_file(path: Path, served_id: str, model_key: str) -> None:
+    """Rewrite one tier's model key, leaving the other tier's alone."""
+
     quoted = json.dumps(served_id)
     lines = []
     replaced = False
     for line in path.read_text().splitlines(keepends=True):
-        if line.startswith("  REINVENT4_AGENT_MODEL:") and not replaced:
-            lines.append(f"  REINVENT4_AGENT_MODEL: {quoted}\n")
+        if line.startswith(f"  {model_key}:") and not replaced:
+            lines.append(f"  {model_key}: {quoted}\n")
             replaced = True
         else:
             lines.append(line)
     if not replaced:
-        raise SystemExit(f"REINVENT4_AGENT_MODEL not found in {path}")
+        raise SystemExit(f"{model_key} not found in {path}")
     path.write_text("".join(lines))
 
 
@@ -311,8 +334,8 @@ def wait_endpoints(namespace: str, name: str, timeout: str) -> None:
 
 FETCH_MODELS_PY = r"""
 import json, sys, urllib.request
-aim_id = sys.argv[1]
-raw = urllib.request.urlopen("http://dd-agentic-aim/v1/models", timeout=120).read()
+aim_id, base_url = sys.argv[1], sys.argv[2]
+raw = urllib.request.urlopen(base_url.rstrip("/") + "/models", timeout=120).read()
 payload = json.loads(raw)
 ids = [item.get("id") for item in payload.get("data") or [] if item.get("id")]
 if not ids:
@@ -326,7 +349,16 @@ print((preferred or ids)[0])
 """
 
 
-def fetch_served_id(namespace: str, aim_id: str) -> str:
+def fetch_served_id(
+    namespace: str, aim_id: str, base_url: str, deployment: str, container: str
+) -> str:
+    """Ask the tier which model id it is actually serving.
+
+    Read from a client pod rather than guessed from the catalog: the id in
+    /v1/models is what the agent must send, and it does not always match
+    the AIMID.
+    """
+
     last_err = ""
     for pybin in ("python3", "python"):
         proc = run(
@@ -335,14 +367,15 @@ def fetch_served_id(namespace: str, aim_id: str) -> str:
                 "--namespace",
                 namespace,
                 "exec",
-                f"deployment/{DEPLOYMENT_NAME}",
+                f"deployment/{deployment}",
                 "--container",
-                "dd-agent",
+                container,
                 "--",
                 pybin,
                 "-c",
                 FETCH_MODELS_PY,
                 aim_id,
+                base_url,
             ],
             capture=True,
             check=False,
@@ -350,12 +383,28 @@ def fetch_served_id(namespace: str, aim_id: str) -> str:
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip().splitlines()[-1]
         last_err = (proc.stderr or proc.stdout or "").strip()
-    raise SystemExit(f"failed to read /v1/models from deployment/{DEPLOYMENT_NAME}: {last_err}")
+    raise SystemExit(f"failed to read /v1/models from deployment/{deployment}: {last_err}")
+
+
+def deployment_exists(namespace: str, name: str) -> bool:
+    proc = run(
+        ["kubectl", "--namespace", namespace, "get", "deployment", name, "--output", "name"],
+        check=False,
+        capture=True,
+    )
+    return proc.returncode == 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Point dd-agentic-aim at another catalog model and restart dd-agentic."
+        description="Point one AIM tier at another catalog model and restart its clients."
+    )
+    parser.add_argument(
+        "--tier",
+        required=True,
+        choices=sorted(TIERS),
+        help="which endpoint to change: 'conductor' (bigger model, latency) or "
+             "'supervisor' (throughput, shared with the interactive agent)",
     )
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--model", default="", help="AIMID or AIMClusterModel object name")
@@ -368,9 +417,20 @@ def main() -> int:
     parser.add_argument(
         "--no-recreate",
         action="store_true",
-        help="abort instead of deleting AIMService/dd-agentic-aim when the model changes",
+        help="abort instead of deleting the tier's AIMService when the model changes",
     )
     args = parser.parse_args()
+
+    tier = TIERS[args.tier]
+    aim_service = tier["service"]
+    model_key = tier["model_key"]
+    # Probed from a pod that already reads this tier, so the id recorded is the
+    # one its clients will actually send.
+    probe_deployment = tier["deployments"][0]
+    probe_container = (
+        "dd-conductor" if args.tier == "conductor" else "dd-supervisor"
+    )
+    base_url = f"http://{aim_service}/v1"
 
     if args.accelerator_count < 1:
         raise SystemExit("--accelerator-count must be a positive integer")
@@ -424,23 +484,23 @@ def main() -> int:
         f"acceleratorCount={args.accelerator_count} precision={precision} metric={metric}"
     )
 
-    live_model = live_model_name(args.namespace, AIM_SERVICE_NAME)
+    live_model = live_model_name(args.namespace, aim_service)
     model_changed = live_model is not None and live_model != resolved["name"]
     if live_model is None:
-        print(f"AIMService/{AIM_SERVICE_NAME} does not exist yet; it will be created")
+        print(f"AIMService/{aim_service} does not exist yet; it will be created")
     elif model_changed:
         print(
-            f"AIMService/{AIM_SERVICE_NAME} currently serves {live_model}; "
+            f"AIMService/{aim_service} currently serves {live_model}; "
             "spec.model is immutable, so it must be deleted and recreated"
         )
     else:
-        print(f"AIMService/{AIM_SERVICE_NAME} already serves {live_model}; patching selector in place")
+        print(f"AIMService/{aim_service} already serves {live_model}; patching selector in place")
 
     if args.dry_run:
         print("dry-run: not applying, not waiting for /v1/models, not restarting")
         if model_changed:
             print(
-                f"dry-run: would delete AIMService/{AIM_SERVICE_NAME} and recreate it "
+                f"dry-run: would delete AIMService/{aim_service} and recreate it "
                 "from the file above (kubectl diff would report the immutable-model error)"
             )
         else:
@@ -461,12 +521,12 @@ def main() -> int:
         if args.no_recreate:
             raise SystemExit(
                 "model change requires deleting AIMService/"
-                f"{AIM_SERVICE_NAME}; re-run without --no-recreate"
+                f"{aim_service}; re-run without --no-recreate"
             )
-        print(f"deleting AIMService/{AIM_SERVICE_NAME} (warm caches are preserved)")
-        delete_aimservice(args.namespace, AIM_SERVICE_NAME, args.timeout)
+        print(f"deleting AIMService/{aim_service} (warm caches are preserved)")
+        delete_aimservice(args.namespace, aim_service, args.timeout)
 
-    print(f"applying AIMService/{AIM_SERVICE_NAME} into namespace {args.namespace}")
+    print(f"applying AIMService/{aim_service} into namespace {args.namespace}")
     run(
         [
             "kubectl",
@@ -488,24 +548,26 @@ def main() -> int:
                 args.namespace,
                 "annotate",
                 "aimservice",
-                AIM_SERVICE_NAME,
+                aim_service,
                 f"aim.eai.amd.com/force-rebind={int(time.time())}",
                 "--overwrite",
             ],
             capture=True,
         )
 
-    print(f"waiting for AIMService/{AIM_SERVICE_NAME} (timeout {args.timeout})")
-    wait_aimservice(args.namespace, AIM_SERVICE_NAME, args.timeout)
-    print(f"waiting for Service/{AIM_SERVICE_NAME} endpoints")
-    wait_endpoints(args.namespace, AIM_SERVICE_NAME, args.timeout)
+    print(f"waiting for AIMService/{aim_service} (timeout {args.timeout})")
+    wait_aimservice(args.namespace, aim_service, args.timeout)
+    print(f"waiting for Service/{aim_service} endpoints")
+    wait_endpoints(args.namespace, aim_service, args.timeout)
 
-    print("reading served model id from http://dd-agentic-aim/v1/models")
-    served_id = fetch_served_id(args.namespace, resolved["aimId"])
+    print(f"reading served model id from {base_url}/models")
+    served_id = fetch_served_id(
+        args.namespace, resolved["aimId"], base_url, probe_deployment, probe_container
+    )
     print(f"served /v1/models id: {served_id}")
 
-    patch_configmap_file(CONFIGMAP_FILE, served_id)
-    patch_body = json.dumps({"data": {"REINVENT4_AGENT_MODEL": served_id}})
+    patch_configmap_file(CONFIGMAP_FILE, served_id, model_key)
+    patch_body = json.dumps({"data": {model_key: served_id}})
     run(
         [
             "kubectl",
@@ -521,29 +583,28 @@ def main() -> int:
         ]
     )
     print(f"updated ConfigMap/{CONFIGMAP_NAME} and {CONFIGMAP_FILE}")
-    print(f"restarting deployment/{DEPLOYMENT_NAME}")
-    run(
-        [
-            "kubectl",
-            "--namespace",
-            args.namespace,
-            "rollout",
-            "restart",
-            f"deployment/{DEPLOYMENT_NAME}",
-        ]
-    )
-    run(
-        [
-            "kubectl",
-            "--namespace",
-            args.namespace,
-            "rollout",
-            "status",
-            f"deployment/{DEPLOYMENT_NAME}",
-            "--timeout=20m",
-        ]
-    )
-    print(f"done: AIM {resolved['name']} serving {served_id}")
+
+    # Only this tier's clients. Restarting the other tier's would interrupt
+    # work that has nothing to do with the model being changed -- and a
+    # supervisor restart loses whatever task it was holding.
+    for deployment in tier["deployments"]:
+        if not deployment_exists(args.namespace, deployment):
+            print(f"deployment/{deployment} is not deployed; skipping its restart")
+            continue
+        print(f"restarting deployment/{deployment}")
+        run(
+            [
+                "kubectl", "--namespace", args.namespace,
+                "rollout", "restart", f"deployment/{deployment}",
+            ]
+        )
+        run(
+            [
+                "kubectl", "--namespace", args.namespace,
+                "rollout", "status", f"deployment/{deployment}", "--timeout=20m",
+            ]
+        )
+    print(f"done: AIM {resolved['name']} serving {served_id} on the {args.tier} tier")
     return 0
 
 

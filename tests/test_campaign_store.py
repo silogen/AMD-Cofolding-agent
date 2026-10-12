@@ -433,6 +433,154 @@ class TestResults:
         assert state == "failed"
 
 
+class TestResultsAreNarrowedForAContextWindow:
+    """A result's caller is an LLM, and a scorer emits far more than the axes.
+
+    Boltz reports ten per-molecule diagnostics beside the one objective they
+    explain, which made a 25-molecule result ~22k characters. Two of those in
+    a turn overflowed the conductor's 32768-token context: the front fix alone
+    left the same question failing with "max_tokens ... got -2623".
+    """
+
+    # The column set a real Boltz + QED candidate carries, because the ratio
+    # these tests assert on is a property of that shape.
+    DIAGNOSTIC_CANDIDATE = {
+        "smiles": "CCNc1cc(C(=O)NC(Cc2ccccc2)C(O)CNC2CCN3CCCCC3C2)cc(N2CCCCS2(=O)=O)c1",
+        "total_score": 5.71,
+        "components": {
+            "BoltzAffinity": {"transformed": 1.0, "raw": 0.0092},
+            "QED": {"transformed": 0.8, "raw": 0.8},
+            "ligand_iptm (BoltzAffinity)": {"transformed": 0.9049},
+            "confidence_score (BoltzAffinity)": {"transformed": 0.8692},
+            "skip_reason (BoltzAffinity)": {"transformed": None},
+            "affinity_pred_value (BoltzAffinity)": {"transformed": 0.0092},
+            "affinity_pred_value1 (BoltzAffinity)": {"transformed": -0.8188},
+            "affinity_pred_value2 (BoltzAffinity)": {"transformed": 0.8372},
+            "affinity_probability_binary (BoltzAffinity)": {"transformed": 0.2148},
+            "affinity_probability_binary1 (BoltzAffinity)": {"transformed": 0.1983},
+            "affinity_probability_binary2 (BoltzAffinity)": {"transformed": 0.2313},
+            "std (QED)": {"transformed": 0.1824},
+        },
+    }
+
+    def _result(self, client, **extra):
+        cid = _campaign(client)["campaign_id"]
+        _task(client, cid)
+        task = _claim(client, "s0").json()
+        body = {
+            "owner": "s0",
+            "objective_profile": {
+                "BoltzAffinity": 0.9, "QED": 0.8,
+                "confidence_score (BoltzAffinity)": 0.87,
+            },
+            "candidates": [dict(self.DIAGNOSTIC_CANDIDATE)],
+        }
+        body.update(extra)
+        client.post(f"/tasks/{task['task_id']}/result", json=body)
+        return cid
+
+    def test_the_redundant_half_of_a_scorers_columns_is_dropped(self, client):
+        cid = self._result(client)
+
+        candidate = client.get(f"/campaigns/{cid}/results").json()[0]["candidates"][0]
+
+        assert "affinity_pred_value1 (BoltzAffinity)" not in candidate["components"]
+        assert "std (QED)" not in candidate["components"]
+        assert candidate["components"]["BoltzAffinity"]["raw"] == 0.0092
+        assert candidate["smiles"] == self.DIAGNOSTIC_CANDIDATE["smiles"]
+        assert candidate["total_score"] == 5.71
+
+    def test_the_signals_that_qualify_an_objective_are_kept(self, client):
+        """An affinity with no confidence beside it gets narrated, not read.
+
+        Asked for the front's molecules with these dropped, the conductor
+        asserted a quality gate it could not see, inventing PoseBusters
+        numbers for a campaign that never ran PoseBusters.
+        """
+        cid = self._result(client)
+
+        candidate = client.get(f"/campaigns/{cid}/results").json()[0]["candidates"][0]
+
+        assert candidate["components"]["confidence_score (BoltzAffinity)"] == {
+            "transformed": 0.8692
+        }
+        assert candidate["components"]["ligand_iptm (BoltzAffinity)"] == {
+            "transformed": 0.9049
+        }
+
+    def test_a_qualifier_with_nothing_to_report_is_left_out(self, client):
+        """``skip_reason`` is null for every molecule the scorer did score."""
+        cid = self._result(client)
+
+        candidate = client.get(f"/campaigns/{cid}/results").json()[0]["candidates"][0]
+
+        assert "skip_reason (BoltzAffinity)" not in candidate["components"]
+
+    def test_a_skipped_molecule_says_so(self, client):
+        """The one case where the objective's value means nothing."""
+        cid = self._result(client, candidates=[{
+            "smiles": "CCO",
+            "components": {
+                "BoltzAffinity": {"transformed": 0.0},
+                "skip_reason (BoltzAffinity)": {"transformed": "fold failed"},
+            },
+        }])
+
+        candidate = client.get(f"/campaigns/{cid}/results").json()[0]["candidates"][0]
+
+        assert candidate["components"]["skip_reason (BoltzAffinity)"] == {
+            "transformed": "fold failed"
+        }
+
+    def test_the_objective_profile_is_narrowed_too(self, client):
+        cid = self._result(client)
+
+        result = client.get(f"/campaigns/{cid}/results").json()[0]
+
+        assert set(result["objective_profile"]) == {
+            "BoltzAffinity", "QED", "confidence_score (BoltzAffinity)"
+        }
+
+    def test_a_result_says_where_the_diagnostics_are(self, client):
+        cid = self._result(client)
+
+        result = client.get(f"/campaigns/{cid}/results").json()[0]
+
+        assert "read_results" in result["detail_hint"]
+
+    def test_full_returns_the_stored_record_untouched(self, client):
+        """The ledger is not lossy; only its default read is narrow."""
+        cid = self._result(client)
+
+        result = client.get(f"/campaigns/{cid}/results?full=1").json()[0]
+
+        assert result["objective_profile"]["confidence_score (BoltzAffinity)"] == 0.87
+        assert (
+            result["candidates"][0]["components"]
+            == self.DIAGNOSTIC_CANDIDATE["components"]
+        )
+        assert "detail_hint" not in result
+
+    def test_narrowing_survives_a_candidate_with_no_components(self, client):
+        cid = self._result(client, candidates=[{"smiles": "CCO"}])
+
+        candidate = client.get(f"/campaigns/{cid}/results").json()[0]["candidates"][0]
+
+        assert candidate["components"] == {}
+        assert candidate["total_score"] is None
+
+    def test_narrowing_is_worth_doing(self, client):
+        """The point of all of this, asserted rather than assumed."""
+        cid = self._result(
+            client, candidates=[dict(self.DIAGNOSTIC_CANDIDATE)] * 25
+        )
+
+        narrow = client.get(f"/campaigns/{cid}/results").text
+        full = client.get(f"/campaigns/{cid}/results?full=1").text
+
+        assert len(narrow) < len(full) / 2
+
+
 # ---------------------------------------------------------------------------
 # Pareto front
 # ---------------------------------------------------------------------------
@@ -487,6 +635,59 @@ class TestParetoFront:
 
         assert front == []
         assert ineligible[0]["missing_objectives"] == ["y"]
+
+    def test_the_front_reports_coordinates_not_molecules(self, client):
+        """A front with the molecules inline does not fit in a context window.
+
+        Three members with 25 candidates each came to ~42k tokens -- larger
+        on its own than the conductor model's 32768 -- so asking about the
+        front failed with "max_tokens must be at least 1, got -72257".
+        """
+        cid = _campaign(client)["campaign_id"]
+        _task(client, cid)
+        task = _claim(client, "s0").json()
+        client.post(
+            f"/tasks/{task['task_id']}/result",
+            json={
+                "owner": "s0",
+                "objective_profile": {"BoltzAffinity": 0.9, "QED": 0.8},
+                "candidates": [{"smiles": "CCO", "score": 0.9}] * 25,
+            },
+        )
+
+        member = client.get(f"/campaigns/{cid}/pareto").json()["front"][0]
+
+        assert "candidates" not in member
+        assert member["n_candidates"] == 25
+        assert member["task_id"] == task["task_id"]
+
+    def test_the_front_profile_is_only_the_campaigns_objectives(self, client):
+        """A stored profile can carry scorer diagnostics; they are not axes."""
+        cid = _campaign(client)["campaign_id"]
+        _task(client, cid)
+        task = _claim(client, "s0").json()
+        client.post(
+            f"/tasks/{task['task_id']}/result",
+            json={
+                "owner": "s0",
+                "objective_profile": {
+                    "BoltzAffinity": 0.9, "QED": 0.8,
+                    "confidence_score (BoltzAffinity)": 0.87,
+                    "std (logD)": 0.18,
+                },
+            },
+        )
+
+        member = client.get(f"/campaigns/{cid}/pareto").json()["front"][0]
+
+        assert set(member["objective_profile"]) == {"BoltzAffinity", "QED"}
+
+    def test_the_front_says_where_the_molecules_are(self, client):
+        cid = _campaign(client)["campaign_id"]
+
+        body = client.get(f"/campaigns/{cid}/pareto").json()
+
+        assert "get_supervisor_result" in body["molecules_hint"]
 
     def test_front_endpoint_uses_the_campaigns_objectives(self, client):
         cid = _campaign(client)["campaign_id"]

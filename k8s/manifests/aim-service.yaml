@@ -1,24 +1,64 @@
+# Two AIM endpoints, because the conductor and the supervisors want opposite
+# things from an LLM.
+#
+# The conductor takes one turn at a time and a person is waiting on it, so it
+# wants the best model and a *latency* profile. The supervisors are N agents
+# grinding through tool calls with nobody watching any single response, so they
+# want *throughput* and can take a smaller model. Serving both from one
+# latency-tuned endpoint is what B10 warned about: `k8s/README.md` itself
+# advises against that profile for concurrent sessions, which is exactly what N
+# supervisors are.
+#
+# Everything below was validated against this cluster rather than assumed --
+# `aimclustermodel` discovery and the `deployable` `aimclusterprofile` objects.
+# Both tiers fit **one MI300X each**, which is what keeps the split affordable;
+# the plan's rejected alternative (an 8-GPU tensor-parallel conductor model)
+# would have consumed the node and starved Boltz.
+#
+# To change either tier's model:
+#   k8s/scripts/switch-aim-model.py --tier conductor --namespace demo-lux \
+#     --model <AIMID> --accelerator-count 1 --precision fp4 --metric latency
 apiVersion: aim.eai.amd.com/v1alpha2
 kind: AIMService
 metadata:
-  name: dd-agentic-aim
+  name: dd-agentic-aim-conductor
+  labels:
+    app.kubernetes.io/name: dd-agentic-aim-conductor
+    app.kubernetes.io/component: llm
+    dd-agentic.amd.com/aim-tier: conductor
 spec:
-  # Replace model.name with the AIMClusterModel on the target cluster:
-  #   kubectl get aimclustermodel | grep -i qwen3-32b
-  # AIMService.spec.model.name is the cluster object name (e.g.
-  # amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-...), not a short alias.
+  # openai/gpt-oss-120b. Bigger than the supervisors' model and still a 1-GPU
+  # profile at fp4, which is the only reason it is affordable here.
   model:
-    name: amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-31bb0f
-  # profileOverrides require a named profile; name and selector are mutually
-  # exclusive. This is the 1-GPU fp8 latency profile (interactive Driver/Reviewer
-  # turns). Qwen3-32B is natively 32768 tokens; YaRN factor 2.0 extends it to
-  # 65536. vLLM 0.23 takes that scaling through hf-overrides, not rope-scaling.
+    name: amdenterpriseai-aim-openai-gpt-oss-120b-0-11-1-8bf8ba
+  # MI300X x1, fp4, metric=latency. One interactive turn at a time.
   profile:
-    name: amdenterpriseai-aim-qwen-q-vllm-mi300x-fp8-tp1-latency-5fa2c14c
+    name: amdenterpriseai-aim-openai-vllm-mi300x-mxfp4-tp1-laten-f5a75629
   profileOverrides:
     engineArgs:
-      max-model-len: 65536
-      hf-overrides: '{"rope_parameters":{"rope_theta":1000000,"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}}'
+      # The profile ships 32768, which is a serving choice and not the model's
+      # limit: gpt-oss-120b declares max_position_embeddings 131072 and
+      # already carries its own YaRN scaling (factor 32 over an original
+      # 4096), so unlike the supervisor tier below this needs no hf-overrides
+      # -- the weights are configured for it.
+      #
+      # 32768 was not enough. Asking this endpoint for a Pareto front with
+      # the molecules behind each point sent ~42k tokens of tool results and
+      # failed with "max_tokens must be at least 1, got -72257", because
+      # vLLM derives max_tokens as max-model-len minus the prompt. The
+      # payloads were narrowed to ~8k for that, so this is headroom rather
+      # than the fix, and a conductor reading several results in one turn
+      # needs the headroom.
+      #
+      # It costs concurrency, not memory: vLLM pre-allocates the KV pool at
+      # gpu-memory-utilization regardless, so this only changes how much of
+      # it one sequence may take -- 4.83 GB at 131072 against 1.21 GB at
+      # 32768. Cheap here because 18 of the 36 layers use a 128-token sliding
+      # window, leaving 36 KiB/token rather than the ~72 a dense model of
+      # this size would want. The conductor is one interactive session, so
+      # trading batch slots for context is the right way round. Do not copy
+      # this to the supervisor tier, where N agents do need the slots.
+      max-model-len: 131072
   replicas: 1
   caching:
     mode: Shared
@@ -28,10 +68,65 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: dd-agentic-aim
+  name: dd-agentic-aim-conductor
+  labels:
+    app.kubernetes.io/name: dd-agentic-aim-conductor
+    app.kubernetes.io/component: llm
 spec:
   selector:
-    aim.eai.amd.com/service.name: dd-agentic-aim
+    aim.eai.amd.com/service.name: dd-agentic-aim-conductor
+    app.kubernetes.io/component: inference
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: dd-agentic-aim-supervisor
+  labels:
+    app.kubernetes.io/name: dd-agentic-aim-supervisor
+    app.kubernetes.io/component: llm
+    dd-agentic.amd.com/aim-tier: supervisor
+spec:
+  # Qwen/Qwen3-32B, the model the single endpoint used to serve. Unchanged so
+  # the split alters *how* supervisors are served, not what they are talking
+  # to -- one variable at a time.
+  model:
+    name: amdenterpriseai-aim-qwen-qwen3-32b-0-13-0-31bb0f
+  # MI300X x1, fp8, metric=**throughput**. This is the half of the split that
+  # matters: N supervisors issuing concurrent tool calls are a throughput
+  # workload, and the latency profile they shared before was tuned for the
+  # opposite.
+  profile:
+    name: amdenterpriseai-aim-qwen-q-vllm-mi300x-fp8-tp1-through-6aa3b8ab
+  profileOverrides:
+    engineArgs:
+      # Qwen3-32B is natively 32768 tokens; YaRN factor 2.0 extends it to
+      # 65536. Carried over from the single-endpoint manifest because a
+      # supervisor's transcript grows with every tool call, and vLLM 0.23
+      # takes that scaling through hf-overrides rather than rope-scaling.
+      max-model-len: 65536
+      hf-overrides: '{"rope_parameters":{"rope_theta":1000000,"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}}'
+  # R. One GPU per replica, so this is the knob that trades GPUs between the
+  # supervisors' LLM and Boltz. Raise it only with a GPU to spare: §3.4 budgets
+  # 1 here against 5 for Boltz, and Boltz is the measured bottleneck.
+  replicas: 1
+  caching:
+    mode: Shared
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-aim-supervisor
+  labels:
+    app.kubernetes.io/name: dd-agentic-aim-supervisor
+    app.kubernetes.io/component: llm
+spec:
+  selector:
+    aim.eai.amd.com/service.name: dd-agentic-aim-supervisor
     app.kubernetes.io/component: inference
   ports:
     - name: http

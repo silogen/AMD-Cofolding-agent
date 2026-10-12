@@ -10,7 +10,14 @@ spec:
   # safe only because that gateway is in front: a replica serves exactly one
   # prediction at a time, so the headless Service below would otherwise hand a
   # six-minute request to a busy replica while another sat idle.
-  replicas: 2
+  # M. Each replica is one GPU and the only GPU consumer that matters: both
+  # replicas were measured pegged at 100% while a third RL job queued, so this
+  # is the throughput knob for the whole fleet. Raised to 3 once the AIM tiers
+  # moved to a second node and gave this one its GPU back, then to 4 when
+  # recreating the conductor AIMService freed a fourth. That GPU had to be
+  # claimed by a pending replica here rather than left idle, or the AIM would
+  # have landed back on this node -- see "Keeping AIM off the Boltz node".
+  replicas: 4
   strategy:
     # Zero surge, so a rollout never asks for an extra amd.com/gpu and the
     # replaced replica's GPU is freed first. Unlike Recreate this keeps M-1
