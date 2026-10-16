@@ -1,0 +1,288 @@
+/*
+ * Copyright Advanced Micro Devices, Inc.
+ * SPDX-License-Identifier: MIT
+ */
+
+@import "tailwindcss";
+
+/*
+ * Dark mode is driven by a class on <html>, not by the media query alone, so
+ * the user can override the system preference. index.html sets the class
+ * before React mounts; useTheme keeps it in step afterwards.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * `touch:` targets devices driven by a finger rather than a mouse.
+ *
+ * Tap targets are sized by INPUT TYPE, not by screen width. A 768px tablet is
+ * a touch device and needs large targets; a 768px browser window on a desktop
+ * does not. Sizing them at a width breakpoint gets one of those two wrong.
+ */
+@custom-variant touch (@media (pointer: coarse));
+
+/*
+ * Design tokens
+ * -------------
+ * Semantic names, not colour names, so light and dark are two values of the
+ * same idea and no component has to know which theme is active.
+ *
+ * "accent" is AMD red and is reserved for brand and primary actions.
+ * "science" colours label the three non-text data kinds and are reused by the
+ * cards, the badges and the 3D viewer, so a structure always reads as a
+ * structure wherever it appears.
+ */
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --color-accent: oklch(0.55 0.21 27);
+  --color-accent-strong: oklch(0.48 0.22 27);
+  --color-accent-soft: oklch(0.96 0.03 27);
+
+  --color-structure: oklch(0.62 0.16 250);
+  --color-molecule: oklch(0.6 0.15 155);
+  --color-table: oklch(0.65 0.14 300);
+}
+
+/*
+ * Surfaces and text. Declared as plain custom properties (not @theme) because
+ * they change with the theme; Tailwind utilities reach them through the
+ * bg-surface / text-body style aliases registered below.
+ */
+@layer base {
+  :root {
+    --surface-page: oklch(0.98 0.004 260);
+    --surface-raised: oklch(1 0 0);
+    --surface-sunken: oklch(0.95 0.006 260);
+    --surface-inset: oklch(0.93 0.008 260);
+    --border-subtle: oklch(0.89 0.008 260);
+    --border-strong: oklch(0.8 0.01 260);
+    --text-body: oklch(0.25 0.015 260);
+    --text-muted: oklch(0.52 0.015 260);
+    --text-faint: oklch(0.63 0.013 260);
+    --shadow-card: 0 1px 2px oklch(0.2 0.02 260 / 0.06), 0 1px 3px oklch(0.2 0.02 260 / 0.04);
+  }
+
+  .dark {
+    --surface-page: oklch(0.17 0.012 260);
+    --surface-raised: oklch(0.21 0.014 260);
+    --surface-sunken: oklch(0.14 0.012 260);
+    --surface-inset: oklch(0.25 0.015 260);
+    --border-subtle: oklch(0.3 0.015 260);
+    --border-strong: oklch(0.4 0.018 260);
+    --text-body: oklch(0.93 0.005 260);
+    --text-muted: oklch(0.7 0.012 260);
+    --text-faint: oklch(0.58 0.012 260);
+    --shadow-card: 0 1px 2px oklch(0 0 0 / 0.3), 0 1px 3px oklch(0 0 0 / 0.2);
+
+    /* Lift the accent in dark mode; AMD red at full saturation vibrates
+       against a dark surface and is hard to read as text. */
+    --color-accent: oklch(0.66 0.19 27);
+    --color-accent-strong: oklch(0.72 0.18 27);
+    --color-accent-soft: oklch(0.28 0.06 27);
+
+    --color-structure: oklch(0.72 0.14 250);
+    --color-molecule: oklch(0.72 0.13 155);
+    --color-table: oklch(0.74 0.12 300);
+  }
+
+  * {
+    border-color: var(--border-subtle);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /*
+   * Mobile browsers grow and shrink their toolbars as you scroll, and 100%
+   * resolves against the largest viewport. Without dvh the composer sits under
+   * the browser chrome on first paint. dvh follows the visible area instead.
+   */
+  @supports (height: 100dvh) {
+    html,
+    body,
+    #root {
+      height: 100dvh;
+    }
+  }
+
+  body {
+    margin: 0;
+    background: var(--surface-page);
+    color: var(--text-body);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    /* Stop the whole page rubber-banding on iOS; the transcript scrolls. */
+    overscroll-behavior-y: none;
+  }
+
+  /* Only show focus rings for keyboard users, but never remove them. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/*
+ * Semantic utilities. Components use these instead of raw colours, so a theme
+ * change is a token change and never a component change.
+ */
+@utility bg-page {
+  background-color: var(--surface-page);
+}
+@utility bg-raised {
+  background-color: var(--surface-raised);
+}
+@utility bg-sunken {
+  background-color: var(--surface-sunken);
+}
+@utility bg-inset {
+  background-color: var(--surface-inset);
+}
+@utility text-body {
+  color: var(--text-body);
+}
+@utility text-muted {
+  color: var(--text-muted);
+}
+@utility text-faint {
+  color: var(--text-faint);
+}
+@utility border-subtle {
+  border-color: var(--border-subtle);
+}
+@utility border-strong {
+  border-color: var(--border-strong);
+}
+@utility shadow-card {
+  box-shadow: var(--shadow-card);
+}
+
+/*
+ * Markdown produced by the agent. Tailwind resets heading and list styles, and
+ * the Typography plugin is more than this needs, so the few elements the agent
+ * actually emits are styled here.
+ */
+@layer components {
+  .markdown {
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+  }
+  .markdown > * + * {
+    margin-top: 0.75rem;
+  }
+  .markdown h1,
+  .markdown h2,
+  .markdown h3,
+  .markdown h4 {
+    font-weight: 600;
+    line-height: 1.3;
+    margin-top: 1.25rem;
+  }
+  .markdown h1 {
+    font-size: 1.25rem;
+  }
+  .markdown h2 {
+    font-size: 1.125rem;
+  }
+  .markdown h3 {
+    font-size: 1rem;
+  }
+  .markdown ul,
+  .markdown ol {
+    padding-left: 1.4rem;
+  }
+  .markdown ul {
+    list-style: disc;
+  }
+  .markdown ol {
+    list-style: decimal;
+  }
+  .markdown li + li {
+    margin-top: 0.25rem;
+  }
+  .markdown a {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .markdown code {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background: var(--surface-inset);
+    padding: 0.1em 0.35em;
+    border-radius: 0.3rem;
+  }
+  .markdown pre {
+    background: var(--surface-sunken);
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    overflow-x: auto;
+  }
+  .markdown pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.8125rem;
+  }
+  .markdown blockquote {
+    border-left: 3px solid var(--border-strong);
+    padding-left: 0.9rem;
+    color: var(--text-muted);
+  }
+  .markdown table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+  .markdown th,
+  .markdown td {
+    border: 1px solid var(--border-subtle);
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+  }
+  .markdown th {
+    background: var(--surface-sunken);
+    font-weight: 600;
+  }
+}
+
+/*
+ * 3Dmol injects its own absolutely positioned canvas and, in some builds, a
+ * white background div. Force it to inherit the card surface so the viewer
+ * does not flash white in dark mode.
+ */
+.viewer-host canvas {
+  border-radius: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,121 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cofolding agent UI — nginx reverse proxy
+#
+# Topology:
+#   browser → nginx:8080
+#     /              → the built single-page app
+#     /api/chat      → agent gateway WebSocket
+#     /api/...       → agent gateway REST (health, session, artifacts)
+#
+# The upstream host and port come from AGENT_UPSTREAM at start-up, so the
+# gateway address never has to be hard-coded here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+upstream agent_upstream {
+    server ${AGENT_UPSTREAM};
+    keepalive 4;
+}
+
+gzip on;
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_types
+    text/html
+    text/css
+    text/plain
+    text/javascript
+    application/json
+    application/javascript
+    image/svg+xml
+    chemical/x-pdb
+    chemical/x-cif;
+
+server {
+    listen 8080;
+    server_name _;
+
+    # ── security headers ──────────────────────────────────────────────────
+    add_header X-Content-Type-Options  "nosniff"       always;
+    add_header X-Frame-Options         "SAMEORIGIN"    always;
+    add_header X-XSS-Protection        "1; mode=block" always;
+    add_header Referrer-Policy         "same-origin"   always;
+
+    root  /usr/share/nginx/html;
+    index index.html;
+
+    # Structure files are large, and the 3D viewer reads them as text.
+    client_max_body_size 8m;
+
+    location = / {
+        try_files /index.html =404;
+        add_header Cache-Control "no-store";
+    }
+
+    # ── nginx own health (container health-check and readiness probe) ─────
+    location = /nginx-health {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+
+    # ── the chat WebSocket ────────────────────────────────────────────────
+    # A design campaign runs for minutes with no traffic between events, so
+    # the read timeout is long: a shorter one would drop the socket in the
+    # middle of a Boltz job and lose the turn.
+    location = /api/chat {
+        proxy_pass         http://agent_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade           $http_upgrade;
+        proxy_set_header   Connection        "upgrade";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout  10s;
+        proxy_send_timeout     3600s;
+        proxy_read_timeout     3600s;
+        proxy_buffering        off;
+    }
+
+    # ── the rest of the gateway API ───────────────────────────────────────
+    location /api/ {
+        proxy_pass         http://agent_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection        "";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout  10s;
+        proxy_send_timeout     300s;
+        proxy_read_timeout     300s;
+        proxy_buffering        off;
+    }
+
+    # ── Vite hashed bundles: content-addressed, safe to cache forever ─────
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    # ── single-page app fallback ──────────────────────────────────────────
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "public, max-age=3600";
+    }
+
+    # ── the gateway is down ───────────────────────────────────────────────
+    error_page 502 503 504 /50x.json;
+    location = /50x.json {
+        internal;
+        default_type application/json;
+        return 503 '{"error":"The agent gateway is unavailable. Check the dd-web container."}';
+    }
+}

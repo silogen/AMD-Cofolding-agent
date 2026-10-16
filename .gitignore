@@ -12,6 +12,9 @@ __pycache__/
 dist/
 build/
 
+# Node (services/ui/frontend)
+node_modules/
+
 # Logs
 logs/
 *.log

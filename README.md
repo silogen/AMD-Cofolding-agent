@@ -96,13 +96,14 @@ dd_agentic/
 │   │   ├── store.py                # JSON file persistence + version history
 │   │   └── mapper.py               # TTP -> REINVENT4 scorer config translation
 │   └── pyproject.toml
-├── reinvent4_agent/                # CLI agent package (dd-agent, dd-coscientist)
+├── reinvent4_agent/                # CLI agent package (dd-agent, dd-coscientist, dd-web)
 │   ├── cli.py                      # Entry points, arg parsing, interactive loop, /review
 │   ├── agent.py                    # Agentic loop, tool scoping, background job monitoring
 │   ├── coordinator.py              # Driver <-> Reviewer handoff protocol + campaign monitor
 │   ├── system_prompt.py            # MEDCHEM_KNOWLEDGE + Driver / Reviewer system prompts
 │   ├── mcp_client.py               # MCP stdio client wrapper
 │   ├── display.py                  # Rich formatting with per-agent attribution
+│   ├── web/                        # Web gateway (dd-web): HTTP + WebSocket for the UI
 │   ├── backends/
 │   │   ├── anthropic_backend.py
 │   │   └── openai_backend.py
@@ -120,6 +121,7 @@ dd_agentic/
 │   ├── admet-predictor/            # ADMET REST wrapper     (Dockerfile, app.py)
 │   ├── retrodmta-predictor/        # RetroDMTA REST wrapper (Dockerfile, app.py)
 │   ├── interaction-profiler/       # Interaction wrapper    (Dockerfile, app.py)
+│   ├── ui/                         # Web UI: React app + nginx (see services/ui/README.md)
 │   ├── singularity/                # Apptainer stack -- no Docker daemon needed
 │   │   ├── README.md               # Full Apptainer guide
 │   │   ├── dd-agent.def            # GPU images, vendor-templated via build args
@@ -136,7 +138,7 @@ dd_agentic/
 │       ├── run_interactive.sh      # Agent-only interactive Docker run
 │       ├── agent.sbatch            # Batch job submission
 │       └── setup.sh                # Bare-metal venv install (no containers)
-├── docker-compose.yml              # 6-service compose stack
+├── docker-compose.yml              # 6-service compose stack (+ optional web UI)
 ├── reinvent4_mcp_config.yaml       # Process config (service URLs, RL defaults, storage paths)
 ├── TESTING.md                      # Manual and scripted test scenarios
 ├── tests/                          # ~316 unit tests (REINVENT4 imports mocked, no GPU needed)
@@ -147,6 +149,7 @@ dd_agentic/
 │   ├── test_posebusters_wrapper.py # PoseBusters FastAPI app
 │   ├── test_external_scoring.py    # ExternalRESTScorer + pipeline integration
 │   ├── test_agent_tool_repair.py   # Orphaned tool-call repair in the agent loop
+│   ├── test_web_artifacts.py       # Web UI tool-result classifier + artifact path safety
 │   └── conftest.py
 │
 │  # --- Gitignored: restore manually before building ---
@@ -386,6 +389,21 @@ Everything the stack writes lands under `${DATA_DIR:-./data}` on the host, so st
 | `data/tb_logs` | `/data/reinvent4_mcp/tb_logs` | TensorBoard logs |
 | `data/agent_logs` | `/logs` | Agent session `.log` + `.jsonl` transcripts |
 | `boltz_cache` (named volume) | `/cache` | Boltz2 model weights |
+
+### Web UI
+
+A browser UI is available as an option. It shows the chat next to a 3D
+viewer for cofolded structures, 2D drawings of molecules and sortable tables
+of predictions. It runs in two more containers, `dd-web` (the agent behind
+HTTP and WebSocket) and `ui` (nginx), in the `ui` Compose profile:
+
+```bash
+docker compose --profile ui up -d dd-web ui
+ssh -J <login-node> -L 8080:localhost:8080 <compute-node>   # on your machine
+```
+
+Then open <http://localhost:8080>. See [services/ui/README.md](services/ui/README.md)
+for the details and for UI development without a GPU.
 
 ---
 

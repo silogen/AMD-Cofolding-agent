@@ -34,7 +34,7 @@ services:
       - "slurm.job.id=${SLURM_JOB_ID:-}"
       - "slurm.user=${SLURM_JOB_USER:-$USER}"
       - "slurm.gpu=${REINVENT_GPU}"
-    volumes:
+    volumes: &agent-volumes
       - ${DATA_DIR:-./data}/shared:/shared
       - ${DATA_DIR:-./data}/ttps:/root/.reinvent4_mcp/ttps
       - ${DATA_DIR:-./data}/jobs:/data/reinvent4_mcp/jobs
@@ -42,7 +42,7 @@ services:
       - ${DATA_DIR:-./data}/tb_logs:/data/reinvent4_mcp/tb_logs
       # dd-agent / dd-coscientist session logs + JSONL transcripts.
       - ${DATA_DIR:-./data}/agent_logs:/logs
-    environment:
+    environment: &agent-environment
       - LLM_GATEWAY_KEY=${LLM_GATEWAY_KEY:-}
       # Used instead of LLM_GATEWAY_KEY for endpoints that take a plain
       # API key rather than gateway headers (Azure, Anthropic, ...).
@@ -69,7 +69,7 @@ services:
       # interactive session.
       - REINVENT4_AGENT_LOG_TIMESTAMPS=${REINVENT4_AGENT_LOG_TIMESTAMPS:-}
     # The LLM endpoint is reached directly by DNS from the bridge network.
-    depends_on:
+    depends_on: &agent-depends-on
       boltz:
         condition: service_healthy
       posebusters:
@@ -141,3 +141,45 @@ services:
       - "127.0.0.1:8083:8080"
     volumes:
       - ${DATA_DIR:-./data}/shared:/shared
+
+  # ── Web UI (optional) ──────────────────────────────────────────────────
+  # Off by default. Start it with:  docker compose --profile ui up -d
+  # dd-web runs the agent behind HTTP and WebSocket, with the same image,
+  # data and LLM settings as reinvent4-mcp. The ui service serves the
+  # browser app and proxies /api/ to dd-web. See services/ui/README.md.
+  dd-web:
+    profiles: ["ui"]
+    build:
+      context: .
+      dockerfile: services/dd-agent/Dockerfile
+    <<: *rocm-common
+    shm_size: "128g"
+    labels:
+      - "slurm.job.id=${SLURM_JOB_ID:-}"
+      - "slurm.user=${SLURM_JOB_USER:-$USER}"
+      - "slurm.gpu=${REINVENT_GPU}"
+    volumes: *agent-volumes
+    environment: *agent-environment
+    command: ["dd-web"]
+    ports:
+      - "127.0.0.1:${DD_WEB_PORT:-8000}:8000"
+    depends_on: *agent-depends-on
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  ui:
+    profiles: ["ui"]
+    build:
+      context: .
+      dockerfile: services/ui/Dockerfile
+    environment:
+      - AGENT_UPSTREAM=dd-web:8000
+    ports:
+      - "127.0.0.1:${UI_PORT:-8080}:8080"
+    depends_on:
+      dd-web:
+        condition: service_started

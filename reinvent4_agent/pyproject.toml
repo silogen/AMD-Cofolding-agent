@@ -15,11 +15,16 @@ dependencies = [
     "mcp[cli]>=1.9,<2",
     "rich>=13.0",
     "prompt_toolkit>=3.0",
+    # Web gateway (dd-web). Same lower bounds as the scoring services.
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "websockets>=12",
 ]
 
 [project.scripts]
 dd-agent = "reinvent4_agent.cli:main"
 dd-coscientist = "reinvent4_agent.cli:coscientist_main"
+dd-web = "reinvent4_agent.web.cli:main"
 
 [build-system]
 # >=77 understands the PEP 639 SPDX string form of `project.license`.

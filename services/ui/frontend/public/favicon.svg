@@ -1,0 +1,13 @@
+<!--
+Copyright Advanced Micro Devices, Inc.
+SPDX-License-Identifier: MIT
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Cofolding agent">
+  <!-- A ligand: three bonded atoms, in the accent and structure colours. -->
+  <g fill="none" stroke="#ED1C24" stroke-width="2.4" stroke-linecap="round">
+    <path d="M9 21 L16 11 L23 21" />
+  </g>
+  <circle cx="9" cy="21" r="4" fill="#ED1C24" />
+  <circle cx="16" cy="11" r="4" fill="#4C8DF6" />
+  <circle cx="23" cy="21" r="4" fill="#3FA97B" />
+</svg>
