@@ -25,7 +25,6 @@ gzip_proxied any;
 gzip_comp_level 5;
 gzip_min_length 1024;
 gzip_types
-    text/html
     text/css
     text/plain
     text/javascript
@@ -40,10 +39,9 @@ server {
     server_name _;
 
     # ── security headers ──────────────────────────────────────────────────
-    add_header X-Content-Type-Options  "nosniff"       always;
-    add_header X-Frame-Options         "SAMEORIGIN"    always;
-    add_header X-XSS-Protection        "1; mode=block" always;
-    add_header Referrer-Policy         "same-origin"   always;
+    # nginx drops server-level add_header in a location that sets its own
+    # add_header, so every such location includes this file again.
+    include /etc/nginx/snippets/security-headers.conf;
 
     root  /usr/share/nginx/html;
     index index.html;
@@ -53,14 +51,15 @@ server {
 
     location = / {
         try_files /index.html =404;
+        include /etc/nginx/snippets/security-headers.conf;
         add_header Cache-Control "no-store";
     }
 
     # ── nginx own health (container health-check and readiness probe) ─────
     location = /nginx-health {
         access_log off;
+        default_type text/plain;
         return 200 "ok\n";
-        add_header Content-Type text/plain;
     }
 
     # ── the chat WebSocket ────────────────────────────────────────────────
@@ -102,17 +101,19 @@ server {
     # ── Vite hashed bundles: content-addressed, safe to cache forever ─────
     location /assets/ {
         try_files $uri =404;
+        include /etc/nginx/snippets/security-headers.conf;
         add_header Cache-Control "public, max-age=31536000, immutable";
     }
 
     # ── single-page app fallback ──────────────────────────────────────────
     location / {
         try_files $uri $uri/ /index.html;
+        include /etc/nginx/snippets/security-headers.conf;
         add_header Cache-Control "public, max-age=3600";
     }
 
     # ── the gateway is down ───────────────────────────────────────────────
-    error_page 502 503 504 /50x.json;
+    error_page 502 503 504 =503 /50x.json;
     location = /50x.json {
         internal;
         default_type application/json;

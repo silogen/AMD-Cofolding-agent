@@ -29,6 +29,7 @@ RUN rm /etc/nginx/conf.d/default.conf
 # Templates in this directory are rendered with envsubst by the nginx
 # entrypoint, which is how AGENT_UPSTREAM reaches the config at start-up.
 COPY services/ui/nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY services/ui/security-headers.conf /etc/nginx/snippets/security-headers.conf
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 

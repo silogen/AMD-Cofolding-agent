@@ -154,3 +154,14 @@ def test_a_real_file_inside_the_shared_volume_resolves(shared_root):
 def test_a_directory_is_not_served(shared_root):
     (shared_root / "out").mkdir()
     assert artifacts.resolve_artifact("out") is None
+
+
+def test_a_relative_path_is_read_from_the_shared_volume(shared_root):
+    raw = json.dumps({"structures": ["predictions/run_1/model_0.cif"]})
+    panel = only(artifacts.extract_panels("list_shared_assets", raw), "structure")
+    assert panel["path"] == "predictions/run_1/model_0.cif"
+
+
+def test_a_relative_path_cannot_escape_the_shared_volume():
+    raw = json.dumps({"structures": ["../outside/model_0.cif"]})
+    assert artifacts.extract_panels("list_shared_assets", raw) == []

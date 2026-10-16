@@ -316,13 +316,16 @@ def _scalar_or_none(value: Any) -> Any:
 def to_relative_artifact_path(path: str) -> str | None:
     """Return *path* relative to the shared volume, or None if it is outside.
 
-    Tool results carry absolute container paths.  The browser must never be
+    Most tool results carry absolute container paths, but some, such as
+    ``list_shared_assets``, give paths relative to the shared volume, so a
+    relative path is read from ``SHARED_ROOT``.  The browser must never be
     able to ask for a file outside the shared volume, so the path is resolved
     and checked against ``SHARED_ROOT`` before it is ever put in a URL.
     """
     try:
-        resolved = Path(path).resolve()
         root = SHARED_ROOT.resolve()
+        candidate = Path(path)
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
     except (OSError, RuntimeError):
         return None
 

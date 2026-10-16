@@ -60,7 +60,8 @@ COPY reinvent4_mcp_config.yaml /app/reinvent4_mcp_config.yaml
 # can't be clobbered by a transitive dependency (e.g. an older numpy<2 pin).
 # Verify the exact import REINVENT4 needs at RL startup so any ABI mismatch
 # fails the build, not the run.
-RUN pip install --no-cache-dir /app/reinvent4_mcp /app/reinvent4_agent && \
+# The [web] extra adds dd-web, which the optional web UI uses.
+RUN pip install --no-cache-dir /app/reinvent4_mcp "/app/reinvent4_agent[web]" && \
     pip install --no-cache-dir --upgrade "numpy>=2,<3" "scipy>=1.13" && \
     python -c "import numpy, scipy; from scipy.stats import gaussian_kde; import reinvent; \
 import reinvent4_mcp.utils as u; u.ensure_reinvent4_importable(); \

@@ -93,7 +93,27 @@ set `UI_PORT` (default 8080) and `DD_WEB_PORT` (default 8000) before
 `docker compose up`.
 
 `dd-web` uses one agent per browser tab. It does not run the Reviewer, so
-`REINVENT4_AGENT_MULTI_AGENT` has no effect on the UI.
+`REINVENT4_AGENT_MULTI_AGENT` has no effect on the UI. If the connection
+drops, the running turn stops and the next connection starts a new
+conversation; the UI says so.
+
+The `ui` container looks up `dd-web` only when it starts. Compose restarts
+`ui` when it restarts `dd-web`; if you restart `dd-web` with plain `docker`,
+restart `ui` too.
+
+### Security
+
+`dd-web` has no login. Anybody who can connect to the two ports on the
+compute node can use the agent with your LLM key and read `data/shared`.
+The ports listen on `127.0.0.1` only, but on a node that is shared with
+other users, they can connect too. Do not use the UI on a shared node with
+data that other users must not see.
+
+The chat socket accepts browser pages only from its own host and from
+`localhost`, so other web pages open in your browser cannot use the agent
+through the tunnel. To allow another origin (for example, a reverse proxy),
+set `REINVENT4_WEB_ALLOWED_ORIGINS` on `dd-web` to a comma-separated list
+such as `http://proxy.example:8080`.
 
 To stop:
 
@@ -113,7 +133,7 @@ anything older), and Python 3.10 or later for the mock.
 and generated PDB files, so the whole interface — viewer, tables, drawings —
 runs on a laptop with no GPU, no LLM and no Slurm allocation.
 
-Use two terminals. This is the same shape the medworkup UI uses, and the mock
+Use two terminals. The mock
 deliberately listens on the real gateway's port, so the default proxy target
 works for either one.
 
@@ -165,7 +185,7 @@ all three.
 
 ### Driving the real agent instead of the mock
 
-Start `dd-web` on the compute node (see "Run it on a compute node" below),
+Start `dd-web` on the compute node (see "Run it on a compute node" above),
 forward its port to your machine, and point the proxy at it. No code change
 is needed; only the environment variable differs.
 
@@ -173,6 +193,10 @@ is needed; only the environment variable differs.
 ssh -L 8000:localhost:8000 <compute-node>
 VITE_PROXY_TARGET=http://localhost:8000 npm run dev
 ```
+
+If you open the dev server from another device (`npm run dev -- --host`),
+`dd-web` refuses the chat socket from that origin. Add the origin, for
+example `http://192.168.1.20:5173`, to `REINVENT4_WEB_ALLOWED_ORIGINS`.
 
 The mock imports the real classifier from `reinvent4_agent.web.artifacts` when
 it can, so even against the mock the panels are built by the same code that runs
@@ -200,6 +224,7 @@ npm run build    # tsc -b && vite build
 
 cd ../../..
 python -m pytest tests/test_web_artifacts.py   # the classifier and path safety
+python -m pytest tests/test_web_server.py      # the chat socket (needs the [web] extra)
 ```
 
 ## Layout

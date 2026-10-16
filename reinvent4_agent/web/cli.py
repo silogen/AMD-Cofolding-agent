@@ -52,8 +52,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
 
-    import uvicorn
-    from reinvent4_agent.web.server import create_app
+    try:
+        import uvicorn
+        from reinvent4_agent.web.server import create_app
+    except ModuleNotFoundError as exc:
+        raise SystemExit(f"dd-web needs the web extra ({exc.name} is missing). Install reinvent4_agent[web].") from exc
 
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level=args.log_level)
 

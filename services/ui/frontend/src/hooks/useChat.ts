@@ -72,6 +72,7 @@ export function useChat(): ChatState {
   const attemptRef = useRef(0);
   const retryRef = useRef<number | null>(null);
   const closedByUs = useRef(false);
+  const hadSession = useRef(false);
 
   /** Append a block to the open agent turn, starting one if needed. */
   const appendBlock = useCallback((block: TurnBlock) => {
@@ -97,6 +98,34 @@ export function useChat(): ChatState {
         case "ready":
           setModel(event.model);
           setTools(event.tools);
+          // The gateway gives every connection a new agent with an empty
+          // history. After a reconnect, say so, or the transcript above
+          // suggests that the agent still knows it.
+          if (hadSession.current) {
+            setTurns((previous) => {
+              if (!previous.some((turn) => turn.role === "user")) return previous;
+              const closed = previous.map((turn) =>
+                turn.role === "agent" && !turn.done ? { ...turn, done: true } : turn,
+              );
+              const notice: AgentTurn = {
+                role: "agent",
+                id: makeId("turn"),
+                at: Date.now(),
+                blocks: [
+                  {
+                    kind: "error",
+                    id: makeId("err"),
+                    message:
+                      "The connection was lost and a new conversation started. " +
+                      "The agent does not remember the messages above.",
+                  },
+                ],
+                done: true,
+              };
+              return [...closed, notice];
+            });
+          }
+          hadSession.current = true;
           break;
 
         case "status":
@@ -166,8 +195,9 @@ export function useChat(): ChatState {
           break;
 
         case "error":
+          // Not the end of the turn: the gateway also reports errors while
+          // the agent keeps working. Only "status: idle" ends a turn.
           appendBlock({ kind: "error", id: makeId("err"), message: event.message });
-          setBusy(false);
           break;
       }
     },

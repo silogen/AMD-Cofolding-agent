@@ -15,7 +15,11 @@ dependencies = [
     "mcp[cli]>=1.9,<2",
     "rich>=13.0",
     "prompt_toolkit>=3.0",
-    # Web gateway (dd-web). Same lower bounds as the scoring services.
+]
+
+[project.optional-dependencies]
+# Web gateway (dd-web). Same lower bounds as the scoring services.
+web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "websockets>=12",

@@ -26,6 +26,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -62,6 +63,44 @@ def _env_int(name: str) -> int | None:
     except ValueError:
         logger.warning("Ignoring non-numeric %s=%r", name, raw)
         return None
+
+
+#: Browser origins that may open the chat socket, in addition to the
+#: gateway's own host and to localhost. Comma-separated full origins, for
+#: example ``http://my-proxy:8080``.
+_EXTRA_ORIGINS_ENV = "REINVENT4_WEB_ALLOWED_ORIGINS"
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def origin_allowed(origin: str | None, host: str | None) -> bool:
+    """Decide if a browser page at *origin* may open the chat socket.
+
+    Browsers do not apply the same-origin policy to WebSockets, so without
+    this check any web page open in the user's browser could drive the agent
+    through the SSH tunnel. Clients that send no Origin are not browsers and
+    are allowed.
+    """
+    if not origin:
+        return True
+    extra = {item.strip().rstrip("/") for item in os.environ.get(_EXTRA_ORIGINS_ENV, "").split(",") if item.strip()}
+    if origin.rstrip("/") in extra:
+        return True
+    try:
+        origin_host = urlsplit(origin).hostname
+        own_host = urlsplit(f"//{host}").hostname if host else None
+    except ValueError:
+        return False
+    if origin_host is None:
+        return False
+    return origin_host in _LOOPBACK_HOSTS or origin_host == own_host
+
+
+@dataclass
+class _Session:
+    """State of one chat connection."""
+
+    running: asyncio.Task[str] | None = None
 
 
 @dataclass
@@ -226,6 +265,12 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
 
     @app.websocket("/api/chat")
     async def chat(websocket: WebSocket) -> None:
+        origin = websocket.headers.get("origin")
+        if not origin_allowed(origin, websocket.headers.get("host")):
+            logger.warning("Rejected chat connection from origin %s", origin)
+            await websocket.close(code=1008)
+            return
+
         await websocket.accept()
 
         if not gateway.ready:
@@ -256,12 +301,21 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
             }
         )
 
+        session = _Session()
         sender = asyncio.create_task(_forward_events(websocket, handler))
         try:
-            await _receive_loop(websocket, agent, handler)
+            await _receive_loop(websocket, agent, handler, session)
         except WebSocketDisconnect:
             logger.info("Client disconnected")
         finally:
+            # Nobody reads the events of this agent any more, and the next
+            # connection gets a new agent, so a turn left running would only
+            # keep calling tools for no one.
+            if session.running is not None and not session.running.done():
+                logger.info("Cancelling the turn of a disconnected client")
+                session.running.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await session.running
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sender
@@ -279,7 +333,12 @@ async def _forward_events(websocket: WebSocket, handler: WebSocketEventHandler) 
             return
 
 
-async def _receive_loop(websocket: WebSocket, agent: Any, handler: WebSocketEventHandler) -> None:
+async def _receive_loop(
+    websocket: WebSocket,
+    agent: Any,
+    handler: WebSocketEventHandler,
+    session: _Session,
+) -> None:
     """Read user messages and run one agent turn at a time.
 
     Turns are serialised per connection: the agent keeps conversation state,
@@ -287,13 +346,13 @@ async def _receive_loop(websocket: WebSocket, agent: Any, handler: WebSocketEven
     A message that arrives while a turn is running is rejected rather than
     queued, so the user sees why nothing happened.
     """
-    running: asyncio.Task[str] | None = None
-
     while True:
         raw = await websocket.receive_text()
         try:
             message = json.loads(raw)
         except ValueError:
+            message = None
+        if not isinstance(message, dict):
             handler.emit({"type": "error", "message": "Malformed message."})
             continue
 
@@ -305,7 +364,7 @@ async def _receive_loop(websocket: WebSocket, agent: Any, handler: WebSocketEven
         if not content:
             continue
 
-        if running is not None and not running.done():
+        if session.running is not None and not session.running.done():
             handler.emit(
                 {
                     "type": "error",
@@ -315,7 +374,7 @@ async def _receive_loop(websocket: WebSocket, agent: Any, handler: WebSocketEven
             continue
 
         handler.emit({"type": "status", "state": "busy"})
-        running = asyncio.create_task(_run_turn(agent, handler, content))
+        session.running = asyncio.create_task(_run_turn(agent, handler, content))
 
 
 async def _run_turn(agent: Any, handler: WebSocketEventHandler, content: str) -> str:
