@@ -135,6 +135,34 @@ class CampaignStoreClient:
             owner=self.owner, error=error, requeue=requeue,
         )
 
+    def report_presence(
+        self,
+        state: str,
+        campaign_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        tasks_completed: int = 0,
+        tasks_failed: int = 0,
+        detail: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Tell the ledger this supervisor exists and whether it is free.
+
+        Claiming is the only other thing that puts a supervisor in the ledger,
+        so without this an idle one is indistinguishable from one that never
+        started.
+        """
+
+        return self._call(
+            "POST", f"/supervisors/{self.owner}/presence",
+            state=state, campaign_id=campaign_id, task_id=task_id,
+            tasks_completed=tasks_completed, tasks_failed=tasks_failed,
+            detail=detail,
+        )
+
+    def drop_presence(self) -> None:
+        """Leave the pool on purpose, rather than being timed out of it."""
+
+        self._call("DELETE", f"/supervisors/{self.owner}")
+
     # -- conductor side ----------------------------------------------------
 
     def create_campaign(
@@ -161,6 +189,12 @@ class CampaignStoreClient:
 
     def campaigns(self) -> list[dict[str, Any]]:
         return self._get("/campaigns")
+
+    def supervisors(self, campaign_id: Optional[str] = None) -> dict[str, Any]:
+        """The live pool, with dead presences swept first."""
+
+        query = f"?campaign_id={campaign_id}" if campaign_id else ""
+        return self._get(f"/supervisors{query}")
 
     def status(self, campaign_id: str) -> dict[str, Any]:
         return self._get(f"/campaigns/{campaign_id}/status")

@@ -147,7 +147,11 @@ if not ids:
 else:
     for campaign_id in ids:
         status = store.status(campaign_id)
-        print(format_status(status))
+        try:
+            pool = store.supervisors(campaign_id)
+        except Exception:
+            pool = None
+        print(format_status(status, pool))
         if status["in_flight"]:
             print("  RL jobs:")
             rl_jobs(status)

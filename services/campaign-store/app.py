@@ -72,6 +72,11 @@ DB_PATH = Path(os.getenv("CAMPAIGN_STORE_DB", "/shared/campaign-store/campaigns.
 TASK_MAX_ATTEMPTS = int(os.getenv("TASK_MAX_ATTEMPTS", "2"))
 DEFAULT_LEASE_SECONDS = float(os.getenv("DEFAULT_LEASE_SECONDS", "900"))
 
+# How long a supervisor's presence stands without being renewed. Generous
+# against the supervisor's poll interval, so a slow loop is not read as a dead
+# pod; the cost of being wrong is a conductor dispatching to nobody.
+DEFAULT_PRESENCE_TTL_SECONDS = float(os.getenv("PRESENCE_TTL_SECONDS", "120"))
+
 # Campaign states: `dispatching` accepts new tasks, `draining` is the plan's
 # post-T window where the queue is closed but claimed tasks run on.
 TaskState = Literal["queued", "claimed", "done", "failed", "abandoned"]
@@ -136,6 +141,22 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_feed ON events (campaign_id, event_id);
+
+-- Which supervisors exist, as opposed to which hold a task. A supervisor
+-- otherwise touches the ledger only when it claims, so an idle one -- exactly
+-- the one a conductor wants to know about before dispatching -- was invisible.
+CREATE TABLE IF NOT EXISTS supervisors (
+    owner             TEXT PRIMARY KEY,
+    campaign_id       TEXT,
+    state             TEXT NOT NULL,
+    task_id           TEXT,
+    tasks_completed   INTEGER NOT NULL DEFAULT 0,
+    tasks_failed      INTEGER NOT NULL DEFAULT 0,
+    detail            TEXT,
+    first_seen_at     TEXT NOT NULL,
+    last_seen_at      TEXT NOT NULL,
+    expires_at        REAL NOT NULL
+);
 """
 
 
@@ -145,6 +166,20 @@ def _now_iso() -> str:
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def _age_seconds(stamp: Optional[str]) -> Optional[float]:
+    """Seconds since an ISO timestamp this file wrote, or None if unreadable."""
+
+    if not stamp:
+        return None
+    try:
+        then = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return round((datetime.now(timezone.utc) - then).total_seconds(), 1)
 
 
 def _connect() -> sqlite3.Connection:
@@ -349,6 +384,14 @@ class TaskCreate(BaseModel):
     deadline: Optional[str] = None
     token_budget: Optional[int] = Field(default=None, gt=0)
     max_turns: Optional[int] = Field(default=None, gt=0)
+    intent: Optional[str] = Field(
+        default=None,
+        description="What this run is for, in prose, handed to the agent "
+                    "verbatim. The channel for anything the structured fields "
+                    "cannot say -- 'hold the JQ1 core, pick a prior suited to "
+                    "that rather than de novo' -- so the agent does the "
+                    "chemistry instead of being handed a seed.",
+    )
 
 
 class ConcurrencyUpdate(BaseModel):
@@ -396,6 +439,25 @@ class FailurePost(BaseModel):
     )
 
 
+class PresencePost(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    state: Literal["idle", "busy", "starting", "stopping"] = Field(
+        description="idle means it would take a task right now",
+    )
+    campaign_id: Optional[str] = Field(
+        default=None,
+        description="Campaign it is pinned to, or null if it claims from any",
+    )
+    task_id: Optional[str] = None
+    tasks_completed: int = 0
+    tasks_failed: int = 0
+    detail: Optional[str] = Field(
+        default=None, description="What it is doing, for a human reading the pool",
+    )
+    ttl_seconds: float = Field(default=DEFAULT_PRESENCE_TTL_SECONDS, gt=0)
+
+
 # ---------------------------------------------------------------------------
 # Row mapping
 # ---------------------------------------------------------------------------
@@ -412,6 +474,23 @@ def _campaign_row(row: sqlite3.Row) -> dict[str, Any]:
         "dispatch_until": row["dispatch_until"],
         "hard_stop_at": row["hard_stop_at"],
         "finalized_at": row["finalized_at"],
+    }
+
+
+def _supervisor_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "owner": row["owner"],
+        "state": row["state"],
+        "campaign_id": row["campaign_id"],
+        "task_id": row["task_id"],
+        "tasks_completed": row["tasks_completed"],
+        "tasks_failed": row["tasks_failed"],
+        "detail": row["detail"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+        # Age rather than the deadline: "reported 4s ago" is what says whether
+        # to believe the state beside it.
+        "last_seen_seconds_ago": _age_seconds(row["last_seen_at"]),
     }
 
 
@@ -541,11 +620,56 @@ def create_campaign(body: CampaignCreate) -> dict[str, Any]:
 
 @app.get("/campaigns")
 def list_campaigns() -> list[dict[str, Any]]:
+    """Every campaign newest first, each with enough to triage it.
+
+    Task counts, how many results landed, and when the campaign was last
+    touched -- so "what ran most recently and did it produce anything" is one
+    call rather than one per campaign. Aggregated in two grouped queries
+    rather than a query per campaign.
+    """
+
     with _read() as conn:
         rows = conn.execute(
             "SELECT * FROM campaigns ORDER BY created_at DESC"
         ).fetchall()
-    return [_campaign_row(r) for r in rows]
+
+        counts: dict[str, dict[str, int]] = {}
+        latest: dict[str, str] = {}
+        for row in conn.execute(
+            "SELECT campaign_id, state, COUNT(*) AS n, "
+            "MAX(COALESCE(finished_at, claimed_at, created_at)) AS last_at "
+            "FROM tasks GROUP BY campaign_id, state"
+        ):
+            cid = row["campaign_id"]
+            counts.setdefault(cid, {})[row["state"]] = row["n"]
+            if row["last_at"] and row["last_at"] > latest.get(cid, ""):
+                latest[cid] = row["last_at"]
+
+        results: dict[str, int] = {}
+        for row in conn.execute(
+            "SELECT campaign_id, COUNT(*) AS n, MAX(posted_at) AS last_at "
+            "FROM results GROUP BY campaign_id"
+        ):
+            cid = row["campaign_id"]
+            results[cid] = row["n"]
+            if row["last_at"] and row["last_at"] > latest.get(cid, ""):
+                latest[cid] = row["last_at"]
+
+    overview = []
+    for row in rows:
+        cid = row["campaign_id"]
+        campaign = _campaign_row(row)
+        last_at = latest.get(cid) or campaign["created_at"]
+        campaign.update({
+            "task_counts": counts.get(cid, {}),
+            "n_tasks": sum(counts.get(cid, {}).values()),
+            "n_results": results.get(cid, 0),
+            "last_activity_at": last_at,
+            "last_activity_seconds_ago": _age_seconds(last_at),
+            "phase": _window_phase(row, time.time()),
+        })
+        overview.append(campaign)
+    return overview
 
 
 @app.get("/campaigns/{campaign_id}")
@@ -747,6 +871,99 @@ def heartbeat(task_id: str, body: HeartbeatRequest) -> dict[str, Any]:
             "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
         ).fetchone()
     return _task_row(row)
+
+
+# -- the pool itself --------------------------------------------------------
+
+def _sweep_dead_supervisors(conn: sqlite3.Connection) -> int:
+    """Forget supervisors that stopped reporting in.
+
+    Swept on read for the same reason leases are: a stale row read as a live
+    supervisor is what makes a conductor dispatch into a pool that cannot
+    answer.
+    """
+
+    cursor = conn.execute(
+        "DELETE FROM supervisors WHERE expires_at < ?", (time.time(),)
+    )
+    return cursor.rowcount or 0
+
+
+@app.post("/supervisors/{owner}/presence")
+def post_presence(owner: str, body: PresencePost) -> dict[str, Any]:
+    """A supervisor saying it is alive, and whether it is free.
+
+    Sent on every pass of the claim loop, including the passes that find the
+    queue empty -- those are precisely the ones that tell a conductor it has
+    somewhere to dispatch to.
+    """
+
+    now = _now_iso()
+    with _write() as conn:
+        conn.execute(
+            "INSERT INTO supervisors (owner, campaign_id, state, task_id, "
+            "tasks_completed, tasks_failed, detail, first_seen_at, "
+            "last_seen_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(owner) DO UPDATE SET "
+            "campaign_id = excluded.campaign_id, state = excluded.state, "
+            "task_id = excluded.task_id, "
+            "tasks_completed = excluded.tasks_completed, "
+            "tasks_failed = excluded.tasks_failed, "
+            "detail = excluded.detail, last_seen_at = excluded.last_seen_at, "
+            "expires_at = excluded.expires_at",
+            (
+                owner, body.campaign_id, body.state, body.task_id,
+                body.tasks_completed, body.tasks_failed, body.detail,
+                now, now, time.time() + body.ttl_seconds,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM supervisors WHERE owner = ?", (owner,)
+        ).fetchone()
+    return _supervisor_row(row)
+
+
+@app.delete("/supervisors/{owner}")
+def drop_presence(owner: str) -> dict[str, Any]:
+    """A supervisor leaving on purpose, rather than being timed out."""
+
+    with _write() as conn:
+        conn.execute("DELETE FROM supervisors WHERE owner = ?", (owner,))
+    return {"owner": owner, "state": "gone"}
+
+
+@app.get("/supervisors")
+def list_supervisors(campaign_id: Optional[str] = None) -> dict[str, Any]:
+    """The pool: who is alive, and which of them can take work now.
+
+    ``idle`` is the number that would answer a dispatch immediately. It is not
+    ``concurrency`` and not the Deployment's replica count: a pod that is
+    starting, wedged, or shutting down is not somewhere to send a task.
+    """
+
+    with _write() as conn:
+        _sweep_dead_supervisors(conn)
+        sql = "SELECT * FROM supervisors"
+        args: list[Any] = []
+        if campaign_id:
+            # A supervisor with no campaign claims from any of them, so it
+            # counts towards this campaign's pool too.
+            sql += " WHERE campaign_id = ? OR campaign_id IS NULL"
+            args.append(campaign_id)
+        rows = conn.execute(sql + " ORDER BY owner", args).fetchall()
+
+    supervisors = [_supervisor_row(r) for r in rows]
+    by_state: dict[str, int] = {}
+    for supervisor in supervisors:
+        by_state[supervisor["state"]] = by_state.get(supervisor["state"], 0) + 1
+    return {
+        "supervisors": supervisors,
+        "n_alive": len(supervisors),
+        "idle": by_state.get("idle", 0),
+        "busy": by_state.get("busy", 0),
+        "by_state": by_state,
+    }
 
 
 @app.post("/tasks/{task_id}/result")

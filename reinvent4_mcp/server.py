@@ -1169,11 +1169,51 @@ def get_campaign_state(
 
 @mcp.tool()
 def list_campaigns() -> str:
-    """List every campaign in the ledger, newest first."""
+    """Every campaign in the ledger, newest first, with enough to triage it.
+
+    Each carries its task counts by state, how many results landed, and
+    ``last_activity_at`` with ``last_activity_seconds_ago`` -- so "what ran
+    most recently and did it produce anything" is answerable from this one
+    call. ``phase`` follows the clock rather than the stored state, so a
+    campaign whose conductor died and missed its own deadline still shows
+    that it should be draining.
+    """
 
     from reinvent4_mcp.tools.campaign import list_campaigns as _impl
 
     return json.dumps(_impl(), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_campaign_files
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_campaign_files(
+    campaign_id: Annotated[str, Field(description="Campaign to locate on disk")],
+    limit: Annotated[
+        int,
+        Field(default=20, description="How many tasks to report, newest first"),
+    ] = 20,
+) -> str:
+    """Where a campaign's output is on disk, task by task.
+
+    The ledger says what each task achieved; this says which directory it
+    wrote while achieving it, so a result can be opened rather than only read
+    about. Report these paths to the user when they ask where the files are.
+
+    Each task gives its job id, its directory, and the notable files in it
+    with sizes. Cofolded structures live on the shared volume instead -- use
+    ``list_shared_assets`` for those.
+
+    Tasks come back newest first and carry no scores, so do not describe the
+    first one as the best: ``get_pareto_front`` is what ranks tasks, and
+    ``get_top_candidates`` ranks molecules within one job.
+    """
+
+    from reinvent4_mcp.tools.campaign import get_campaign_files as _impl
+
+    return json.dumps(_impl(campaign_id, limit), indent=2, default=_json_default)
 
 
 # ---------------------------------------------------------------------------
@@ -1208,18 +1248,40 @@ def enqueue_task(
         int | None,
         Field(default=None, gt=0, description="RL steps for this task"),
     ] = None,
+    intent: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "What this run is for, in prose, handed to the supervisor's "
+                "agent verbatim. Use it for what the weights cannot say -- "
+                "above all which chemistry to stay within, since holding a "
+                "chemotype is a choice of generative prior and the agent can "
+                "look the reference compound up and pick a model itself. "
+                "State the experiment, not the tool calls."
+            ),
+        ),
+    ] = "",
 ) -> str:
     """Queue one weight vector by hand.
 
     For following a hunch about a trade-off the automatic proposer has not
     reached. The conductor loop will not re-propose a vector already in the
     ledger, so a task added here is not duplicated later.
+
+    A task given an ``intent`` will not quietly fall back to a default de novo
+    run if its agent fails to start one -- it is handed back to be retried,
+    because a substituted run would post into the same Pareto front while
+    measuring something else.
     """
 
     from reinvent4_mcp.tools.campaign import enqueue_task as _impl
 
     return json.dumps(
-        _impl(campaign_id, weight_overrides, None, fidelity_tier, max_steps),
+        _impl(
+            campaign_id, weight_overrides, None, fidelity_tier, max_steps,
+            None, intent or None,
+        ),
         indent=2, default=_json_default,
     )
 
@@ -1230,17 +1292,33 @@ def enqueue_task(
 
 @mcp.tool()
 def list_supervisors(
-    campaign_id: Annotated[str, Field(description="Campaign to inspect")],
+    campaign_id: Annotated[
+        str,
+        Field(
+            default="",
+            description="Narrow to one campaign's eligible supervisors and "
+                        "include its in-flight tasks; omit for the whole fleet",
+        ),
+    ] = "",
 ) -> str:
-    """The supervisors holding tasks right now, and what each is trying.
+    """The pool: how many supervisors exist, and how many could take work now.
 
-    Expired leases are swept first, so this is who is actually alive rather
-    than who last claimed something.
+    ``idle`` is how many would answer a dispatch immediately -- not
+    ``concurrency``, which is only the ceiling a campaign asked for, and not
+    the Deployment's replica count, which includes pods still starting or
+    already shutting down.
+
+    A supervisor is listed because it reported in, so a crashed one drops out
+    once its presence expires. ``last_seen_seconds_ago`` is what says whether
+    to believe the state beside it. Dead presences and expired leases are both
+    swept before answering.
     """
 
     from reinvent4_mcp.tools.campaign import list_supervisors as _impl
 
-    return json.dumps(_impl(campaign_id), indent=2, default=_json_default)
+    return json.dumps(
+        _impl(campaign_id or None), indent=2, default=_json_default
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1329,17 +1407,34 @@ def cancel_supervisor(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_pool_capacity() -> str:
-    """Whether the fleet has room for more work, from the scorer's queue.
+def get_pool_capacity(
+    campaign_id: Annotated[
+        str,
+        Field(
+            default="",
+            description="Count only this campaign's eligible supervisors; "
+                        "omit for the whole fleet",
+        ),
+    ] = "",
+) -> str:
+    """Whether there is room for more work, and which limit is the binding one.
 
-    Boltz is the binding constraint, not the agent count, so capacity is a
-    question about its queue depth. A ``None`` queue_pressure means the
-    gateway did not answer, which is not the same as idle.
+    Two things have to be true to dispatch: a supervisor must be free to
+    claim, and Boltz must have queue room to score what it starts. Either
+    number alone misleads -- an idle supervisor handed work while the scorer
+    is saturated only moves the wait, and a quiet scorer is no use with
+    nothing alive to dispatch to.
+
+    ``can_dispatch`` is yes/no/unknown and ``binding_limit`` names whichever
+    one said no. A ``None`` queue_pressure means the gateway did not answer,
+    which is not the same as idle.
     """
 
     from reinvent4_mcp.tools.campaign import get_pool_capacity as _impl
 
-    return json.dumps(_impl(), indent=2, default=_json_default)
+    return json.dumps(
+        _impl(campaign_id or None), indent=2, default=_json_default
+    )
 
 
 # ---------------------------------------------------------------------------

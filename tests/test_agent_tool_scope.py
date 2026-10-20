@@ -117,3 +117,65 @@ def test_allowed_tool_is_executed() -> None:
 
     assert _chat(agent) == "done"
     assert mcp.called == ["read_results"]
+
+
+# ---------------------------------------------------------------------------
+# Translating a deployment's deny list into the agent's allow set
+# ---------------------------------------------------------------------------
+#
+# Spelled as a deny list because that is what the deployment can state
+# honestly: the conductor's writable TTP mount lets it create a base TTP, and
+# withholding update_ttp/delete_ttp is what stops it rewriting one a campaign
+# is already being measured against.
+
+
+TOOLS = [{"name": n} for n in ("create_ttp", "update_ttp", "delete_ttp", "get_ttp")]
+
+
+class TestDenyList:
+
+    def test_nothing_denied_leaves_the_agent_unrestricted(self) -> None:
+        # None rather than the full set, so a tool the MCP server gains at
+        # runtime is not frozen out by a snapshot taken at startup.
+        from reinvent4_agent.cli import permitted_tools
+
+        assert permitted_tools(TOOLS, "") is None
+
+    def test_denied_names_are_withheld_and_the_rest_allowed(self) -> None:
+        from reinvent4_agent.cli import permitted_tools
+
+        allowed = permitted_tools(TOOLS, "update_ttp,delete_ttp")
+
+        assert allowed == {"create_ttp", "get_ttp"}
+
+    def test_whitespace_and_empty_entries_are_tolerated(self) -> None:
+        # It arrives from a YAML env var, where " a, b, " is ordinary.
+        from reinvent4_agent.cli import permitted_tools
+
+        assert permitted_tools(TOOLS, " update_ttp , , delete_ttp ") == {
+            "create_ttp", "get_ttp"
+        }
+
+    def test_a_denied_name_the_server_does_not_serve_is_harmless(self) -> None:
+        from reinvent4_agent.cli import permitted_tools
+
+        assert permitted_tools(TOOLS, "no_such_tool") == {
+            "create_ttp", "update_ttp", "delete_ttp", "get_ttp"
+        }
+
+    def test_the_deny_list_reaches_the_agent(self) -> None:
+        """End to end: a withheld tool is refused rather than called."""
+        from reinvent4_agent.cli import permitted_tools
+
+        backend = _ScriptedBackend("delete_job")
+        mcp = _CatalogMCP()
+        agent = Agent(
+            mcp, backend,
+            allowed_tools=permitted_tools(
+                [{"name": "delete_job"}, {"name": "read_results"}], "delete_job"
+            ),
+        )
+
+        _chat(agent)
+
+        assert mcp.called == []

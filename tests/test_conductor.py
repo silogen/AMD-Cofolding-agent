@@ -270,12 +270,61 @@ class TestLedgerDerivedState:
 # ---------------------------------------------------------------------------
 
 
+def _stats(healthy=2, queued=0, in_flight=0):
+    """The shape boltz-gateway's /stats actually serves.
+
+    Spelled out here because the earlier tests asserted against flat
+    ``queue_depth``/``healthy_replicas`` keys that the gateway has never
+    served. They passed while queue_pressure returned None in production
+    against every real reply, so admission control had no reading at all.
+    """
+
+    return {
+        "queue": {
+            "gateway_molecules_waiting": 0,
+            "gateway_in_flight_molecules": 0,
+            "proxy_queued_requests": queued,
+            "proxy_in_flight_requests": in_flight,
+            "inflight_limit": healthy,
+        },
+        "replicas": {"healthy": healthy, "stats_reachable": True},
+    }
+
+
 class TestQueuePressure:
 
-    def test_it_is_queued_batches_per_replica(self, monkeypatch):
+    def test_it_is_batches_in_hand_per_replica(self, monkeypatch):
         monkeypatch.setattr(
             requests, "get",
-            lambda *a, **k: _ok({"queue_depth": 6, "healthy_replicas": 2}),
+            lambda *a, **k: _ok(_stats(healthy=2, queued=4, in_flight=2)),
+        )
+
+        assert queue_pressure("http://gateway/stats") == 3.0
+
+    def test_a_busy_scorer_keeping_up_is_one_per_replica(self, monkeypatch):
+        """Every replica predicting with nothing queued is not saturation."""
+        monkeypatch.setattr(
+            requests, "get",
+            lambda *a, **k: _ok(_stats(healthy=4, queued=0, in_flight=4)),
+        )
+
+        assert queue_pressure("http://gateway/stats") == 1.0
+
+    def test_an_idle_scorer_is_zero(self, monkeypatch):
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _ok(_stats(healthy=4)))
+
+        assert queue_pressure("http://gateway/stats") == 0.0
+
+    def test_in_flight_work_is_counted_not_only_queued(self, monkeypatch):
+        """The gateway caps upstream calls at the replica count.
+
+        Work beyond capacity waits on a semaphore inside the gateway rather
+        than queueing at the proxy, so queued alone reads ~0 with every
+        replica saturated.
+        """
+        monkeypatch.setattr(
+            requests, "get",
+            lambda *a, **k: _ok(_stats(healthy=1, queued=0, in_flight=3)),
         )
 
         assert queue_pressure("http://gateway/stats") == 3.0
@@ -291,15 +340,24 @@ class TestQueuePressure:
 
     def test_no_replicas_is_unknown_not_division_by_zero(self, monkeypatch):
         monkeypatch.setattr(
-            requests, "get",
-            lambda *a, **k: _ok({"queue_depth": 4, "healthy_replicas": 0}),
+            requests, "get", lambda *a, **k: _ok(_stats(healthy=0, queued=4))
         )
 
         assert queue_pressure("http://gateway/stats") is None
 
     def test_a_gateway_without_a_queue_figure_is_unknown(self, monkeypatch):
         monkeypatch.setattr(
-            requests, "get", lambda *a, **k: _ok({"healthy_replicas": 2})
+            requests, "get",
+            lambda *a, **k: _ok({"replicas": {"healthy": 2}}),
+        )
+
+        assert queue_pressure("http://gateway/stats") is None
+
+    def test_the_old_flat_shape_is_not_silently_accepted(self, monkeypatch):
+        """It was never served; treating it as valid is what hid the bug."""
+        monkeypatch.setattr(
+            requests, "get",
+            lambda *a, **k: _ok({"queue_depth": 6, "healthy_replicas": 2}),
         )
 
         assert queue_pressure("http://gateway/stats") is None
@@ -388,7 +446,7 @@ class TestAdmissionControl:
         """Another supervisor would deepen the bottleneck, not relieve it."""
         monkeypatch.setattr(
             requests, "get",
-            lambda *a, **k: _ok({"queue_depth": 20, "healthy_replicas": 2}),
+            lambda *a, **k: _ok(_stats(healthy=2, queued=20)),
         )
         store = FakeStore(_status())
 
@@ -401,7 +459,7 @@ class TestAdmissionControl:
     def test_a_shallow_queue_lets_work_through(self, monkeypatch):
         monkeypatch.setattr(
             requests, "get",
-            lambda *a, **k: _ok({"queue_depth": 1, "healthy_replicas": 2}),
+            lambda *a, **k: _ok(_stats(healthy=2, queued=1)),
         )
         store = FakeStore(_status())
 
@@ -734,6 +792,27 @@ class TestStatusView:
 
         assert "none yet" in rendered
         assert "in flight: none" in rendered
+
+    def test_the_pool_is_shown_when_it_is_known(self):
+        """Two in flight means something different with an idle one beside it."""
+        rendered = format_status(_status(), {
+            "n_alive": 3, "idle": 1, "busy": 2,
+            "supervisors": [
+                {"owner": "sup-a", "state": "idle", "task_id": None,
+                 "last_seen_seconds_ago": 4.0},
+                {"owner": "sup-b", "state": "busy", "task_id": "t1",
+                 "last_seen_seconds_ago": 12.0},
+            ],
+        })
+
+        assert "1 idle, 2 busy of 3 alive" in rendered
+        assert "sup-b  busy on t1" in rendered
+
+    def test_the_pool_is_simply_absent_when_unknown(self):
+        """A store that did not answer should not print a pool of zero."""
+        rendered = format_status(_status())
+
+        assert "supervisors:" not in rendered
 
     def test_results_off_the_front_are_called_out(self):
         """A missing objective usually means a failed scorer, not a bad run."""

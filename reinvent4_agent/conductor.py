@@ -33,6 +33,7 @@ Env:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -285,12 +286,21 @@ class PoolScaler:
 # ---------------------------------------------------------------------------
 
 def queue_pressure(stats_url: str = GATEWAY_STATS_URL) -> Optional[float]:
-    """Queued Boltz batches per healthy replica, or None if unknown.
+    """Boltz batches in the scorer's hands per healthy replica, or None.
 
     The binding constraint is Boltz, not the agents, so this is what says
     whether another supervisor would actually get work done or just deepen a
     queue. Unknown is not zero: a gateway that cannot be reached should not be
     read as idle.
+
+    Counts in-flight batches as well as queued ones, because the gateway caps
+    its own upstream calls at the replica count -- so work beyond capacity
+    waits for a semaphore slot inside the gateway rather than showing up as
+    proxy queueing. Measured on queued alone this reads ~0 even with every
+    replica saturated, which is no signal at all.
+
+    One batch per replica is a scorer that is busy and keeping up; the
+    threshold that holds dispatch back sits above that.
     """
 
     try:
@@ -301,11 +311,17 @@ def queue_pressure(stats_url: str = GATEWAY_STATS_URL) -> Optional[float]:
         logger.warning("no gateway stats from %s: %s", stats_url, exc)
         return None
 
-    replicas = stats.get("healthy_replicas") or stats.get("replicas") or 0
-    queued = stats.get("queue_depth")
-    if queued is None or not replicas:
+    healthy = (stats.get("replicas") or {}).get("healthy")
+    queue = stats.get("queue") or {}
+    queued = queue.get("proxy_queued_requests")
+    in_flight = queue.get("proxy_in_flight_requests")
+    if not healthy or queued is None or in_flight is None:
+        logger.warning(
+            "gateway stats from %s lack replicas.healthy or queue depth: %s",
+            stats_url, sorted(stats),
+        )
         return None
-    return float(queued) / float(replicas)
+    return (float(queued) + float(in_flight)) / float(healthy)
 
 
 # ---------------------------------------------------------------------------
@@ -654,12 +670,19 @@ def objectives_of(base_ttp_id: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def format_status(status: dict[str, Any]) -> str:
+def format_status(
+    status: dict[str, Any], pool: Optional[dict[str, Any]] = None
+) -> str:
     """The ``/status`` view, as text for the REPL.
 
     A table rather than the raw JSON, because the thing an operator actually
     wants to know -- is it working, what is it trying, how long is left -- is
     three numbers buried in a large document.
+
+    ``pool`` is the supervisor listing, which is about the fleet rather than
+    the campaign and so is read separately. Shown because "two tasks in
+    flight" means something different with one idle supervisor beside it than
+    with none.
     """
 
     campaign = status["campaign"]
@@ -681,6 +704,20 @@ def format_status(status: dict[str, Any]) -> str:
     remaining = window.get("hard_stop_remaining")
     if remaining is not None:
         lines.append(f"  hard stop: {_duration(remaining)}")
+
+    if pool is not None:
+        lines.append(
+            f"  supervisors: {pool.get('idle', 0)} idle, "
+            f"{pool.get('busy', 0)} busy of {pool.get('n_alive', 0)} alive "
+            f"(concurrency {campaign['concurrency']})"
+        )
+        for supervisor in pool.get("supervisors") or []:
+            age = supervisor.get("last_seen_seconds_ago")
+            lines.append(
+                f"    {supervisor['owner']}  {supervisor['state']}"
+                + (f" on {supervisor['task_id']}" if supervisor.get("task_id") else "")
+                + (f"  (seen {_duration(age)} ago)" if age is not None else "")
+            )
 
     if status["in_flight"]:
         lines.append(f"  in flight ({len(status['in_flight'])}):")
@@ -825,7 +862,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         tick_seconds=args.tick_seconds,
     )
     conductor.run()
-    print(format_status(store.status(campaign_id)))
+    pool = None
+    with contextlib.suppress(StoreUnavailable):
+        pool = store.supervisors(campaign_id)
+    print(format_status(store.status(campaign_id), pool))
 
 
 if __name__ == "__main__":

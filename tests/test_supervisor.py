@@ -71,11 +71,21 @@ class FakeStore:
         self.results: list[tuple[str, TaskOutcome]] = []
         self.failures: list[tuple[str, str, bool]] = []
         self.heartbeats: list[str] = []
+        self.presence: list[tuple[str, Any]] = []
+        self.left_the_pool = False
         self.claims = 0
 
     def claim(self, campaign_id=None, lease_seconds=None):
         self.claims += 1
         return self.queue.pop(0) if self.queue else None
+
+    def report_presence(self, state, campaign_id=None, task_id=None,
+                        tasks_completed=0, tasks_failed=0, detail=None):
+        self.presence.append((state, task_id))
+        return {"owner": self.owner, "state": state}
+
+    def drop_presence(self):
+        self.left_the_pool = True
 
     def heartbeat(self, task_id, lease_seconds=None):
         self.heartbeats.append(task_id)
@@ -260,6 +270,58 @@ class TestBuildGoal:
 
     def test_an_exploration_task_is_not(self):
         assert "validation-tier" not in build_goal(_task(), "ttp-1")
+
+    def test_the_tasks_intent_reaches_the_agent_verbatim(self):
+        """The channel for what the structured fields cannot say.
+
+        Holding a chemotype is a choice of generative prior, and the agent can
+        look the reference compound up and pick a model. It ran de novo not
+        because it could not do better but because nothing asked it to.
+        """
+        intent = "Hold the JQ1 methyl-triazolo-benzodiazepine core fixed."
+
+        goal = build_goal(_task(intent=intent), "ttp-1")
+
+        assert intent in goal
+
+    def test_an_intent_invites_the_agent_to_choose_the_prior(self):
+        goal = build_goal(_task(intent="stay on the I-BET151 chemotype"), "ttp-1")
+
+        assert "choose the model" in goal
+        assert "look the reference" in goal
+        assert "why before starting" in goal
+
+    def test_a_task_without_an_intent_says_nothing_about_priors(self):
+        """Silence keeps the default de novo behaviour for ordinary sweeps."""
+        goal = build_goal(_task(), "ttp-1")
+
+        assert "What this run is for" not in goal
+        assert "de novo" not in goal
+
+
+class TestTheDeNovoFallback:
+    """When starting the run ourselves is still the task's own experiment.
+
+    The supervisor starts the run when its agent finishes without doing so,
+    using only the TTP and step count -- so from the default de novo prior.
+    """
+
+    def test_an_ordinary_task_can_be_started_for_the_agent(self):
+        from reinvent4_agent.supervisor import default_run_substitutes_for
+
+        assert default_run_substitutes_for({"weight_overrides": {"QED": 2.0}})
+
+    def test_a_task_with_an_intent_cannot(self):
+        """A substituted run posts into the same front while measuring else."""
+        from reinvent4_agent.supervisor import default_run_substitutes_for
+
+        assert not default_run_substitutes_for({"intent": "hold the JQ1 core"})
+
+    def test_an_absent_spec_is_treated_as_ordinary(self):
+        from reinvent4_agent.supervisor import default_run_substitutes_for
+
+        assert default_run_substitutes_for({})
+        assert default_run_substitutes_for(None)
 
     def test_the_driver_is_told_how_long_a_step_takes(self):
         """Without a number it cannot tell a slow step from a broken one.
@@ -501,6 +563,74 @@ class TestSupervisorLoop:
         asyncio.run(scenario())
 
         assert store.claims >= 3, "it should keep retrying while the store is down"
+
+    def test_it_reports_itself_idle_before_claiming(self):
+        """The pass that finds an empty queue is the one worth reporting.
+
+        A supervisor otherwise touches the ledger only when it claims, so the
+        conductor could not tell a free one from one that never started.
+        """
+        store = FakeStore()
+
+        asyncio.run(Supervisor(store, _succeeds).run_once())
+
+        assert store.presence == [("idle", None)]
+
+    def test_it_reports_itself_busy_once_it_holds_a_task(self):
+        store = FakeStore([_task()])
+
+        asyncio.run(Supervisor(store, _succeeds).run_once())
+
+        assert ("busy", "a1b2c3d4") in store.presence
+
+    def test_presence_is_renewed_while_a_task_runs(self):
+        """A task outlasts the presence TTL many times over."""
+        store = FakeStore([_task()])
+
+        async def scenario():
+            slow_enough = asyncio.Event()
+
+            async def _slow(task):
+                await slow_enough.wait()
+                return await _succeeds(task)
+
+            supervisor = Supervisor(store, _slow, heartbeat_seconds=0.01)
+            running = asyncio.create_task(supervisor.run_once())
+            await asyncio.sleep(0.08)
+            slow_enough.set()
+            await running
+
+        asyncio.run(scenario())
+
+        assert store.presence.count(("busy", "a1b2c3d4")) > 1
+
+    def test_it_leaves_the_pool_on_shutdown(self):
+        """Draining on command should not read as a crash for the next TTL."""
+        store = FakeStore()
+
+        async def scenario():
+            supervisor = Supervisor(store, _succeeds, poll_seconds=0.01)
+
+            async def _stop_soon():
+                await asyncio.sleep(0.03)
+                supervisor.stop()
+
+            await asyncio.gather(supervisor.run_forever(), _stop_soon())
+
+        asyncio.run(scenario())
+
+        assert store.left_the_pool
+
+    def test_a_store_that_cannot_take_presence_does_not_lose_the_task(self):
+        """Being invisible is better than losing an hour of RL over it."""
+        class NoPresence(FakeStore):
+            def report_presence(self, *a, **k):
+                raise StoreUnavailable("store is down")
+
+        store = NoPresence([_task()])
+
+        assert asyncio.run(Supervisor(store, _succeeds).run_once()) is True
+        assert store.results
 
     def test_claims_can_be_scoped_to_one_campaign(self):
         seen: list[Any] = []

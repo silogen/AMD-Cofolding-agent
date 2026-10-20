@@ -736,10 +736,113 @@ class TestWarningsAndRecommendations:
         assert any(w["type"] == "low_validity" for w in warnings)
         assert any(w["severity"] == "high" for w in warnings)
 
+
+class TestAConstraintThatRejectsTheBatch:
+    """One over-broad SMARTS makes the whole pipeline look broken.
+
+    A constraint is a REINVENT filter: a matching molecule is masked and every
+    other component reads zero for it, including descriptors that are pure
+    arithmetic over the structure. A live run lost ten minutes to this -- a
+    SMARTS of ``[#6][#6][#6][#6]`` matched every molecule, the monitor flagged
+    ``QED_pre``, and the agent stopped both jobs and rewrote the TTP around a
+    component that was never at fault.
+    """
+
+    REJECTING = {"status": "degraded", "nan_rate": 0.0, "zero_rate": 1.0}
+    MASKED = {"status": "degraded", "nan_rate": 0.0, "zero_rate": 1.0, "mean": 0.0}
+
+    def _warn(self, health):
+        return _generate_warnings(
+            {"plateau_detected": False, "diverging": False},
+            health, pd.DataFrame(), "total_score", None,
+        )
+
+    def test_the_constraint_is_named_as_the_cause(self):
+        warnings = self._warn({
+            "constraint_custom_alerts": self.REJECTING,
+            "QED_pre": self.MASKED,
+            "MW": self.MASKED,
+        })
+
+        cause = [w for w in warnings if w["type"] == "constraint_rejects_batch"]
+        assert len(cause) == 1
+        assert cause[0]["component"] == "constraint_custom_alerts"
+        assert cause[0]["severity"] == "high"
+        assert "100%" in cause[0]["message"]
+
+    def test_the_masked_components_are_not_reported_as_faults(self):
+        """Eleven reports of the symptom are what buried the cause."""
+        warnings = self._warn({
+            "constraint_custom_alerts": self.REJECTING,
+            "QED_pre": self.MASKED,
+            "MW": self.MASKED,
+            "Boltz_Affinity": self.MASKED,
+        })
+
+        assert [w["type"] for w in warnings] == ["constraint_rejects_batch"]
+
+    def test_the_message_says_not_to_chase_the_zeros(self):
+        warnings = self._warn({"constraint_custom_alerts": self.REJECTING})
+
+        message = warnings[0]["message"]
+
+        assert "consequence" in message
+        assert "rather than the components reporting zero" in message
+
+    def test_a_nan_component_is_still_reported(self):
+        """Masking produces zeros, never NaN, so that is its own failure."""
+        warnings = self._warn({
+            "constraint_custom_alerts": self.REJECTING,
+            "Boltz_Affinity": {"status": "failing", "nan_rate": 0.9},
+        })
+
+        assert any(w["type"] == "component_failure" for w in warnings)
+
+    def test_a_component_degraded_by_nans_is_still_reported(self):
+        warnings = self._warn({
+            "constraint_custom_alerts": self.REJECTING,
+            "PoseBusters": {"status": "degraded", "nan_rate": 0.4},
+        })
+
+        degraded = {w["component"] for w in warnings
+                    if w["type"] == "component_degraded"}
+        assert "PoseBusters" in degraded
+
+    def test_an_ordinary_constraint_is_not_flagged(self):
+        """Rejecting some molecules is what a constraint is for."""
+        warnings = self._warn({
+            "constraint_custom_alerts": {
+                "status": "healthy", "nan_rate": 0.0, "zero_rate": 0.1,
+            },
+            "QED": {"status": "healthy", "nan_rate": 0.0},
+        })
+
+        assert warnings == []
+
+    def test_zeros_are_still_reported_when_no_constraint_explains_them(self):
+        """Without a rejecting filter, a component at zero is its own problem."""
+        warnings = self._warn({"QED": self.MASKED})
+
+        assert [w["type"] for w in warnings] == ["component_degraded"]
+
     def test_plateau_recommendation(self):
         diagnostics = {"convergence_status": "plateau"}
         recs = _generate_recommendations(diagnostics, {})
         assert any("plateau" in r.lower() for r in recs)
+
+    def test_plateau_recommendation_defers_to_a_rejecting_constraint(self):
+        """No weight change helps a run with no gradient at all."""
+        diagnostics = {"convergence_status": "plateau"}
+        health = {
+            "constraint_custom_alerts": {
+                "status": "degraded", "nan_rate": 0.0, "zero_rate": 1.0,
+            },
+        }
+
+        recs = _generate_recommendations(diagnostics, health)
+
+        assert any("Fix the constraint" in r for r in recs)
+        assert not any("adjusting TTP" in r for r in recs)
 
     def test_diverging_recommendation(self):
         diagnostics = {"convergence_status": "diverging"}

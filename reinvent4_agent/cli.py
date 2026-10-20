@@ -141,6 +141,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--deny-tools",
+        default=os.environ.get("REINVENT4_AGENT_DENY_TOOLS") or "",
+        help=(
+            "Comma-separated tool names to withhold from this agent "
+            "(default: REINVENT4_AGENT_DENY_TOOLS env var).  A deny list "
+            "rather than an allow list, so a tool added later is available "
+            "by default.  Used where the deployment's write access and the "
+            "agent's authority have to agree -- the conductor can create a "
+            "base TTP but not rewrite one a campaign is already measuring."
+        ),
+    )
+
     # -- MCP server ----------------------------------------------------
     parser.add_argument(
         "--server-command",
@@ -249,6 +262,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def denied_tools(spec: str) -> set[str]:
+    """Tool names to withhold, from a comma-separated list."""
+
+    return {name.strip() for name in spec.split(",") if name.strip()}
+
+
+def permitted_tools(
+    tools: list[dict[str, Any]], spec: str
+) -> set[str] | None:
+    """The allowed set for ``Agent``, or None when nothing is withheld.
+
+    Computed from the live tool list minus the denied names, matching how the
+    supervisor restricts its Driver: a deny list means a tool added later is
+    available by default and only the exclusions have to be maintained.
+    """
+
+    denied = denied_tools(spec)
+    if not denied:
+        return None
+    return {tool["name"] for tool in tools} - denied
+
+
 async def run_agent(args: argparse.Namespace) -> None:
     """Main async entry point: connect to MCP server, run chat loop."""
     from reinvent4_agent.agent import Agent
@@ -321,12 +356,20 @@ async def run_agent(args: argparse.Namespace) -> None:
             if resolved and resolved != args.base_url:
                 print_status(f"Resolved endpoint: {resolved}")
 
+            allowed = permitted_tools(tools, args.deny_tools)
+            if allowed is not None:
+                print_status(
+                    "Withheld from this agent: "
+                    + ", ".join(sorted(denied_tools(args.deny_tools)))
+                )
+
             agent = Agent(
                 mcp,
                 backend,
                 max_tokens=args.max_tokens,
                 log_dir=args.log_dir,
                 event_handler=RichEventHandler(),
+                allowed_tools=allowed,
             )
 
             # A read-only Reviewer, summonable on demand via /review. It shares
@@ -785,6 +828,7 @@ async def run_coscientist(args: argparse.Namespace) -> None:
                 event_handler=RichEventHandler(agent_label="driver"),
                 name="driver",
                 system_prompt=DRIVER_SYSTEM_PROMPT,
+                allowed_tools=permitted_tools(tools, args.deny_tools),
             )
             reviewer = Agent(
                 mcp,

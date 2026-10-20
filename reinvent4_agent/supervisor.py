@@ -80,6 +80,7 @@ __all__ = [
     "TaskOutcome",
     "apply_overrides",
     "build_goal",
+    "default_run_substitutes_for",
     "job_for_ttp",
     "main",
     "objective_profile",
@@ -300,6 +301,24 @@ class Supervisor:
     def stopping(self) -> bool:
         return self._stopping.is_set()
 
+    async def _report(
+        self, state: str, task_id: Optional[str] = None, detail: Optional[str] = None
+    ) -> None:
+        """Put this supervisor in the pool listing, or refresh where it is.
+
+        Never fatal: the conductor not being able to see us is worse than it
+        seeing us late, but neither is worth losing an hour of RL over.
+        """
+
+        try:
+            await asyncio.to_thread(
+                self.store.report_presence,
+                state, self.campaign_id, task_id,
+                self.tasks_completed, self.tasks_failed, detail,
+            )
+        except (StoreUnavailable, LeaseLost) as exc:
+            logger.debug("could not report presence: %s", exc)
+
     async def _heartbeat_forever(self, task_id: str) -> None:
         """Renew the lease until cancelled.
 
@@ -307,6 +326,10 @@ class Supervisor:
         the task: the campaign is hours long and the work in flight is worth
         more than the ledger entry. If the store stays down the lease lapses
         and the task is requeued, which is the right outcome anyway.
+
+        Presence is renewed on the same beat, since a task can outlast the
+        presence TTL many times over and a supervisor that vanished from the
+        pool while working would read as capacity that is not there.
         """
 
         while True:
@@ -320,10 +343,12 @@ class Supervisor:
                 raise
             except StoreUnavailable as exc:
                 logger.warning("heartbeat for %s failed: %s", task_id, exc)
+            await self._report("busy", task_id, detail="running task")
 
     async def run_once(self) -> bool:
         """Claim and run one task. False when there was nothing to do."""
 
+        await self._report("idle", detail="waiting for a task")
         task = await asyncio.to_thread(
             self.store.claim, self.campaign_id, self.lease_seconds
         )
@@ -332,6 +357,7 @@ class Supervisor:
 
         task_id = task["task_id"]
         logger.info("claimed task %s of campaign %s", task_id, task.get("campaign_id"))
+        await self._report("busy", task_id, detail="starting task")
 
         heartbeat = asyncio.create_task(self._heartbeat_forever(task_id))
         try:
@@ -371,6 +397,7 @@ class Supervisor:
             "supervisor %s working %s from %s",
             self.store.owner, self.campaign_id or "any campaign", self.store.base_url,
         )
+        await self._report("starting", detail="joining the pool")
 
         while not self.stopping:
             try:
@@ -383,6 +410,14 @@ class Supervisor:
 
             if not did_work and not self.stopping:
                 await self._sleep_unless_stopping(self.poll_seconds)
+
+        # Leave on purpose rather than timing out of the listing, so a pool
+        # drained on command does not read as three crashed supervisors for
+        # the next two minutes.
+        try:
+            await asyncio.to_thread(self.store.drop_presence)
+        except (StoreUnavailable, LeaseLost) as exc:
+            logger.debug("could not leave the pool cleanly: %s", exc)
 
         logger.info(
             "supervisor %s stopped after %d task(s), %d failed",
@@ -450,12 +485,34 @@ DRIVER_DENIED_TOOLS = frozenset({
 STEP_SECONDS_HINT = "3 to 10 minutes"
 
 
+def default_run_substitutes_for(spec: dict[str, Any]) -> bool:
+    """Whether starting a plain run would still be this task's experiment.
+
+    The supervisor starts the run itself when its agent finishes without
+    doing so. That call takes only the TTP and the step count, so it generates
+    from the default de novo prior -- a faithful stand-in while every task
+    does, and not once a task's ``intent`` may have called for another prior.
+    A substituted run would post into the same Pareto front while measuring
+    something else, which is worse than the task failing and being retried.
+    """
+
+    return not (spec or {}).get("intent")
+
+
 def build_goal(task: dict[str, Any], ttp_id: str) -> str:
     """The instruction handed to the Driver.
 
     Names the prepared TTP rather than restating the weights, so there is one
     source of truth for the weight vector and the agent cannot paraphrase it
     into something else.
+
+    The task's ``intent`` goes in verbatim. Everything else here is structured
+    and therefore only says what the schema anticipated: holding a chemotype,
+    for instance, is a decision about which prior to generate from, and the
+    agent is better placed to make it -- it can look the reference compound up
+    and choose a model -- than a seed field would be. Without a channel for
+    that the agent ran de novo not because it could not do better but because
+    nobody asked it to.
     """
 
     spec = task.get("spec") or {}
@@ -466,6 +523,18 @@ def build_goal(task: dict[str, Any], ttp_id: str) -> str:
         "this task is meant to explore -- use it as it is and do not modify "
         "its weights.",
     ]
+    if spec.get("intent"):
+        lines += [
+            "",
+            "What this run is for:",
+            str(spec["intent"]).strip(),
+            "",
+            "That is the experiment. If it calls for generating from "
+            "something other than the default de novo prior, choose the "
+            "model and any seed molecules yourself -- look the reference "
+            "compounds up rather than recalling their structures -- and say "
+            "which you chose and why before starting.",
+        ]
     if spec.get("max_steps"):
         lines.append(
             f"Run {spec['max_steps']} RL steps: the step count is budgeted "
@@ -610,6 +679,14 @@ class CoscientistTaskRunner:
                 verdict, turns = "single-agent", 1
 
             job_id = job_for_ttp(ttp_id)
+            if not job_id and not default_run_substitutes_for(spec):
+                raise RuntimeError(
+                    f"the agent did not start a run for TTP '{ttp_id}' "
+                    f"(verdict: {verdict}), and this task carries an intent "
+                    "that may call for a non-default prior -- starting a "
+                    "default run here would silently run a different "
+                    "experiment"
+                )
             if not job_id:
                 # The agent finished without starting the run. With a Reviewer
                 # the Coordinator took several turns, so there were more

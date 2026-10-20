@@ -138,6 +138,13 @@ spec:
             # whose "true" belongs to the interactive agent.
             - name: REINVENT4_AGENT_MULTI_AGENT
               value: "false"
+            # The counterpart to the writable TTP mount below. Creating a base
+            # TTP is how a campaign on a new target begins; editing or
+            # deleting one mid-campaign changes what results already in the
+            # ledger mean. Supervisors write their own per-task variants and
+            # are unaffected by this.
+            - name: REINVENT4_AGENT_DENY_TOOLS
+              value: "update_ttp,delete_ttp"
             - name: REINVENT4_AGENT_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -151,22 +158,31 @@ spec:
               cpu: "2"
               memory: 8Gi
           volumeMounts:
-            # Read-only: the conductor reviews results and reads TTPs, but the
-            # supervisors are what write job output and TTP variants. Mounting
-            # it writable would invite the conductor to edit a base TTP
-            # mid-campaign, which would silently change what later tasks mean.
+            # Job output and the shared volume are read-only: the conductor
+            # reviews what the fleet produced, and the supervisors are what
+            # write it.
             - name: data
               mountPath: /shared
               subPath: shared
               readOnly: true
             - name: data
-              mountPath: /root/.reinvent4_mcp/ttps
-              subPath: ttps
-              readOnly: true
-            - name: data
               mountPath: /data/reinvent4_mcp/jobs
               subPath: jobs
               readOnly: true
+            # TTPs are writable, because defining the base TTP is the first
+            # step of a campaign on a new target and the conductor is who
+            # opens campaigns. This was read-only, which blocked that: the
+            # conductor could only conduct campaigns on profiles somebody
+            # else had made, and create_ttp failed with EROFS.
+            #
+            # The thing actually worth preventing is *rewriting* a base TTP
+            # that tasks are already being measured against, which would
+            # silently change what earlier and later results mean. That is
+            # REINVENT4_AGENT_DENY_TOOLS above, and the two belong together:
+            # relax one without the other and the guarantee is gone.
+            - name: data
+              mountPath: /root/.reinvent4_mcp/ttps
+              subPath: ttps
             - name: agent-config
               mountPath: /app/config
               readOnly: true

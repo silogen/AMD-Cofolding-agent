@@ -433,6 +433,220 @@ class TestResults:
         assert state == "failed"
 
 
+class TestTaskIntent:
+    """Prose on a task, for what the weight vector cannot say.
+
+    Holding a chemotype is a choice of generative prior rather than a weight,
+    so it travels as an instruction to the agent that will pick the model.
+    """
+
+    def test_an_intent_is_stored_on_the_task(self, client):
+        cid = _campaign(client)["campaign_id"]
+        intent = "Hold the JQ1 methyl-triazolo-benzodiazepine core fixed."
+
+        task = _task(client, cid, intent=intent)
+
+        assert task["spec"]["intent"] == intent
+
+    def test_it_survives_being_claimed(self, client):
+        """The supervisor reads it off the claim, not from the enqueue call."""
+        cid = _campaign(client)["campaign_id"]
+        _task(client, cid, intent="stay on the I-BET151 chemotype")
+
+        claimed = _claim(client, "s0").json()
+
+        assert claimed["spec"]["intent"] == "stay on the I-BET151 chemotype"
+
+    def test_a_task_without_one_is_still_valid(self, client):
+        cid = _campaign(client)["campaign_id"]
+
+        task = _task(client, cid)
+
+        assert task["spec"]["intent"] is None
+
+
+class TestSupervisorPresence:
+    """Which supervisors exist, as opposed to which hold a task.
+
+    Claiming was the only thing that put a supervisor in the ledger, so an
+    idle one -- the only kind a conductor can actually dispatch to -- was
+    indistinguishable from one that never started.
+    """
+
+    def _present(self, client, owner, state="idle", **extra):
+        body = {"state": state}
+        body.update(extra)
+        response = client.post(f"/supervisors/{owner}/presence", json=body)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_an_idle_supervisor_is_visible(self, client):
+        self._present(client, "s0")
+
+        pool = client.get("/supervisors").json()
+
+        assert pool["n_alive"] == 1
+        assert pool["idle"] == 1
+        assert pool["supervisors"][0]["owner"] == "s0"
+
+    def test_the_pool_separates_free_from_working(self, client):
+        self._present(client, "s0", state="idle")
+        self._present(client, "s1", state="busy", task_id="t1")
+        self._present(client, "s2", state="busy", task_id="t2")
+
+        pool = client.get("/supervisors").json()
+
+        assert (pool["idle"], pool["busy"], pool["n_alive"]) == (1, 2, 3)
+
+    def test_a_busy_supervisor_says_what_it_holds(self, client):
+        self._present(
+            client, "s0", state="busy", task_id="t1",
+            tasks_completed=3, tasks_failed=1, detail="running task",
+        )
+
+        held = client.get("/supervisors").json()["supervisors"][0]
+
+        assert held["task_id"] == "t1"
+        assert (held["tasks_completed"], held["tasks_failed"]) == (3, 1)
+        assert held["detail"] == "running task"
+
+    def test_a_supervisor_that_stopped_reporting_is_forgotten(self, client):
+        """A stale row read as capacity is what makes a dispatch go nowhere."""
+        self._present(client, "s0", ttl_seconds=0.01)
+        time.sleep(0.05)
+
+        pool = client.get("/supervisors").json()
+
+        assert pool["n_alive"] == 0
+
+    def test_leaving_on_purpose_is_immediate(self, client):
+        """A pool drained on command should not look crashed for two minutes."""
+        self._present(client, "s0")
+
+        client.delete("/supervisors/s0")
+
+        assert client.get("/supervisors").json()["n_alive"] == 0
+
+    def test_reporting_again_refreshes_rather_than_duplicates(self, client):
+        self._present(client, "s0", state="idle")
+        self._present(client, "s0", state="busy", task_id="t1")
+
+        pool = client.get("/supervisors").json()
+
+        assert pool["n_alive"] == 1
+        assert pool["supervisors"][0]["state"] == "busy"
+
+    def test_how_long_ago_it_reported_is_what_dates_the_state(self, client):
+        self._present(client, "s0")
+
+        held = client.get("/supervisors").json()["supervisors"][0]
+
+        assert held["last_seen_seconds_ago"] < 5
+
+    def test_an_unpinned_supervisor_counts_towards_every_campaign(self, client):
+        """It claims from any campaign, so it is capacity for all of them."""
+        cid = _campaign(client)["campaign_id"]
+        self._present(client, "anyone", campaign_id=None)
+        self._present(client, "pinned", campaign_id=cid)
+        self._present(client, "elsewhere", campaign_id="other123")
+
+        pool = client.get(f"/supervisors?campaign_id={cid}").json()
+
+        assert {s["owner"] for s in pool["supervisors"]} == {"anyone", "pinned"}
+
+    def test_an_empty_pool_is_not_an_error(self, client):
+        pool = client.get("/supervisors").json()
+
+        assert pool == {
+            "supervisors": [], "n_alive": 0, "idle": 0, "busy": 0, "by_state": {},
+        }
+
+    def test_a_starting_supervisor_is_alive_but_not_idle(self, client):
+        """A pod still coming up is not somewhere to send a task."""
+        self._present(client, "s0", state="starting")
+
+        pool = client.get("/supervisors").json()
+
+        assert (pool["n_alive"], pool["idle"]) == (1, 0)
+        assert pool["by_state"] == {"starting": 1}
+
+
+class TestCampaignOverview:
+    """``/campaigns`` as a triage list rather than bare rows.
+
+    "What ran most recently and did it produce anything" took one call per
+    campaign to answer, which for a conductor meant either many calls or a
+    guess.
+    """
+
+    def test_a_campaign_carries_its_task_and_result_counts(self, client):
+        cid = _campaign(client)["campaign_id"]
+        for _ in range(3):
+            _task(client, cid)
+        task = _claim(client, "s0").json()
+        client.post(
+            f"/tasks/{task['task_id']}/result",
+            json={"owner": "s0", "objective_profile": {"BoltzAffinity": 0.9}},
+        )
+
+        overview = client.get("/campaigns").json()[0]
+
+        assert overview["task_counts"] == {"done": 1, "queued": 2}
+        assert overview["n_tasks"] == 3
+        assert overview["n_results"] == 1
+
+    def test_the_latest_activity_is_reported_not_just_the_creation(self, client):
+        cid = _campaign(client)["campaign_id"]
+        _task(client, cid)
+        task = _claim(client, "s0").json()
+        client.post(
+            f"/tasks/{task['task_id']}/result",
+            json={"owner": "s0", "objective_profile": {"BoltzAffinity": 0.9}},
+        )
+
+        overview = client.get("/campaigns").json()[0]
+
+        assert overview["last_activity_at"] >= overview["created_at"]
+        assert overview["last_activity_seconds_ago"] < 10
+
+    def test_an_untouched_campaign_dates_from_its_creation(self, client):
+        _campaign(client)
+
+        overview = client.get("/campaigns").json()[0]
+
+        assert overview["last_activity_at"] == overview["created_at"]
+        assert overview["n_tasks"] == 0
+
+    def test_the_phase_follows_the_clock_not_the_stored_state(self, client):
+        """A conductor that died past its deadline still reads as draining."""
+        _campaign(client, dispatch_seconds=0.01, grace_seconds=600)
+        time.sleep(0.05)
+
+        overview = client.get("/campaigns").json()[0]
+
+        assert overview["state"] == "dispatching"
+        assert overview["phase"] == "draining"
+
+    def test_campaigns_are_newest_first(self, client):
+        first = _campaign(client, goal="older")["campaign_id"]
+        second = _campaign(client, goal="newer")["campaign_id"]
+
+        order = [c["campaign_id"] for c in client.get("/campaigns").json()]
+
+        assert order == [second, first]
+
+    def test_counts_do_not_bleed_between_campaigns(self, client):
+        busy = _campaign(client)["campaign_id"]
+        quiet = _campaign(client)["campaign_id"]
+        for _ in range(2):
+            _task(client, busy)
+
+        overview = {c["campaign_id"]: c for c in client.get("/campaigns").json()}
+
+        assert overview[busy]["n_tasks"] == 2
+        assert overview[quiet]["n_tasks"] == 0
+
+
 class TestResultsAreNarrowedForAContextWindow:
     """A result's caller is an LLM, and a scorer emits far more than the axes.
 

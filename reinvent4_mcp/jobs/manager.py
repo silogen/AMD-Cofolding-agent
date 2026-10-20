@@ -1431,6 +1431,28 @@ def _compute_diagnostics(
         return None
 
 
+#: What the TTP mapper names a constraint's column (``_map_constraint``).
+CONSTRAINT_COLUMN_PREFIX = "constraint_"
+
+
+def rejecting_constraints(health: dict[str, dict[str, Any]]) -> list[str]:
+    """Constraints rejecting so much of the batch that they explain the zeros.
+
+    A constraint maps to a REINVENT filter, which scores 0 for a molecule it
+    matches and masks every other component for it. So one over-broad SMARTS
+    makes the whole scoring pipeline look broken, which is how it gets
+    misdiagnosed: the symptom is every component reading zero, including
+    descriptors that are pure arithmetic over the structure.
+    """
+
+    return [
+        name
+        for name, entry in health.items()
+        if name.startswith(CONSTRAINT_COLUMN_PREFIX)
+        and entry.get("zero_rate", 0.0) >= 0.8
+    ]
+
+
 def _component_health(df: Any) -> dict[str, dict[str, Any]]:
     """Analyse per-component NaN rates and score distributions.
 
@@ -1520,8 +1542,34 @@ def _generate_warnings(
             ),
         })
 
+    # A constraint is a REINVENT filter: a molecule that matches is masked, and
+    # every other component reports zero for it -- including descriptors like
+    # MolecularWeight that cannot be zero for a real molecule. Reported first
+    # and on its own, because the alternative is one "most scores are zero"
+    # warning per component, none of which names the cause. One live run lost
+    # ten minutes to exactly that: a SMARTS of `[#6][#6][#6][#6]` rejected
+    # every molecule, the monitor flagged `QED_pre`, and the agent stopped both
+    # jobs and rewrote the TTP around a component that was never at fault.
+    rejecting = rejecting_constraints(health)
+    for name in rejecting:
+        rate = health[name].get("zero_rate", 1.0)
+        warnings.append({
+            "type": "constraint_rejects_batch",
+            "severity": "high",
+            "component": name,
+            "message": (
+                f"Constraint '{name}' rejects {rate:.0%} of molecules. A "
+                "rejected molecule is masked, so every other component reads "
+                "zero for it and the run has no gradient. Those zeros are a "
+                "consequence, not separate failures -- fix this constraint's "
+                "patterns rather than the components reporting zero."
+            ),
+        })
+
     for comp_name, comp_health in health.items():
         if comp_health["status"] == "failing":
+            # Always reported: masking produces zeros, never NaN, so a NaN
+            # rate this high is the component's own failure either way.
             warnings.append({
                 "type": "component_failure",
                 "severity": "high",
@@ -1532,6 +1580,11 @@ def _generate_warnings(
                 ),
             })
         elif comp_health["status"] == "degraded":
+            if rejecting and comp_health["nan_rate"] <= 0.2:
+                # Degraded only by zeros, while a constraint is rejecting the
+                # batch. For the other components that is the mask; for the
+                # constraint itself it is what the warning above already said.
+                continue
             warnings.append({
                 "type": "component_degraded",
                 "severity": "medium",
@@ -1554,7 +1607,20 @@ def _generate_recommendations(
     recs: list[str] = []
     status = diagnostics.get("convergence_status")
 
-    if status == "plateau":
+    # Before anything about weights or objectives: a constraint rejecting the
+    # batch means there is no gradient at all, and no weight change helps.
+    rejecting = rejecting_constraints(health)
+    if rejecting:
+        recs.append(
+            f"Fix the constraint(s) first: {', '.join(rejecting)}. They reject "
+            "almost every molecule, which masks every other component to zero "
+            "-- so the plateau and the zero component scores are symptoms of "
+            "this, and adjusting weights or dropping components will not help. "
+            "Check the SMARTS: a pattern like [#6][#6][#6][#6] matches any four "
+            "connected carbons, so it fires on practically every molecule."
+        )
+
+    if status == "plateau" and not rejecting:
         recs.append(
             "Score has plateaued. Consider stopping the run and adjusting TTP "
             "weights or objectives, then resuming from checkpoint."

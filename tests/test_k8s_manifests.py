@@ -816,18 +816,42 @@ class TestConductor:
 
         assert store_url == f"http://{CAMPAIGN_STORE}:{port}"
 
-    def test_every_shared_mount_is_read_only(self, deployments):
-        # It reviews results and reads TTPs; the supervisors write. A writable
-        # mount would invite it to edit a base TTP mid-campaign, silently
-        # changing what later tasks in the sweep mean.
-        mounts = [
-            m for m in _containers(deployments[CONDUCTOR_DEPLOYMENT])[0]["volumeMounts"]
+    def _data_mounts(self, deployments) -> dict[str, Any]:
+        return {
+            m["mountPath"]: m
+            for m in _containers(deployments[CONDUCTOR_DEPLOYMENT])[0]["volumeMounts"]
             if m["name"] == "data"
-        ]
+        }
+
+    def test_results_and_the_shared_volume_are_read_only(self, deployments):
+        # It reviews what the fleet produced; the supervisors are what write it.
+        mounts = self._data_mounts(deployments)
 
         assert mounts, "the conductor should still be able to read results"
-        for mount in mounts:
-            assert mount["readOnly"] is True, f"{mount['mountPath']} is writable"
+        for path in ("/shared", "/data/reinvent4_mcp/jobs"):
+            assert mounts[path]["readOnly"] is True, f"{path} is writable"
+
+    def test_it_can_write_the_ttp_it_opens_a_campaign_on(self, deployments):
+        # Defining the base TTP is the first step of a campaign on a new
+        # target, and the conductor is who opens campaigns. Read-only here
+        # meant create_ttp failed with EROFS and a campaign could only ever
+        # run against a profile somebody else had made.
+        mount = self._data_mounts(deployments)["/root/.reinvent4_mcp/ttps"]
+
+        assert not mount.get("readOnly")
+
+    def test_the_writable_ttp_mount_comes_with_the_edit_tools_withheld(
+        self, deployments
+    ):
+        # The pair is the guarantee: creating a base TTP is how a campaign
+        # starts, rewriting one mid-campaign changes what results already in
+        # the ledger mean. Relax either half alone and that is gone.
+        denied = set(
+            self._env(deployments)["REINVENT4_AGENT_DENY_TOOLS"]["value"].split(",")
+        )
+
+        assert {"update_ttp", "delete_ttp"} <= denied
+        assert "create_ttp" not in denied
 
     def test_it_needs_no_gpu(self, deployments):
         assert _gpus(deployments[CONDUCTOR_DEPLOYMENT]) == 0

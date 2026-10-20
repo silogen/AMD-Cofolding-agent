@@ -14,6 +14,7 @@ and carry on, not have its turn aborted.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ def enqueue_task(
     fidelity_tier: str = "exploration",
     max_steps: Optional[int] = None,
     deadline: Optional[str] = None,
+    intent: Optional[str] = None,
 ) -> dict[str, Any]:
     """Queue one weight vector for a supervisor to run.
 
@@ -148,6 +150,17 @@ def enqueue_task(
     deadline:
         ISO timestamp by which the task must have stopped. The supervisor
         turns this into a checkpointing stop.
+    intent:
+        What this run is for, in prose, handed to the supervisor's agent
+        verbatim. The channel for what the fields above cannot express --
+        most usefully which chemistry to stay within, since holding a
+        chemotype is a choice of generative prior and the agent can look the
+        reference compound up and pick a model itself. Say what the run is
+        for, not which tool to call.
+
+        A task with an intent will not fall back to a default de novo run if
+        the agent fails to start one: it is handed back to be retried, rather
+        than quietly measuring a different experiment.
     """
 
     spec: dict[str, Any] = {
@@ -160,6 +173,8 @@ def enqueue_task(
         spec["max_steps"] = max_steps
     if deadline:
         spec["deadline"] = deadline
+    if intent:
+        spec["intent"] = intent
 
     return _guard(
         f"Could not enqueue a task on campaign {campaign_id}",
@@ -167,12 +182,33 @@ def enqueue_task(
     )
 
 
-def list_supervisors(campaign_id: str) -> dict[str, Any]:
-    """The supervisors holding tasks right now, and what each is trying.
+def list_supervisors(campaign_id: Optional[str] = None) -> dict[str, Any]:
+    """The pool: how many supervisors exist, and how many could take work now.
 
-    Expired leases are swept first, so this is who is actually alive rather
-    than who last claimed something.
+    ``idle`` is the number that would answer a dispatch immediately. That is
+    not the same as ``concurrency``, which is only the ceiling this campaign
+    asked for, nor the Deployment's replica count, which counts pods that are
+    still starting or already shutting down. A supervisor appears here because
+    it reported in, so one that crashed drops out after its presence expires.
+
+    Dead presences and expired leases are both swept before answering, so this
+    is who is alive rather than who was last seen.
+
+    Parameters
+    ----------
+    campaign_id:
+        Narrow to the supervisors eligible for one campaign, and include that
+        campaign's in-flight tasks. Supervisors not pinned to any campaign
+        count towards every campaign's pool. Omit for the whole fleet.
     """
+
+    pool = _guard("Could not read the supervisor pool",
+                  lambda: _store().supervisors(campaign_id))
+    if "error" in pool:
+        return pool
+
+    if campaign_id is None:
+        return pool
 
     status = _guard(
         f"Could not read campaign {campaign_id}",
@@ -181,7 +217,8 @@ def list_supervisors(campaign_id: str) -> dict[str, Any]:
     if "error" in status:
         return status
     return {
-        "supervisors": status["in_flight"],
+        **pool,
+        "in_flight": status["in_flight"],
         "n_in_flight": len(status["in_flight"]),
         "concurrency": status["campaign"]["concurrency"],
     }
@@ -206,6 +243,124 @@ def get_supervisor_result(campaign_id: str, task_id: str) -> dict[str, Any]:
         if result["task_id"] == task_id:
             return result
     return {"error": f"Campaign {campaign_id} has no result for task {task_id}"}
+
+
+#: Files worth naming in a job directory, in the order a person reads them.
+#: Everything else there (``tb_logs_*``, ``_config.json``, checkpoint shards)
+#: is machinery rather than something to open.
+JOB_FILES_OF_INTEREST = (
+    "results_*.csv",
+    "reinvent.log",
+    "config.toml",
+    "job_metadata.json",
+    "stage.chkpt",
+    "seed.smi",
+)
+
+
+def _job_files(job_dir: Any) -> list[dict[str, Any]]:
+    """The notable files in one job directory, with sizes, newest pattern first."""
+
+    files = []
+    seen: set[str] = set()
+    for pattern in JOB_FILES_OF_INTEREST:
+        for path in sorted(job_dir.glob(pattern)):
+            if path.name in seen or not path.is_file():
+                continue
+            seen.add(path.name)
+            files.append({"name": path.name, "bytes": path.stat().st_size})
+    return files
+
+
+def get_campaign_files(campaign_id: str, limit: int = 20) -> dict[str, Any]:
+    """Where a campaign's output actually is on disk, task by task.
+
+    The ledger records what each task achieved; this says which directory it
+    wrote while achieving it, so a result can be opened rather than only read
+    about. Paths are as the container sees them -- the same volume the agent,
+    the runner and the scorers share.
+
+    A task with no directory either never got as far as starting a job or ran
+    before this volume, and says which.
+
+    Tasks come back newest first and carry no scores, so position here says
+    nothing about which run was any good -- ``get_pareto_front`` ranks them,
+    and ``get_top_candidates`` ranks the molecules within one job.
+
+    Parameters
+    ----------
+    campaign_id:
+        Campaign to locate.
+    limit:
+        How many tasks to report, newest first. ``n_tasks`` is the true total.
+    """
+
+    from pathlib import Path
+
+    from reinvent4_mcp.config import get_config
+
+    tasks = _guard(
+        f"Could not read tasks for campaign {campaign_id}",
+        lambda: _store().tasks(campaign_id),
+    )
+    if isinstance(tasks, dict):
+        return tasks
+
+    results = _guard(
+        f"Could not read results for campaign {campaign_id}",
+        lambda: _store().results(campaign_id),
+    )
+    job_of = (
+        {}
+        if isinstance(results, dict)
+        else {r["task_id"]: r.get("job_id") for r in results}
+    )
+
+    jobs_root = Path(get_config().jobs.working_dir)
+    newest_first = sorted(
+        tasks, key=lambda t: t.get("created_at") or "", reverse=True
+    )
+
+    entries = []
+    for task in newest_first[:limit]:
+        job_id = job_of.get(task["task_id"])
+        entry: dict[str, Any] = {
+            "task_id": task["task_id"],
+            "state": task["state"],
+            "job_id": job_id,
+            "created_at": task.get("created_at"),
+            "finished_at": task.get("finished_at"),
+        }
+        if not job_id:
+            entry["directory"] = None
+            entry["note"] = (
+                "no job id in the ledger: the task did not get as far as "
+                f"starting one ({task['state']})"
+            )
+        else:
+            job_dir = jobs_root / f"job_{job_id}"
+            entry["directory"] = str(job_dir)
+            if job_dir.is_dir():
+                entry["files"] = _job_files(job_dir)
+            else:
+                entry["note"] = "the ledger has this job but the directory is gone"
+        entries.append(entry)
+
+    return {
+        "campaign_id": campaign_id,
+        "jobs_root": str(jobs_root),
+        "shared_volume": str(
+            Path(os.environ.get("IP_SHARED_DIR", "/shared"))
+        ),
+        "tasks": entries,
+        "n_tasks": len(tasks),
+        "n_listed": len(entries),
+        "hint": (
+            "Cofolded structures are on the shared volume, not in the job "
+            "directory -- use list_shared_assets(prefix=...) for those. Row "
+            "data is in results_*.csv, which read_results(job_id) parses."
+        ),
+    }
 
 
 def get_pareto_front(campaign_id: str) -> dict[str, Any]:
@@ -251,30 +406,62 @@ def cancel_supervisor(task_id: str) -> dict[str, Any]:
     )
 
 
-def get_pool_capacity() -> dict[str, Any]:
-    """Whether the fleet has room for more work, from the scorer's queue.
+def get_pool_capacity(campaign_id: Optional[str] = None) -> dict[str, Any]:
+    """Whether there is room for more work, and which limit is the binding one.
 
-    Boltz is the binding constraint, not the agent count, so capacity is a
-    question about its queue depth. ``queue_pressure`` is queued batches per
-    healthy replica; ``None`` means the gateway could not be reached, which is
-    not the same as idle.
+    Two separate things have to be true to dispatch: a supervisor must be free
+    to claim, and Boltz must have queue room to score what it starts. Either
+    one alone is misleading -- an idle supervisor handed a task when the
+    scorer is saturated just moves the wait, and a quiet scorer is no use with
+    nothing alive to dispatch to.
+
+    ``queue_pressure`` is queued batches per healthy replica. ``None`` means
+    the gateway did not answer, which is not the same as idle.
+
+    Parameters
+    ----------
+    campaign_id:
+        Count only the supervisors eligible for this campaign. Omit for the
+        whole fleet.
     """
 
     from reinvent4_agent.conductor import queue_pressure
 
+    pool = _guard("Could not read the supervisor pool",
+                  lambda: _store().supervisors(campaign_id))
+    idle = None if "error" in pool else pool["idle"]
+
     pressure = queue_pressure()
-    if pressure is None:
-        return {
-            "queue_pressure": None,
-            "verdict": "unknown",
-            "detail": "the boltz gateway did not answer; treat capacity as unknown "
-                      "rather than free",
-        }
+    scorer = {
+        "queue_pressure": None if pressure is None else round(pressure, 2),
+        "verdict": "unknown" if pressure is None
+                   else ("room" if pressure <= 2.0 else "saturated"),
+        "detail": "the boltz gateway did not answer; treat capacity as unknown "
+                  "rather than free" if pressure is None
+                  else f"{pressure:.1f} batches in hand per healthy Boltz "
+                       "replica, queued and in flight together",
+    }
+
+    if idle is None:
+        verdict, limit = "unknown", "supervisor pool unreadable"
+    elif idle == 0:
+        verdict, limit = "no", "every supervisor is busy"
+    elif scorer["verdict"] == "saturated":
+        verdict, limit = "no", "boltz is saturated"
+    elif scorer["verdict"] == "unknown":
+        verdict, limit = "unknown", "boltz queue depth unreadable"
+    else:
+        verdict, limit = "yes", None
 
     return {
-        "queue_pressure": round(pressure, 2),
-        "verdict": "room" if pressure <= 2.0 else "saturated",
-        "detail": f"{pressure:.1f} queued batches per healthy Boltz replica",
+        "can_dispatch": verdict,
+        "binding_limit": limit,
+        "supervisors": {
+            "idle": idle,
+            "busy": None if "error" in pool else pool["busy"],
+            "alive": None if "error" in pool else pool["n_alive"],
+        },
+        "scorer": scorer,
     }
 
 
