@@ -119,7 +119,7 @@ def run(
     lig_pos: list[tuple[float, float, float]] = ligand_positions or []
     policy = profile.altloc_policy
 
-    st = copy.deepcopy(structure)
+    st = structure.clone()
 
     n_positions_resolved = 0
     altlocs_resolved: list[dict[str, Any]] = []

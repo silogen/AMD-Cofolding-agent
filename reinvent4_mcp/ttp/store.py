@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from reinvent4_mcp.ttp.schema import TTP
 
@@ -69,7 +69,12 @@ class TTPStore:
         self._write(ttp)
         return ttp
 
-    def update(self, ttp_id: str, updates: dict[str, Any]) -> TTP:
+    def update(
+        self,
+        ttp_id: str,
+        updates: dict[str, Any],
+        validator: Callable[[TTP], None] | None = None,
+    ) -> TTP:
         """Apply a partial update to an existing TTP.
 
         The ``version`` is auto-incremented.  The original ``id`` is
@@ -83,6 +88,8 @@ class TTPStore:
         merged["version"] = current.version + 1
         merged["id"] = ttp_id
         updated = TTP.model_validate(merged)
+        if validator is not None:
+            validator(updated)
         self._write(updated)
         return updated
 

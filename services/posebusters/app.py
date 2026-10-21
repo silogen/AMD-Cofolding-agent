@@ -116,7 +116,10 @@ def _score_single_molecule(
         df = buster.bust(**bust_kwargs)
 
         if df.empty:
-            return None, {}
+            return None, {
+                "pose_status": "declined",
+                "pose_reason": "PoseBusters returned no checks.",
+            }
 
         row = df.iloc[0]
         bool_cols = df.select_dtypes(include="bool").columns
@@ -131,12 +134,23 @@ def _score_single_molecule(
             checks[col] = None if pd.isna(val) else bool(val)
         checks["n_checks_passed"] = n_passed
         checks["n_checks_total"] = n_total
+        checks["pose_status"] = (
+            "passed" if score == 1.0 else "failed"
+        )
+        checks["pose_reason"] = (
+            None
+            if score == 1.0
+            else f"{n_total - n_passed} of {n_total} checks failed."
+        )
 
         return score, checks
 
-    except Exception:
+    except Exception as exc:
         logger.exception("PoseBusters failed for %s", structure_path)
-        return None, {}
+        return None, {
+            "pose_status": "service_error",
+            "pose_reason": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def score_molecules(
@@ -164,23 +178,32 @@ def score_molecules(
         if struct_path_str is None:
             logger.warning("Molecule %d: structure_path is null, skipping", i)
             scores.append(None)
-            all_checks.append({})
+            all_checks.append({
+                "pose_status": "unavailable",
+                "pose_reason": "Upstream structure path is null.",
+            })
             continue
 
         struct_path = Path(struct_path_str)
         if not struct_path.exists():
             logger.warning("Molecule %d: structure file not found: %s", i, struct_path)
             scores.append(None)
-            all_checks.append({})
+            all_checks.append({
+                "pose_status": "unavailable",
+                "pose_reason": f"Structure file not found: {struct_path}",
+            })
             continue
 
         try:
             struct_path = _boltz_pdb_to_sdf(struct_path)
             logger.info("Molecule %d: extracted ligand to %s", i, struct_path)
-        except Exception:
+        except Exception as exc:
             logger.exception("Molecule %d: ligand extraction failed for %s", i, struct_path)
             scores.append(None)
-            all_checks.append({})
+            all_checks.append({
+                "pose_status": "declined",
+                "pose_reason": f"Ligand extraction failed: {type(exc).__name__}: {exc}",
+            })
             continue
 
         logger.info("Molecule %d: validating %s (mode=%s)", i, struct_path, mode)

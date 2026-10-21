@@ -270,6 +270,36 @@ class TestTOMLGeneration:
         assert "[stage.scoring.component.CustomAlerts]" in toml
         assert 'params.smarts = ["[*;r8]", "[#8][#8]"]' in toml
 
+    def test_tanimoto_single_reference_keeps_endpoint_list(self):
+        scorer = {
+            "type": "geometric_mean",
+            "component": [
+                {
+                    "TanimotoSimilarity": {
+                        "endpoint": [{
+                            "name": "seed_similarity",
+                            "weight": 1.0,
+                            "params": {
+                                "smiles": ["CC(=O)NC1=CC=C(C=C1)O"],
+                                "radius": [2],
+                                "use_counts": [True],
+                                "use_features": [False],
+                            },
+                        }]
+                    }
+                }
+            ],
+        }
+        toml = generate_reinvent_toml(
+            scorer_config=scorer,
+            prior_file="/model/prior.model",
+        )
+
+        assert 'params.smiles = ["CC(=O)NC1=CC=C(C=C1)O"]' in toml
+        assert "params.radius = 2" in toml
+        assert "params.use_counts = true" in toml
+        assert "params.use_features = false" in toml
+
     def test_diversity_filter(self):
         toml = generate_reinvent_toml(
             scorer_config=MINIMAL_SCORER_CONFIG,
@@ -1047,6 +1077,81 @@ class TestJobManagerLifecycle:
         assert traj["n_molecules_total"] == 4
         assert traj["n_valid"] == 3
         assert traj["validity_rate"] == 0.75
+        assert status["metrics_available"] is True
+        assert status["csv_readiness"] == "ready"
+        assert status["last_csv_row"] == 3
+        assert "error" not in status
+
+    def test_get_status_before_csv_exists(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+
+        status = manager.get_status(result["job_id"])
+        assert status["metrics_available"] is False
+        assert status["csv_readiness"] == "missing"
+        assert status["data_policy"] == "metrics_withheld"
+        assert "trajectory" not in status
+        assert "error" not in status
+
+    def test_get_status_with_zero_byte_csv(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        Path(result["working_dir"]).joinpath("results_1.csv").touch()
+
+        status = manager.get_status(result["job_id"])
+        assert status["metrics_available"] is False
+        assert status["csv_readiness"] == "empty"
+        assert "no header or rows" in status["metrics_unavailable_reason"]
+
+    def test_get_status_with_header_only_csv(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        Path(result["working_dir"]).joinpath("results_1.csv").write_text(
+            "Step,SMILES,total_score\n"
+        )
+
+        status = manager.get_status(result["job_id"])
+        assert status["metrics_available"] is False
+        assert status["csv_readiness"] == "header_only"
+
+    def test_status_flags_inconsistent_aggregate(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        pd.DataFrame({
+            "Step": [0],
+            "SMILES": ["CCO"],
+            "SMILES_state": [1],
+            "total_score": [0.1],
+            "QED": [0.8],
+            "SAScore": [0.8],
+        }).to_csv(
+            Path(result["working_dir"]) / "results_1.csv", index=False
+        )
+
+        status = manager.get_status(result["job_id"])
+        aggregate = status["trajectory"]["diagnostics"]["aggregate_consistency"]
+        assert aggregate["matches_unweighted_aggregate"] is False
+        assert "warning" in aggregate
 
     def test_list_jobs(self, manager):
         with patch.object(manager, "_start_process"):

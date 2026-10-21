@@ -461,6 +461,12 @@ async def _chat_loop(
 
             monitor_ctx["goal"] = stripped
             try:
+                if agent._tool_in_flight:
+                    console.print(
+                        "[dim yellow]⏳ Agent is waiting for a long-running tool call "
+                        "(e.g. Boltz cofolding or hotspot ensemble). "
+                        "Your message will be processed as soon as it returns.[/dim yellow]"
+                    )
                 async with agent._chat_lock:
                     response = await agent.chat(user_input)
                 print_agent_message(response)

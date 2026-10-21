@@ -728,9 +728,13 @@ def _profile_hotspot_ensemble(
     successful = 0
     member_results: list[Any] = []  # collected for extended ensemble analysis
 
-    for sp in structure_paths:
-        # Each member gets its own provenance copy so the outer prov
-        # is not silently overwritten on every iteration.
+    # F5: parallel member loop using a thread pool.  The GIL allows I/O and
+    # gemmi/RDKit calls to run concurrently; most of the time is spent parsing
+    # files and computing interactions, not in Python bytecode.
+    MAX_WORKERS = int(os.environ.get("IP_ENSEMBLE_WORKERS", "8"))
+
+    def _profile_member(sp: str) -> tuple[str, Any, list[str]]:
+        """Profile one ensemble member; return (sp, result_or_None, warnings)."""
         from interaction_profiler.schemas import ComplexProvenance  # noqa: PLC0415
         member_prov = ComplexProvenance(mode="hotspot_ensemble_member")
         member_warnings: list[str] = []
@@ -751,21 +755,40 @@ def _profile_hotspot_ensemble(
                 use_gpu=use_gpu, max_interactions=max_interactions, drop_uncertain=drop_uncertain,
                 prov=member_prov, warnings=member_warnings,
             )
-            successful += 1
-            member_results.append(r)   # collect for extended ensemble analysis
-            # Propagate any member warnings to the outer warning list
-            for w in member_warnings:
-                warnings.append(f"[{sp}] {w}")
-            for ix in r.enriched_interactions:
-                rl = ix.target_feature or ix.residue_label
-                hotspot_map.setdefault(rl, []).append({
-                    "source": sp,
-                    "interaction_type": ix.interaction_type,
-                    "distance": ix.distance,
-                    "confidence": ix.confidence,
-                })
+            # F2: stamp the source path so fragment families/pairs can carry
+            # the structure identifier rather than leaking a Python object id.
+            if hasattr(r, "provenance"):
+                r.provenance.structure_path = sp
+            return sp, r, member_warnings
         except Exception as exc:
-            warnings.append(f"Ensemble member {sp} failed: {exc}")
+            return sp, None, [f"Ensemble member {sp} failed: {exc}"]
+
+    import concurrent.futures  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(_profile_member, sp): sp for sp in structure_paths}
+        ordered: dict[str, tuple] = {}
+        for fut in concurrent.futures.as_completed(futures):
+            sp, r, member_warnings = fut.result()
+            ordered[sp] = (r, member_warnings)
+
+    for sp in structure_paths:
+        r, member_warnings = ordered.get(sp, (None, [f"Ensemble member {sp} not processed"]))
+        for w in member_warnings:
+            warnings.append(w)
+        if r is None:
+            continue
+        successful += 1
+        member_results.append(r)
+        for ix in r.enriched_interactions:
+            rl = ix.target_feature or ix.residue_label
+            hotspot_map.setdefault(rl, []).append({
+                "source": sp,
+                "interaction_type": ix.interaction_type,
+                "distance": ix.distance,
+                "confidence": ix.confidence,
+            })
 
     warnings.append(f"Hotspot ensemble: {successful}/{n_total} structures processed successfully.")
 
@@ -787,6 +810,29 @@ def _profile_hotspot_ensemble(
     # Sort by occupancy descending
     result.hotspots.sort(key=lambda h: -(h.occupancy or 0))
 
+    # ── Write ensemble artifacts to disk if requested ─────────────────────
+    artifact_dir_str = annotation_accessions.get("ensemble_artifact_dir")
+    if artifact_dir_str and result.hotspots:
+        try:
+            import json as _json  # noqa: PLC0415
+            from pathlib import Path  # noqa: PLC0415
+            adir = Path(artifact_dir_str)
+            adir.mkdir(parents=True, exist_ok=True)
+
+            hotspots_path = adir / "hotspots.json"
+            hotspots_path.write_text(
+                _json.dumps(
+                    [h.model_dump(exclude_none=True) for h in result.hotspots],
+                    indent=2,
+                )
+            )
+            warnings.append(
+                f"Hotspot artifact written to {hotspots_path} "
+                f"({len(result.hotspots)} residues)."
+            )
+        except Exception as _ae:
+            warnings.append(f"ensemble_artifact_dir write failed: {_ae}")
+
     # ── Extended ensemble analysis (ensemble_profile) ─────────────────────
     if ensemble_profile and ensemble_profile != "hotspots" and member_results:
         try:
@@ -800,10 +846,19 @@ def _profile_hotspot_ensemble(
                 result.fragment_families = compute_fragment_families(member_results)
 
             if eflags.get("compute_compatible_pairs", False):
-                result.compatible_pairs = compute_compatible_pairs(
+                pairs = compute_compatible_pairs(
                     member_results,
                     site_profile=getattr(result, "site_profile", None),
                 )
+                # F4: cap inline pairs and offer a /shared path for the full list.
+                INLINE_LIMIT = 50
+                result.compatible_pairs = pairs[:INLINE_LIMIT]
+                if len(pairs) > INLINE_LIMIT:
+                    warnings.append(
+                        f"compatible_pairs truncated to {INLINE_LIMIT} of {len(pairs)} "
+                        "for inline delivery. Pass ensemble_artifact_dir to write the full "
+                        "list to /shared."
+                    )
         except Exception as exc:
             warnings.append(f"Extended ensemble analysis failed: {exc}")
 

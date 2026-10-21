@@ -587,8 +587,8 @@ class TestTTPToScorerConfig:
         config = ttp_to_scorer_config(ttp)
         assert config["type"] == "geometric_mean"
         assert "component" in config
-        # 6 pre-scoring + 4 scoring + 1 constraint = 11
-        assert len(config["component"]) == 11
+        # 6 pre-scoring + 4 scoring + 1 auto-PB-gate + 1 constraint = 12
+        assert len(config["component"]) == 12
 
     def test_native_component_format(self):
         ttp = TTP.model_validate(MINIMAL_TTP)
@@ -606,7 +606,8 @@ class TestTTPToScorerConfig:
         external_comps = [
             c for c in config["component"] if "ExternalRESTScorer" in c
         ]
-        assert len(external_comps) == 3  # 2 boltz + 1 posebusters
+        # 2 boltz + 1 explicit posebusters + 1 auto-gate for Binder Probability
+        assert len(external_comps) == 4
 
         boltz_comp = external_comps[0]
         endpoint = boltz_comp["ExternalRESTScorer"]["endpoint"][0]
@@ -907,7 +908,10 @@ class TestTopologicalSort:
             c["ExternalRESTScorer"]["endpoint"][0]["name"]
             for c in external_comps
         ]
-        assert names == ["B", "A"]
+        # Auto-PB gates are appended after the Boltz objectives they gate.
+        # Order must still be B first, then A, then the auto gates.
+        boltz_names = [n for n in names if "pose_gate" not in n]
+        assert boltz_names == ["B", "A"]
 
     def test_chain_dependency_a_b_c(self):
         """A -> B -> C chain: A must come first, then B, then C."""
@@ -963,9 +967,11 @@ class TestGetMapperSummary:
         summary = get_mapper_summary(ttp)
         assert summary["n_pre_scoring"] == 6
         assert summary["n_native_objectives"] == 1
-        assert summary["n_external_objectives"] == 3
+        # Binder Probability has no explicit PoseBusters dependent in the
+        # source TTP, so the mapper adds one hard gate.
+        assert summary["n_external_objectives"] == 4
         assert summary["n_constraints"] == 1
-        assert summary["n_total_components"] == 11
+        assert summary["n_total_components"] == 12  # +1 auto-PB gate
         assert summary["aggregation"] == "geometric_mean"
 
     def test_full_ttp_names(self):
@@ -978,10 +984,13 @@ class TestGetMapperSummary:
     def test_pipeline_dependencies_listed(self):
         ttp = TTP.model_validate(FULL_TTP)
         summary = get_mapper_summary(ttp)
-        assert len(summary["pipeline_dependencies"]) == 1
-        dep = summary["pipeline_dependencies"][0]
-        assert dep["from"] == "Binding Affinity"
-        assert dep["to"] == "Pose Quality"
+        assert summary["pipeline_dependencies"] == [
+            {"from": "Binding Affinity", "to": "Pose Quality"},
+            {
+                "from": "Binder Probability",
+                "to": "Binder Probability_pose_gate",
+            },
+        ]
 
     def test_minimal_ttp_summary(self):
         ttp = TTP.model_validate(MINIMAL_TTP)
@@ -1016,6 +1025,7 @@ class TestGetMapperSummary:
             "Binding Affinity",
             "Binder Probability",
             "Pose Quality",
+            "Binder Probability_pose_gate",
         ]
 
     def test_no_external_components_when_native_only(self):

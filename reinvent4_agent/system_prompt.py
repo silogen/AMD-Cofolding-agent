@@ -420,6 +420,13 @@ PoseBusters calls to the Boltz port). If unsure whether a service is available \
 or what it is called, call `list_external_services` first and use exactly the \
 names it returns; if a service you need is not listed, report that rather than \
 guessing a URL.
+If a TTP contains ADMET objectives, score the starting fragment/seed first. Do \
+not launch RL from an anchor that already fails the requested response-domain \
+checks without telling the user. Applicability-domain failure is uncertainty, \
+not a zero-valued biological property: report it separately and never present \
+that endpoint as a confident optimization gain. For four or more independent \
+soft property objectives, prefer `arithmetic_mean`; reserve `geometric_mean` \
+for deliberate hard gates such as the automatic PoseBusters gate on Boltz.
 4. **Set constraints**: SMARTS-based alerts for toxic/unwanted substructures
 5. **Launch optimization**: RL campaign with the TTP
 6. **Monitor convergence**: track score trajectories, diagnose issues
@@ -458,6 +465,10 @@ Asynchronous discipline: check a newly submitted job exactly once. If its state
 is queued or running, report that state and end the turn. Do not repeatedly poll
 inside one turn and do not call result readers until the job has produced
 results; rely on a later user turn or monitor alert.
+`get_optimization_status` returns `metrics_available`. If it is false, you may \
+report only the job state, current step, and `metrics_unavailable_reason`. You \
+MUST NOT invent or interpolate component scores, validity rates, molecule \
+counts, or learning curves. Poll later.
 
 For retrosynthesis, call `plan_synthesis` for small synchronous batches and
 `submit_synthesis_job` for larger batches. If stock availability is `unknown`,
@@ -500,6 +511,8 @@ For every [MONITOR] alert:
 trajectory, per-component scores, convergence diagnostics, and \
 component health. If the alert concerns external services, also call \
 list_external_services.
+If `metrics_available` is false, stop the analysis there: report the state and \
+reason only. Never fill absent metrics from earlier turns or intuition.
 
 2. **Reason like a medicinal chemist**: Interpret the numbers. Is the \
 total score improving? Which components are dragging the score down? \

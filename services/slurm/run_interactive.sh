@@ -17,6 +17,12 @@ if [ ! -f "${ENV_FILE}" ]; then
 fi
 source "${ENV_FILE}"
 
+echo "Agent configuration:"
+echo "  env file: ${ENV_FILE}"
+echo "  backend:  ${REINVENT4_AGENT_BACKEND}"
+echo "  model:    ${REINVENT4_AGENT_MODEL}"
+echo "  base URL: ${REINVENT4_AGENT_BASE_URL}"
+
 DATA_DIR="${DATA_DIR:-${PROJECT_DIR}/data}"
 export DATA_DIR
 mkdir -p \
@@ -77,7 +83,6 @@ COMPOSE_PROJECT_NAME="cofolding-${SLURM_JOB_ID}"
 COMPOSE_ARGS=(
     -p "${COMPOSE_PROJECT_NAME}"
     -f "${PROJECT_DIR}/docker-compose.yml"
-    -f "${PROJECT_DIR}/services/structure-prep/docker-compose.structure-prep.yml"
 )
 
 relay_pid=""

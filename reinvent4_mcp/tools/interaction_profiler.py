@@ -34,10 +34,62 @@ def _ip_url() -> str:
     return os.environ.get("INTERACTION_PROFILER_URL", "http://interaction-profiler:8080")
 
 _TIMEOUT = 120.0
+_TIMEOUT_ENSEMBLE = 1800.0  # hotspot_ensemble over 100s of structures can take minutes
 
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=_ip_url(), timeout=_TIMEOUT)
+def _summarise_hotspot(data: dict) -> str:
+    """Compact summary of a hotspot_ensemble result for the LLM context window.
+
+    The raw response can be 2M+ tokens. Returns a compact summary with correct
+    field names from the service schema:
+      target_residue, occupancy, n_structures_observed, interaction_types_observed
+    """
+    hotspots: list[dict] = data.get("hotspots") or []
+    warnings: list[str] = data.get("warnings") or []
+    timing: float | None = data.get("timing_seconds")
+
+    # parse "Hotspot ensemble: N/M structures processed successfully" from warnings
+    n_total, n_ok = 0, 0
+    for w in warnings:
+        if "structures processed successfully" in w:
+            try:
+                part = w.split(":")[-1].strip()
+                n_ok_str, rest = part.split("/", 1)
+                n_total_str = rest.split()[0]
+                n_ok = int(n_ok_str.strip())
+                n_total = int(n_total_str.strip())
+            except Exception:
+                pass
+
+    # sort by occupancy descending — actual service field name is "occupancy"
+    sorted_hs = sorted(hotspots, key=lambda r: r.get("occupancy", 0.0), reverse=True)
+    top50 = sorted_hs[:50]
+
+    summary = {
+        "mode": "hotspot_ensemble",
+        "n_structures_ok": n_ok,
+        "n_structures_total": n_total,
+        "n_hotspot_residues": len(hotspots),
+        "timing_seconds": timing,
+        "compatible_pairs_count": len(data.get("compatible_pairs") or []),
+        "fragment_families_count": len(data.get("fragment_families") or []),
+        "top_50_residues_by_occupancy": [
+            {
+                "target_residue": h.get("target_residue"),
+                "occupancy": round(h.get("occupancy", 0.0), 4),
+                "n_structures_observed": h.get("n_structures_observed"),
+                "interaction_types": h.get("interaction_types_observed"),
+            }
+            for h in top50
+        ],
+        "warnings": warnings[:20],
+        "errors": [w for w in warnings if "failed" in w.lower()][:10],
+    }
+    return json.dumps(summary, indent=2)
+
+
+def _client(timeout: float = _TIMEOUT) -> httpx.Client:
+    return httpx.Client(base_url=_ip_url(), timeout=timeout)
 
 
 def _resolve_shared_path(path_str: str | None) -> str | None:
@@ -204,6 +256,20 @@ def register_tools(mcp) -> None:
                 ),
             ),
         ] = None,
+        ligand_sdf: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Shared-volume relative path to a pre-extracted ligand SDF "
+                    "(e.g. the 'sdf' value from get_preparation_status artifacts.ligands). "
+                    "When supplied, MMFF94 conformational strain is computed from this file "
+                    "instead of requiring a prepared_ligand_path on the server. "
+                    "Pass this whenever you have run prepare_structure first — it enables "
+                    "strain and ligand efficiency in the output."
+                ),
+            ),
+        ] = None,
         ensemble_profile: Annotated[
             str | None,
             Field(
@@ -257,15 +323,24 @@ def register_tools(mcp) -> None:
             "analysis_profile": analysis_profile,
             "site_profile_id": site_profile_id,
             "ensemble_profile": ensemble_profile,
+            "ligand_sdf": ligand_sdf,
         }
         # Drop explicit None values so the service uses its own defaults.
         payload = {k: v for k, v in payload.items() if v is not None}
 
         try:
-            with _client() as client:
+            # Use a longer timeout for ensemble mode — 366 structures can take minutes
+            timeout = _TIMEOUT_ENSEMBLE if mode == "hotspot_ensemble" else _TIMEOUT
+            with _client(timeout) as client:
                 resp = client.post("/profile_complex", json=payload)
                 resp.raise_for_status()
-                return json.dumps(resp.json(), indent=2)
+                data = resp.json()
+                # hotspot_ensemble returns per-residue contact data across hundreds of
+                # structures — the raw JSON can exceed the LLM context window (2M+ tokens).
+                # Return a compact summary instead of the full payload.
+                if mode == "hotspot_ensemble":
+                    return _summarise_hotspot(data)
+                return json.dumps(data, indent=2)
         except httpx.HTTPStatusError as e:
             return json.dumps({"error": str(e), "detail": e.response.text}, indent=2)
         except Exception as e:

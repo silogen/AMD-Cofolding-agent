@@ -105,6 +105,49 @@ def _extract_ligand_mol(
 
 
 # ---------------------------------------------------------------------------
+# SMILES from RCSB CCD API (D1) and Fragalysis sidecar (D2)
+# ---------------------------------------------------------------------------
+
+def _smiles_from_rcsb_ccd(comp_id: str) -> str | None:
+    """Fetch SMILES from the RCSB CCD REST API for a given comp_id.
+
+    Returns None without raising so callers fall through to the next tier.
+    The call has a 10 s timeout so it never blocks the pipeline for long.
+    """
+    try:
+        import urllib.request as _req  # noqa: PLC0415
+        url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{comp_id.upper()}"
+        with _req.urlopen(url, timeout=10) as resp:
+            import json as _json  # noqa: PLC0415
+            data = _json.loads(resp.read())
+        for descriptor in data.get("pdbx_chem_comp_descriptor", []):
+            if descriptor.get("type", "").upper().startswith("SMILES"):
+                smiles = descriptor.get("descriptor", "").strip()
+                if smiles and smiles not in (".", "?", ""):
+                    return smiles
+    except Exception:
+        logger.debug("RCSB CCD fetch failed for %s.", comp_id, exc_info=True)
+    return None
+
+
+def _smiles_from_fragalysis_sidecar(input_path: str, comp_id: str) -> str | None:
+    """Look for a Fragalysis *_smiles.txt sidecar file alongside the structure."""
+    from pathlib import Path as _Path  # noqa: PLC0415
+    if not input_path:
+        return None
+    for candidate_dir in [_Path(input_path).parent, _Path(input_path).parent.parent]:
+        sidecar = candidate_dir / f"{_Path(input_path).stem}_smiles.txt"
+        if sidecar.exists():
+            try:
+                text = sidecar.read_text().strip().split()[0]
+                if text:
+                    return text
+            except Exception:
+                pass
+    return None
+
+
+# ---------------------------------------------------------------------------
 # SMILES from CIF CCD data
 # ---------------------------------------------------------------------------
 
@@ -266,14 +309,30 @@ def _write_sdf(
     """Write ligand SDF to job_dir and return the path string, or None on failure."""
     try:
         from rdkit.Chem import SDWriter  # type: ignore[import]
+        from rdkit import Chem  # type: ignore[import]
+        from rdkit.Chem import AllChem  # type: ignore[import]
     except ImportError:
         logger.warning("Stage 8: RDKit SDWriter not available; skipping SDF emit.")
         return None
 
     sdf_path = job_dir / f"ligand_{comp_id}_{chain_name}_{resseq}.sdf"
     try:
+        # Sanitize to restore aromaticity perception and correct bond orders.
+        # SDWriter may emit Kekulé-form V2000 which has all-single bonds;
+        # downstream tools that don't call SanitizeMol (e.g. REINVENT4 mol_cache)
+        # will receive aromatic SMILES when we round-trip through MolToSmiles first.
+        mol_clean = Chem.RWMol(mol_3d)
+        Chem.SanitizeMol(mol_clean)
+        # Remove invalid stereochemistry (e.g. wedge bonds on sp² aromatic atoms)
+        # that cause RDKit to return None on re-parsing.
+        Chem.AssignStereochemistry(mol_clean, cleanIt=True, force=True)
+        Chem.RemoveStereochemistry(mol_clean)
+        # Re-assign only stereochemistry that can actually be perceived from the 3D
+        # coordinates so the file remains chemically valid.
+        AllChem.AssignStereochemistry(mol_clean, cleanIt=True, force=False)
+
         writer = SDWriter(str(sdf_path))
-        writer.write(mol_3d)
+        writer.write(mol_clean)
         writer.close()
         logger.debug("Stage 8: wrote SDF → %s", sdf_path)
         return str(sdf_path)
@@ -368,6 +427,23 @@ def _process_ligand(
             logger.debug(
                 "Stage 8: CIF CCD SMILES lookup failed for %s.", comp_id, exc_info=True
             )
+
+    # Priority 2b: Fragalysis *_smiles.txt sidecar (D2)
+    if smiles is None:
+        sidecar_smiles = _smiles_from_fragalysis_sidecar(
+            getattr(structure, "_source_path", "") or "", comp_id
+        )
+        if sidecar_smiles:
+            smiles = sidecar_smiles
+            smiles_source = "fragalysis_sidecar"
+
+    # Priority 2c: RCSB CCD fetch by comp_id (D1).  Skip generic comp_ids
+    # (LIG/UNK/UNL) that Fragalysis reuses for unrelated ligands.
+    if smiles is None and comp_id not in ("LIG", "UNK", "UNL"):
+        rcsb_smiles = _smiles_from_rcsb_ccd(comp_id)
+        if rcsb_smiles:
+            smiles = rcsb_smiles
+            smiles_source = "ccd_rcsb"
 
     # Priority 3: geometry-perceived via RDKit
     if smiles is None and mol_3d is not None:

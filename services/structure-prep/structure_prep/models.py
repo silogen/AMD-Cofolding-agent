@@ -49,6 +49,72 @@ class Stage2Profile(BaseModel):
     peptide_max_residues: int = Field(default=29, ge=10, le=60)
     metal_coordination_cutoff_A: float = Field(default=3.0, ge=2.5, le=4.0)
 
+    # Chain-selection policy (C-items in the PR4 backlog)
+    chain_policy: Literal[
+        "keep_all",
+        "keep_target",
+        "keep_target_plus_binder",
+        "keep_listed",
+    ] = Field(default="keep_all", description="Which chains to retain after role classification.")
+    keep_chains: list[str] = Field(
+        default_factory=list,
+        description="Explicit chain IDs to retain (used when chain_policy='keep_listed').",
+    )
+    dedup_identical: bool = Field(
+        default=False,
+        description=(
+            "Collapse chains with >= dedup_identity_threshold sequence identity. "
+            "The chain with the ligand (or lowest alphabetical ID) is kept."
+        ),
+    )
+    dedup_identity_threshold: float = Field(default=0.99, ge=0.0, le=1.0)
+    interface_policy: Literal["drop", "keep_chain", "keep_within_A"] = Field(
+        default="drop",
+        description=(
+            "How to handle chains outside the keep-set that contact the selected chains. "
+            "'keep_within_A' retains any chain with a heavy atom within interface_radius_A "
+            "of the selected chains."
+        ),
+    )
+    keep_partner_chain: str | None = Field(
+        default=None,
+        description="Always retain this chain (used when interface_policy='keep_chain').",
+    )
+    interface_radius_A: float = Field(
+        default=5.0,
+        ge=2.0,
+        le=15.0,
+        description="Radius for keep_within_A interface policy.",
+    )
+
+
+class ConstructProfile(BaseModel):
+    """Construct detection and optional non-native terminus trimming."""
+
+    model_config = {"extra": "forbid"}
+
+    detect_non_native_termini: bool = True
+    trim_policy: Literal["none", "native", "user_range"] = "none"
+    user_ranges: dict[str, tuple[int, int]] = Field(
+        default_factory=dict,
+        description="Author residue range to retain per chain, e.g. {'A': (1, 306)}.",
+    )
+    uniprot_offsets: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Per-chain additive offset from author numbering to UniProt "
+            "numbering; Mpro in P0DTD1 uses 3263."
+        ),
+    )
+    uniprot_accession: str | None = None
+    uniprot_sequence: str | None = Field(
+        default=None,
+        description=(
+            "Optional canonical sequence. Exact chain subsequences are mapped "
+            "to UniProt positions automatically."
+        ),
+    )
+
 
 class Stage3Profile(BaseModel):
     model_config = {"extra": "forbid"}
@@ -154,6 +220,32 @@ class Stage9Profile(BaseModel):
     minimize_interface_cutoff_A: float = Field(default=5.0, ge=3.0, le=10.0)
 
 
+class Stage10Profile(BaseModel):
+    """Alignment: superpose the mobile structure onto a reference."""
+
+    model_config = {"extra": "forbid"}
+
+    reference_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to the reference PDB/mmCIF. "
+            "If None, alignment is skipped."
+        ),
+    )
+    reference_chain: str = Field(
+        default="A",
+        description="Chain in the reference to superpose onto.",
+    )
+    mobile_chain: str = Field(
+        default="A",
+        description="Chain in the mobile structure to move.",
+    )
+    max_rmsd_A: float | None = Field(
+        default=None,
+        description="Reject if Cα RMSD exceeds this threshold (Å).",
+    )
+
+
 class OutputProfile(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -179,6 +271,7 @@ class PreparationProfile(BaseModel):
 
     stage1_assembly: Stage1Profile = Field(default_factory=Stage1Profile)
     stage2_roles: Stage2Profile = Field(default_factory=Stage2Profile)
+    construct_profile: ConstructProfile = Field(default_factory=ConstructProfile)
     stage3_curation: Stage3Profile = Field(default_factory=Stage3Profile)
     stage4_altlocs: Stage4Profile = Field(default_factory=Stage4Profile)
     stage5_missing: Stage5Profile = Field(default_factory=Stage5Profile)
@@ -186,6 +279,7 @@ class PreparationProfile(BaseModel):
     stage7_termini: Stage7Profile = Field(default_factory=Stage7Profile)
     stage8_ligand: Stage8Profile = Field(default_factory=Stage8Profile)
     stage9_minimization: Stage9Profile = Field(default_factory=Stage9Profile)
+    stage10_alignment: Stage10Profile = Field(default_factory=Stage10Profile)
     output: OutputProfile = Field(default_factory=OutputProfile)
 
     def profile_hash(self) -> str:
@@ -265,6 +359,7 @@ class InventoryReport(BaseModel):
     covalent_links: list[CovalentLink] = Field(default_factory=list)
     altloc_positions: list[AltlocPosition] = Field(default_factory=list)
     assembly_info: dict[str, Any] = Field(default_factory=dict)
+    space_group: str | None = None
     seqres_vs_atom: dict[str, Any] = Field(default_factory=dict)
     engineered_residues: list[dict[str, Any]] = Field(default_factory=list)
     format_warnings: list[str] = Field(default_factory=list)
@@ -296,6 +391,29 @@ class RoleMap(BaseModel):
     structural_metals: list[RetainedMetal] = Field(default_factory=list)
     crystallographic_ions: list[dict[str, Any]] = Field(default_factory=list)
     ambiguous_groups: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResidueNumberingEntry(BaseModel):
+    chain: str
+    sequence_position: int
+    author_resseq: int
+    author_icode: str = ""
+    label_seq_id: int | None = None
+    resname: str
+    one_letter: str
+    uniprot_position: int | None = None
+
+
+class ConstructAssessment(BaseModel):
+    chain: str
+    author_start: int | None = None
+    author_end: int | None = None
+    n_polymer_residues: int = 0
+    non_native_n_terminal: bool = False
+    suspected_n_tag: str | None = None
+    suspected_c_tag: str | None = None
+    form: Literal["mature", "immature", "unknown"] = "unknown"
+    trimmed_residues: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +509,20 @@ class MinimizationResult(BaseModel):
     label: str = "geometry_cleanup — not an affinity prediction"
 
 
+class AlignmentResult(BaseModel):
+    """Stage 10 output."""
+
+    performed: bool = False
+    reference_path: str | None = None
+    reference_chain: str | None = None
+    mobile_chain: str | None = None
+    n_aligned: int | None = None
+    rmsd_ca_A: float | None = None
+    transform_4x4: list[list[float]] | None = None
+    reason: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ArtifactPaths(BaseModel):
     complex: str | None = None
     receptor: str | None = None
@@ -400,6 +532,8 @@ class ArtifactPaths(BaseModel):
     ions: str | None = None
     ligands: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     sequences_fasta: str | None = None
+    aligned_complex: str | None = None
+    residue_numbering_json: str | None = None
     entity_map: str | None = None
     inventory_json: str = ""
     report_json: str = ""
@@ -426,6 +560,13 @@ class PreparationReport(BaseModel):
 
     # Sequence info
     sequences_by_chain: dict[str, str] = Field(default_factory=dict)
+    residue_numbering: list[ResidueNumberingEntry] = Field(default_factory=list)
+    construct_assessment: list[ConstructAssessment] = Field(default_factory=list)
+    construct_form: str = "unknown"
+
+    # Stage 10
+    alignment: AlignmentResult = Field(default_factory=AlignmentResult)
+    chain_selection_log: dict[str, Any] = Field(default_factory=dict)
     engineered_residues: list[dict[str, Any]] = Field(default_factory=list)
     seqres_vs_atom: dict[str, Any] = Field(default_factory=dict)
 

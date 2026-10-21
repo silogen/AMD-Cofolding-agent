@@ -318,8 +318,10 @@ def _rdkit_properties(smiles: str) -> tuple[float | None, float | None, int]:
 def compute_efficiency(
     smiles: str,
     potency: dict[str, Any] | None,
+    parent_le: float | None = None,
+    parent_n_heavy: int | None = None,
 ) -> "EfficiencyResult":
-    """Compute ligand efficiency metrics (LE, LLE, BEI) for a molecule.
+    """Compute ligand efficiency metrics (LE, LLE, BEI, GE, LELP) for a molecule.
 
     Parameters
     ----------
@@ -422,10 +424,25 @@ def compute_efficiency(
         # BEI = pIC50 / MW_kDa  =  pIC50 × 1000 / MW_Da
         bei = (pic50 * 1000.0 / mw_da) if mw_da is not None and mw_da > 0 else None
 
+        # G1: Group Efficiency GE = delta(LE) * parent_n_heavy / delta_n_heavy
+        ge: float | None = None
+        if le is not None and parent_le is not None and parent_n_heavy is not None:
+            delta_le = le - parent_le
+            delta_hac = n_heavy - parent_n_heavy
+            if delta_hac > 0:
+                ge = round(delta_le * parent_n_heavy / delta_hac, 4)
+
+        # G2: LELP = LE / clogP
+        lelp: float | None = None
+        if le is not None and clogp is not None and clogp > 0:
+            lelp = round(le / clogp, 4)
+
         return EfficiencyResult(
             le=le,
             lle=lle,
             bei=bei,
+            ge=ge,
+            lelp=lelp,
             potency_source=source_label,
             potency_value_pic50=pic50,
             potency_type_original=type_original,
@@ -434,7 +451,6 @@ def compute_efficiency(
             mw_da=mw_da,
             n_heavy_atoms=n_heavy,
         )
-
     except Exception as exc:  # noqa: BLE001
         logger.exception("Efficiency metric computation failed")
         return EfficiencyResult(

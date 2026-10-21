@@ -121,6 +121,22 @@ def score(req: ScoreRequest):
             )
             for r in recs
         ],
+        # Keep uncertainty explicit and separate from the numerical property.
+        # Out-of-domain does not mean zero activity/property value.
+        "ad_uncertain": [
+            (
+                r.get("applicability_domain", {}).get("AD Pass") is not True
+                or (
+                    r["predictions"].get(ep, {})
+                    .get("response_domain", {})
+                    .get("pass")
+                    is not True
+                    if r["ok"]
+                    else True
+                )
+            )
+            for r in recs
+        ],
         "out_of_training_range": [
             (
                 r["predictions"].get(ep, {}).get("out_of_training_range")

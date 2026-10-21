@@ -175,7 +175,48 @@ def run_pipeline(
     )
 
     # ------------------------------------------------------------------
+    # Construct form — detect and optionally trim non-native termini
+    # ------------------------------------------------------------------
+    t0 = time.monotonic()
+    from .construct import apply_construct_policy  # noqa: PLC0415
+
+    structure, construct_assessment = apply_construct_policy(
+        structure, profile.construct_profile
+    )
+    timings["construct"] = time.monotonic() - t0
+    report.construct_assessment = construct_assessment
+    if any(item.trimmed_residues for item in construct_assessment):
+        report.construct_form = "trimmed_to_mature"
+    elif any(item.form == "immature" for item in construct_assessment):
+        report.construct_form = "immature"
+    elif construct_assessment and all(
+        item.form == "mature" for item in construct_assessment
+    ):
+        report.construct_form = "mature"
+    else:
+        report.construct_form = "unknown"
+
+    if any(item.non_native_n_terminal for item in construct_assessment):
+        warnings.append(
+            "Non-native N-terminal residues detected; inspect "
+            "construct_assessment before structure-conditioned prediction."
+        )
+
+    # ------------------------------------------------------------------
+    # Chain selection — reduce to target chains (extends Stage 2)
+    # ------------------------------------------------------------------
+    t0 = time.monotonic()
+    from .stages.chain_selection import run as run_chain_selection  # noqa: PLC0415
+
+    structure, chain_selection_log = run_chain_selection(
+        structure, profile.stage2_roles, role_map
+    )
+    timings["chain_selection"] = time.monotonic() - t0
+    report.chain_selection_log = chain_selection_log
+
+    # ------------------------------------------------------------------
     # Stage 3 — HETATM curation (waters, additives, ligand selection)
+    # ------------------------------------------------------------------ (waters, additives, ligand selection)
     # ------------------------------------------------------------------
     t0 = time.monotonic()
     from .stages.curation import run as run_curation  # noqa: PLC0415
@@ -381,6 +422,44 @@ def run_pipeline(
     else:
         logger.info("[Stage 9] Minimization: skipped (minimize='none')")
 
+    # The final structure is the only safe source for sequence positions:
+    # assembly, construct trimming, and later chain selection may all change it.
+    from .numbering import build_residue_numbering  # noqa: PLC0415
+
+    numbering, final_sequences = build_residue_numbering(
+        structure,
+        profile.construct_profile.uniprot_offsets,
+        profile.construct_profile.uniprot_sequence,
+    )
+    report.residue_numbering = numbering
+    report.sequences_by_chain = final_sequences
+
+    # ------------------------------------------------------------------
+    # Stage 10 — Optional structural alignment
+    # ------------------------------------------------------------------
+    from .stages.alignment import run as run_alignment  # noqa: PLC0415
+
+    ref_path = profile.stage10_alignment.reference_path
+    if ref_path:
+        try:
+            reference_structure = gemmi.read_structure(ref_path)
+            reference_structure.setup_entities()
+        except Exception as exc:
+            warnings.append(f"[Stage 10] Cannot read reference structure: {exc}")
+            reference_structure = None
+
+        if reference_structure is not None:
+            t0 = time.monotonic()
+            structure, align_result = run_alignment(
+                structure, profile.stage10_alignment, reference_structure
+            )
+            timings["stage10"] = time.monotonic() - t0
+            from .models import AlignmentResult  # noqa: PLC0415
+
+            report.alignment = AlignmentResult(**align_result)
+    else:
+        report.alignment = report.alignment  # keep default (performed=False)
+
     # ------------------------------------------------------------------
     # Write all output artefacts
     # ------------------------------------------------------------------
@@ -392,7 +471,7 @@ def run_pipeline(
 
     # Inventory was written atomically by Stage 0; record its relative path
     inventory_path = job_dir / "inventory.json"
-    artifact_paths.inventory_json = _rel(inventory_path, job_dir.parent)
+    artifact_paths.inventory_json = _rel(inventory_path, job_dir.parent.parent)
 
     report.artifacts = artifact_paths
     report.warnings = warnings
@@ -402,7 +481,7 @@ def run_pipeline(
     # Resolve and record the report path before writing so report.json is
     # self-consistent (contains its own path in artifacts.report_json).
     report_path = job_dir / "report.json"
-    report.artifacts.report_json = _rel(report_path, job_dir.parent)
+    report.artifacts.report_json = _rel(report_path, job_dir.parent.parent)
 
     write_report(report, report_path)
     write_manifest(job_id, profile, report, job_dir)

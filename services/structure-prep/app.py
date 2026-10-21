@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from structure_prep.models import PreparationProfile, PreparationReport, JobRecord
 from structure_prep.pipeline import run_pipeline, PrepError
@@ -99,6 +99,24 @@ async def schema():
 @app.post("/validate")
 async def validate(req: ValidateRequest):
     """Run Stage 0 (inventory only) synchronously. Does not modify any file."""
+    try:
+        return _validate_sync(req)
+    except HTTPException:
+        raise
+    except PrepError as exc:
+        # The message already carries a "[StageN]" prefix.
+        raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+    except Exception as exc:  # noqa: BLE001
+        # Without this the endpoint returns a bare 500 with no body, which
+        # leaves the caller nothing to act on.
+        logger.exception("validate failed for %s", req.path)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"{type(exc).__name__}: {exc}", "path": req.path},
+        ) from exc
+
+
+def _validate_sync(req: ValidateRequest):
     input_path = _resolve_safe(req.path)
     profile = req.profile or PreparationProfile()
     registry = get_registry(profile.stage3_curation.additive_registry_path)
@@ -114,6 +132,8 @@ async def validate(req: ValidateRequest):
     from structure_prep.stages.assembly import run as run_assembly
     _, s1 = run_assembly(structure, profile.stage1_assembly)
     _, role_map = run_roles(structure, profile.stage2_roles, inventory, registry)
+    from structure_prep.construct import assess_construct
+    construct_assessment = assess_construct(structure)
 
     profile_preview = {
         "proposed_protein_chains": role_map.protein_chains,
@@ -139,33 +159,104 @@ async def validate(req: ValidateRequest):
             len(v.get("missing_from_atom", []))
             for v in inventory.seqres_vs_atom.values()
         ),
+        "space_group": inventory.space_group,
+        "construct_assessment": [
+            assessment.model_dump(mode="json")
+            for assessment in construct_assessment
+        ],
+        "construct_form": (
+            "immature"
+            if any(a.form == "immature" for a in construct_assessment)
+            else (
+                "mature"
+                if construct_assessment
+                and all(a.form == "mature" for a in construct_assessment)
+                else "unknown"
+            )
+        ),
+        "recommended_trim": (
+            "native"
+            if any(a.non_native_n_terminal for a in construct_assessment)
+            else "none"
+        ),
         "format_warnings": inventory.format_warnings,
     }
 
     return {"inventory": inventory.model_dump(), "profile_preview": profile_preview}
 
 
+class BatchPrepareRequest(BaseModel):
+    paths: list[str] = Field(..., min_length=1, description="Paths to prepare")
+    profile: PreparationProfile = Field(default_factory=PreparationProfile)
+
+
+@app.post("/jobs/batch", status_code=202)
+async def submit_batch_jobs(
+    req: BatchPrepareRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Submit one preparation job per input path; return all job_ids (C6)."""
+    try:
+        results: list[dict] = []
+        for path in req.paths:
+            try:
+                input_path = _resolve_safe(path)
+                job_id = uuid.uuid4().hex[:12]
+                job_dir = JOB_ROOT / job_id
+                job_dir.mkdir(parents=True, exist_ok=True)
+                record = JobRecord(
+                    job_id=job_id,
+                    status="queued",
+                    input_path=str(input_path),
+                    profile=req.profile,
+                    job_dir=str(job_dir),
+                )
+                _jobs[job_id] = record
+                background_tasks.add_task(
+                    _run_job, job_id, input_path, req.profile, job_dir
+                )
+                results.append({"path": path, "job_id": job_id, "status": "queued"})
+            except HTTPException as exc:
+                results.append({"path": path, "error": exc.detail})
+        return {"batch_size": len(req.paths), "jobs": results}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("batch submission failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"{type(exc).__name__}: {exc}"},
+        ) from exc
+
+
 @app.post("/jobs", status_code=202)
 async def submit_job(req: PrepareRequest, background_tasks: BackgroundTasks):
     """Submit an async preparation job. Returns job_id immediately."""
-    input_path = _resolve_safe(req.path)
-    job_id = uuid.uuid4().hex[:12]
+    try:
+        input_path = _resolve_safe(req.path)
+        job_id = uuid.uuid4().hex[:12]
 
-    job_dir = JOB_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
+        job_dir = JOB_ROOT / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
 
-    record = JobRecord(
-        job_id=job_id,
-        status="queued",
-        input_path=str(input_path),
-        profile=req.profile,
-        job_dir=str(job_dir),
-    )
-    _jobs[job_id] = record
+        record = JobRecord(
+            job_id=job_id,
+            status="queued",
+            input_path=str(input_path),
+            profile=req.profile,
+            job_dir=str(job_dir),
+        )
+        _jobs[job_id] = record
 
-    background_tasks.add_task(_run_job, job_id, input_path, req.profile, job_dir)
+        background_tasks.add_task(_run_job, job_id, input_path, req.profile, job_dir)
 
-    return {"job_id": job_id, "status": "queued"}
+        return {"job_id": job_id, "status": "queued"}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("job submission failed for %s", req.path)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"{type(exc).__name__}: {exc}", "path": req.path},
+        ) from exc
 
 
 async def _run_job(job_id: str, input_path: Path, profile: PreparationProfile, job_dir: Path):

@@ -143,9 +143,18 @@ def _run_pdb2pqr(
 
     if not success or not Path(tmp_out).exists():
         logger.warning(
-            "Stage 6: pdb2pqr produced no output; falling back to pdbfixer_basic."
+            "Stage 6: pdb2pqr_propka could not process this structure "
+            "(likely non-standard residues or Fragalysis PDB format incompatibility); "
+            "falling back to pdbfixer_basic. His tautomers will use default HIE rule."
         )
-        return _run_pdbfixer_basic(structure, profile, job_dir)
+        result_st, info = _run_pdbfixer_basic(structure, profile, job_dir)
+        info["warnings"] = info.get("warnings", []) + [
+            "pdb2pqr_propka requested but fell back to pdbfixer_basic: "
+            "pdb2pqr failed to process this structure. "
+            "Histidine protonation states are assigned by default rule (HIE), "
+            "not by PROPKA pKa calculation."
+        ]
+        return result_st, info
 
     # PROPKA file is written to <input_stem>.propka in the job directory.
     propka_stem = Path(tmp_in).stem  # "pdb2pqr_input"
@@ -197,18 +206,21 @@ def _invoke_pdb2pqr(
     import argparse
 
     # ---- Try the pdb2pqr3 Python API ----
+    # pdb2pqr ≥3 writes a PQR (charges+radii) file, not a PDB.
+    # We pass --pdb-output to also get a hydrogen-added PDB that gemmi can read.
+    pdb_output_path = str(Path(output_path).with_suffix(".pdb2pqr.pdb"))
     try:
         from pdb2pqr.main import main_driver as _pdb2pqr_main  # type: ignore
 
         args = argparse.Namespace(
             input_path=input_path,
-            output_path=output_path,
+            output_pqr=output_path,         # positional in pdb2pqr ≥3
             ff="AMBER",
             ffout=None,
             with_ph=profile.ph,
-            ph_calc_method="propka",
+            titration_state_method="propka",
+            ph_calc_method="propka",        # keep for backward compat
             propka_input=None,
-            titration_state_method=None,
             usernames=None,
             userff=None,
             clean=False,
@@ -223,12 +235,44 @@ def _invoke_pdb2pqr(
             quiet=True,
             verbose=False,
             log_level="WARNING",
+            pdb_output=pdb_output_path,     # request PDB alongside PQR
+            ligand=None,
+            whitespace=False,
+            neutraln=False,
+            neutralc=False,
+            apbs_input=None,
+            filenames=None,
+            reference=None,
+            chains=None,
+            titrate_only=None,
+            thermophiles=None,
+            alignment=None,
+            mutations=None,
+            parameters=None,
+            window=None,
+            grid=None,
+            mutator=None,
+            mutator_options=None,
+            show_debug=False,
+            oldrun=False,
+            do_old_style_multiconf=False,
+            protonate_all=False,
         )
         try:
             _pdb2pqr_main(args)
+            # Success: return the PDB output (gemmi can't parse PQR)
+            if Path(pdb_output_path).exists():
+                # swap output_path to point at the PDB file the rest of the
+                # caller expects
+                import shutil  # noqa: PLC0415
+                shutil.copy2(pdb_output_path, output_path)
+                return True
             return Path(output_path).exists()
         except SystemExit:
-            # pdb2pqr3 calls sys.exit(0) on success
+            if Path(pdb_output_path).exists():
+                import shutil  # noqa: PLC0415
+                shutil.copy2(pdb_output_path, output_path)
+                return True
             return Path(output_path).exists()
         except Exception as exc:
             logger.warning("Stage 6: pdb2pqr Python API call failed: %s; trying subprocess.", exc)
@@ -240,12 +284,13 @@ def _invoke_pdb2pqr(
     try:
         result = subprocess.run(
             [
-                "pdb2pqr3",
+                "pdb2pqr",          # binary name in pdb2pqr ≥3 (was pdb2pqr3)
                 "--ff", "AMBER",
+                "--titration-state-method", "propka",
                 "--with-ph", str(profile.ph),
-                "--ph-calc-method", "propka",
                 "--keep-chain",
                 "--include-header",
+                "--pdb-output", pdb_output_path,
                 input_path,
                 output_path,
             ],
@@ -256,19 +301,23 @@ def _invoke_pdb2pqr(
         )
         if result.returncode != 0:
             logger.warning(
-                "Stage 6: pdb2pqr3 subprocess exited with code %d: %s",
+                "Stage 6: pdb2pqr subprocess exited with code %d: %s",
                 result.returncode, result.stderr[:500],
             )
             return False
-        return True
+        # pdb2pqr writes a PQR; copy the PDB sidecar to the expected output path
+        if Path(pdb_output_path).exists():
+            import shutil  # noqa: PLC0415
+            shutil.copy2(pdb_output_path, output_path)
+        return Path(output_path).exists()
     except FileNotFoundError:
-        logger.warning("Stage 6: pdb2pqr3 executable not found on PATH.")
+        logger.warning("Stage 6: pdb2pqr executable not found on PATH.")
         return False
     except subprocess.TimeoutExpired:
-        logger.warning("Stage 6: pdb2pqr3 subprocess timed out after 600 s.")
+        logger.warning("Stage 6: pdb2pqr subprocess timed out after 600 s.")
         return False
     except Exception as exc:
-        logger.warning("Stage 6: pdb2pqr3 subprocess failed: %s", exc)
+        logger.warning("Stage 6: pdb2pqr subprocess failed: %s", exc)
         return False
 
 

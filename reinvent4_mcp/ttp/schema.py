@@ -133,6 +133,41 @@ class TargetConfig(BaseModel):
         default=None,
         description="Path to protein structure PDB file",
     )
+    # E3: binding-site constraints
+    binding_site_residues: Optional[list[list]] = Field(
+        default=None,
+        description=(
+            "Pocket constraint contacts: list of [chain_id, author_resseq] pairs "
+            "using PDB author numbering. The framework translates them to Boltz "
+            "sequence positions via the residue_numbering.json artifact."
+        ),
+    )
+    binding_site_max_distance_A: float = Field(
+        default=6.0,
+        ge=4.0,
+        le=20.0,
+        description="max_distance for the pocket constraint (Angstrom).",
+    )
+    binding_site_force: bool = Field(
+        default=False,
+        description="Apply the pocket constraint as a hard potential (E4).",
+    )
+    contact_pairs: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "Per-atom contact constraints. Each entry: "
+            "{token1: ['A', resseq], token2: ['B', atom_name], "
+            "max_distance: 3.5, force: true}."
+        ),
+    )
+    covalent_bond: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Bond constraint for a covalent warhead (L1). "
+            "{atom1: ['A', 145, 'SG'], atom2: ['B', 1, 'C7']}. "
+            "Affinity prediction is suppressed automatically (L2)."
+        ),
+    )
 
     @field_validator("protein_sequence")
     @classmethod
@@ -314,7 +349,8 @@ class ScoringObjective(BaseModel):
             "Component-specific parameters forwarded to REINVENT4. "
             "Use plain values -- per-endpoint wrapping is automatic. "
             "Example for TanimotoSimilarity: "
-            "{'smiles': ['CCO'], 'radius': 3, 'use_features': true}"
+            "{'smiles': ['CCO'], 'radius': 3, 'use_counts': true, "
+            "'use_features': false}"
         ),
     )
     comment: Optional[str] = Field(
@@ -535,6 +571,53 @@ class TTP(BaseModel):
                 f"Objectives {boltz_objectives} use Boltz scoring which requires "
                 f"a 'target' section with at least 'protein_sequence'."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_boltz_affinity_transform_direction(self) -> "TTP":
+        """Warn when pred_value affinity mode is combined with an upward transform.
+
+        affinity_pred_value is log10(IC50/µM) — MORE NEGATIVE = tighter = BETTER.
+        An upward sigmoid (low < high, e.g. sigmoid(low=0.3, high=0.8)) rewards
+        POSITIVE values (weak binders) instead of negative ones, which is wrong.
+
+        Correct transforms for pred_value mode:
+          reverse_sigmoid(low=-2.0, high=0.0)  → score=1.0 at −2 (10 nM), 0.0 at +2 (100 µM)
+          sigmoid(low=-2.0, high=0.0)           → score=0.0 at −2, 1.0 at 0  ← also WRONG
+
+        Safe default: use affinity_mode='probability_binary' with sigmoid(low=0.3, high=0.8).
+        """
+        import logging as _logging  # noqa: PLC0415
+        _log = _logging.getLogger("reinvent")
+
+        for obj in self.scoring.objectives:
+            sp = obj.service_params or {}
+            # service_params may be a dict or Pydantic model
+            if hasattr(sp, "get"):
+                affinity_mode = sp.get("affinity_mode", "probability_binary")
+            else:
+                affinity_mode = getattr(sp, "affinity_mode", "probability_binary")
+            if affinity_mode != "pred_value":
+                continue
+            transform = obj.transform
+            if transform is None:
+                continue
+            # transform is a TransformConfig Pydantic model — use attribute access
+            t_type = getattr(transform, "type", "") or ""
+            t_low = getattr(transform, "low", None)
+            t_high = getattr(transform, "high", None)
+            # Upward sigmoid (low < high) with pred_value rewards positive (weak) values
+            if t_type == "sigmoid" and t_low is not None and t_high is not None:
+                if float(t_low) < float(t_high) and float(t_high) >= 0:
+                    _log.warning(
+                        "⚠️  TTP objective '%s' uses affinity_mode='pred_value' with "
+                        "sigmoid(low=%s, high=%s). affinity_pred_value is log10(IC50/µM): "
+                        "MORE NEGATIVE = tighter = BETTER. This sigmoid rewards POSITIVE "
+                        "(weak-binding) values. Use reverse_sigmoid(low=-2.0, high=0.0) "
+                        "to reward tight binders, or switch to affinity_mode='probability_binary' "
+                        "with sigmoid(low=0.3, high=0.8).",
+                        obj.name, t_low, t_high,
+                    )
         return self
 
     @model_validator(mode="after")

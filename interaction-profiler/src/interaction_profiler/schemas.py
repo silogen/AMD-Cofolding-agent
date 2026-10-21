@@ -555,6 +555,17 @@ class EfficiencyResult(BaseModel):
     le: float | None = Field(default=None, description="Ligand Efficiency kcal/mol per heavy atom.")
     lle: float | None = Field(default=None, description="Lipophilic LE = pIC50 − clogP.")
     bei: float | None = Field(default=None, description="Binding Efficiency Index = pIC50/MW × 1000.")
+    # G1: group efficiency for fragment elaboration steps
+    ge: float | None = Field(
+        default=None,
+        description=(
+            "Group Efficiency = delta(LE) * parent_n_heavy / delta_n_heavy. "
+            "Populated only when parent_le and parent_n_heavy are supplied to "
+            "compute_efficiency(). A GE >= 1.0 means the added atoms improved LE."
+        ),
+    )
+    # G2: LELP = LE / clogP (optional, only meaningful when clogP > 0)
+    lelp: float | None = Field(default=None, description="LE/clogP = LELP metric.")
 
     potency_source: str | None = Field(
         default=None,
@@ -649,6 +660,7 @@ class ComplexProvenance(BaseModel):
     sc_method: str | None = None
     strain_method: str | None = None
     tool_versions: dict[str, str] = Field(default_factory=detect_tool_versions)
+    structure_path: str | None = None  # ensemble member source path (hotspot_ensemble)
 
 
 class ComplexResult(BaseModel):
@@ -859,6 +871,14 @@ class SiteProfile(BaseModel):
 
     # ── Provenance ────────────────────────────────────────────────────────
     fpocket_version: str | None = Field(default=None, description="fpocket binary version.")
+    component_status: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Named status for optional components (available, skipped, or "
+            "error:<reason>). Empty scientific fields must not hide missing "
+            "dependencies."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
     timing_seconds: float | None = None
 

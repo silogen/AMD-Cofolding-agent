@@ -64,6 +64,12 @@ def characterize_site(
 
     t0 = time.time()
     structure_path = str(Path(structure_path).resolve())
+    component_status: dict[str, str] = {
+        "secondary_structure": "skipped",
+        "uniprot": "skipped",
+        "interpro": "skipped",
+        "fpocket": "skipped",
+    }
 
     # SHA-256 of the structure file
     sha256 = _sha256_file(structure_path)
@@ -93,7 +99,9 @@ def characterize_site(
             )
             ss_map, ss_method = assign_secondary_structure(structure_path, chains)
             ss_summary = _compute_ss_summary(ss_map)
+            component_status["secondary_structure"] = f"available:{ss_method or 'unknown'}"
         except Exception as exc:
+            component_status["secondary_structure"] = f"error:{type(exc).__name__}: {exc}"
             warnings.append(f"Secondary structure assignment failed: {exc}")
 
     # ── 2. UniProt features ────────────────────────────────────────────────
@@ -107,8 +115,12 @@ def characterize_site(
             feature_map, active_site_residues, binding_site_residues = _fetch_uniprot_overlay(
                 uniprot_acc, chains, struct, annotation_accessions, warnings,
             )
+            component_status["uniprot"] = "available"
         except Exception as exc:
+            component_status["uniprot"] = f"error:{type(exc).__name__}: {exc}"
             warnings.append(f"UniProt annotation failed: {exc}")
+    elif profile_flags.get("fetch_uniprot", False):
+        component_status["uniprot"] = "error:missing uniprot accession"
 
     # ── 3. InterPro domains ────────────────────────────────────────────────
     interpro_map: dict = {}
@@ -119,8 +131,12 @@ def characterize_site(
             interpro_map, domain_context = _fetch_interpro_overlay(
                 uniprot_acc, chains, struct, annotation_accessions, warnings,
             )
+            component_status["interpro"] = "available"
         except Exception as exc:
+            component_status["interpro"] = f"error:{type(exc).__name__}: {exc}"
             warnings.append(f"InterPro annotation failed: {exc}")
+    elif profile_flags.get("fetch_interpro", False):
+        component_status["interpro"] = "error:missing uniprot accession"
 
     # ── 4. fpocket ────────────────────────────────────────────────────────
     fpocket_version: str | None = None
@@ -136,8 +152,10 @@ def characterize_site(
             fp_result = run_fpocket(structure_path, chain_ids=chains)
             fpocket_version = fp_result.fpocket_version
             if fp_result.error:
+                component_status["fpocket"] = f"error:{fp_result.error}"
                 warnings.append(f"fpocket: {fp_result.error}")
             elif fp_result.pockets:
+                component_status["fpocket"] = "available"
                 top = fp_result.pockets[0]
                 pocket_volume       = top.volume_A3
                 pocket_druggability = top.druggability_score
@@ -147,7 +165,10 @@ def characterize_site(
                     subpockets = _build_subpockets(
                         fp_result.pockets, feature_map, interpro_map
                     )
+            else:
+                component_status["fpocket"] = "available:no pockets passed filters"
         except Exception as exc:
+            component_status["fpocket"] = f"error:{type(exc).__name__}: {exc}"
             warnings.append(f"fpocket pipeline failed: {exc}")
 
     # ── 5. Residue role classification ────────────────────────────────────
@@ -186,6 +207,7 @@ def characterize_site(
         ss_summary=ss_summary,
         domain_context=domain_context,
         fpocket_version=fpocket_version,
+        component_status=component_status,
         warnings=warnings[:],
         timing_seconds=round(elapsed, 3),
     )

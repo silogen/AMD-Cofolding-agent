@@ -462,6 +462,168 @@ def availability(request: AvailabilityRequest) -> AvailabilityResponse:
     )
 
 
+class ScoreRequest(BaseModel):
+    """Request model for the /score endpoint.
+
+    Accepts both direct calls and REINVENT4 ExternalRESTScorer calls.
+
+    ExternalRESTScorer wraps all extra TTP service_params inside a ``params``
+    dict:  {"smiles": [...], "params": {"iteration_limit": 25, "score_fn": "solved_steps"}}
+    Top-level fields (iteration_limit, score_fn) are used when called directly.
+    The ``params`` dict overrides top-level defaults when present.
+    """
+    smiles: list[str] = Field(..., min_length=1)
+    # ExternalRESTScorer wraps service_params here
+    params: dict | None = Field(default=None, description="REINVENT4 ExternalRESTScorer params dict (overrides top-level fields)")
+    # Direct-call fields (also accepted as params overrides)
+    max_transforms: int = Field(default=3, ge=1, le=6)
+    iteration_limit: int = Field(default=25, ge=5, le=200,
+        description="Lower = faster but misses harder routes. 25 is the RL default.")
+    score_fn: str = Field(default="solved_steps",
+        description=(
+            "How to convert retrosynthesis results to a [0,1] score:\n"
+            "  solved_steps — 1.0 if solved in ≤2 steps, 0.7 if ≤4, 0.3 if routes "
+            "found (any length), 0.0 if no route.\n"
+            "  n_routes     — sigmoid on number of routes found (more = easier).\n"
+            "  best_score   — raw AiZynthFinder MCTS top_score (0–1)."
+        ))
+
+
+class ScoreResult(BaseModel):
+    smiles: str
+    score: float
+    n_routes: int
+    shortest_steps: int | None
+    is_solved: bool
+    status: str
+
+
+class ScoreResponse(BaseModel):
+    """Response model for the /score endpoint.
+
+    Follows the ExternalRESTScorer protocol expected by REINVENT4:
+      - ``scores``: flat list of floats, one per input SMILES (in order)
+      - ``metadata``: optional dict of per-molecule lists (same length as scores)
+      - ``elapsed_seconds``: wall-clock time for the batch
+
+    The legacy ``results`` field (list of ScoreResult) is also returned for
+    direct callers that want the full per-molecule breakdown.
+    """
+    scores: list[float]                        # ExternalRESTScorer reads data["scores"]
+    metadata: dict[str, list] | None = None    # per-molecule metadata lists
+    results: list[ScoreResult] | None = None   # full breakdown for direct callers
+    model_version: str | None = None
+    elapsed_seconds: float
+
+
+def _retro_score(result: "PlanMoleculeResult", score_fn: str) -> float:
+    """Convert a /plan molecule result to a [0,1] RL score."""
+    import math
+    stats = result.search_stats or {}
+    n_routes: int = result.n_routes or 0
+    routes = result.routes or []
+    steps_list = [r["n_steps"] for r in routes if r.get("n_steps", 0) > 0]
+    steps = min(steps_list) if steps_list else None
+    is_solved: bool = bool(stats.get("is_solved", False))
+
+    if score_fn == "n_routes":
+        return round(1 / (1 + math.exp(-0.15 * (n_routes - 10))), 4)
+    elif score_fn == "best_score":
+        return round(float(stats.get("top_score") or 0.0), 4)
+    else:  # solved_steps (default)
+        if n_routes == 0:
+            return 0.0
+        if steps is None or steps == 0:
+            return 1.0
+        if steps <= 2:
+            return 1.0
+        if steps <= 4:
+            return 0.7
+        return 0.3
+
+
+@app.post("/score")
+async def score(request: ScoreRequest) -> ScoreResponse:
+    """Per-molecule AiZynthFinder synthesis score for REINVENT RL objectives.
+
+    Returns a [0,1] score per SMILES based on retrosynthesis route quality.
+    Designed to be called by REINVENT4 ExternalRESTScorer TTPs.
+
+    REINVENT4 ExternalRESTScorer sends:
+      {"smiles": [...], "params": {"iteration_limit": 25, "score_fn": "solved_steps"}}
+
+    The response follows the ExternalRESTScorer protocol:
+      {"scores": [0.7, 1.0, ...], "metadata": {...per-molecule lists...}}
+
+    Score semantics (default score_fn='solved_steps'):
+      1.0 — ≤2-step synthesis from catalogue building blocks
+      0.7 — ≤4-step synthesis found
+      0.3 — route found, >4 steps
+      0.0 — no route found (AiZynthFinder MCTS exhausted without solution)
+
+    Faster than /plan (lower iteration_limit=25) — suitable for RL step latency.
+    """
+    import time
+    t0 = time.monotonic()
+
+    # ExternalRESTScorer wraps service_params in a "params" dict.
+    # Unpack and override top-level defaults so TTP iteration_limit/score_fn work.
+    extra: dict = request.params or {}
+    iteration_limit = int(extra.get("iteration_limit", request.iteration_limit))
+    score_fn = str(extra.get("score_fn", request.score_fn))
+    max_transforms = int(extra.get("max_transforms", request.max_transforms))
+
+    planner = _get_planner()
+    manifest = _get_manifest()
+
+    plan_params = PlanParams(
+        max_transforms=max_transforms,
+        iteration_limit=iteration_limit,
+        return_first=False,
+        time_limit=60,
+    )
+
+    async with _plan_sem:
+        raw_results = await asyncio.to_thread(
+            _run_batch, planner, request.smiles, plan_params,
+        )
+
+    scored = []
+    for r in raw_results:
+        stats = r.search_stats or {}
+        routes = r.routes or []
+        steps_list = [rt["n_steps"] for rt in routes if rt.get("n_steps", 0) > 0]
+        shortest = min(steps_list) if steps_list else None
+        scored.append(ScoreResult(
+            smiles=r.input_smiles or "",
+            score=_retro_score(r, score_fn),
+            n_routes=r.n_routes or 0,
+            shortest_steps=shortest,
+            is_solved=bool(stats.get("is_solved", False)),
+            status=r.status or "unknown",
+        ))
+
+    model_version = manifest.policy_version() if manifest else None
+    elapsed = round(time.monotonic() - t0, 3)
+
+    # Build the ExternalRESTScorer-compatible response:
+    #   scores  — flat list of floats (one per SMILES, in order)
+    #   metadata — per-molecule lists of the same length
+    return ScoreResponse(
+        scores=[r.score for r in scored],
+        metadata={
+            "smiles": [r.smiles for r in scored],
+            "n_routes": [r.n_routes for r in scored],
+            "shortest_steps": [r.shortest_steps for r in scored],
+            "is_solved": [r.is_solved for r in scored],
+            "status": [r.status for r in scored],
+        },
+        results=scored,           # full breakdown for direct callers
+        model_version=model_version,
+        elapsed_seconds=elapsed,
+    )
+
+
 @app.post("/jobs", response_model=JobSubmitResponse)
 async def submit_job(request: PlanRequest) -> JobSubmitResponse:
     """Submit an asynchronous batch planning job.

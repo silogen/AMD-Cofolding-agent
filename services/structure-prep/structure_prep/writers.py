@@ -82,7 +82,7 @@ def _write_structure_pdb(
     os.close(fd)
     try:
         if strip_h:
-            st = copy.deepcopy(structure)
+            st = structure.clone()
             for model in st:
                 for chain in model:
                     for res in chain:
@@ -114,7 +114,7 @@ def _write_structure_cif(
     os.close(fd)
     try:
         if strip_h:
-            st = copy.deepcopy(structure)
+            st = structure.clone()
             for model in st:
                 for chain in model:
                     for res in chain:
@@ -160,7 +160,7 @@ def _extract_chains(
 
     Deletion is performed in reverse index order to avoid index shifting.
     """
-    st = copy.deepcopy(structure)
+    st = structure.clone()
     for model in st:
         to_remove = [
             i for i, ch in enumerate(model)
@@ -283,7 +283,10 @@ def write_all_artefacts(
 
     fmt = profile.output.output_format  # "pdb" | "cif"
     ext = ".pdb" if fmt == "pdb" else ".cif"
-    base = job_dir.parent  # artefact paths are relative to this
+    # Artefact paths are relative to the shared-volume root so that any
+    # downstream tool resolving against /shared/ can use them verbatim.
+    # job_dir layout: <shared_root>/structure-prep/<job_id>/
+    base = job_dir.parent.parent  # <shared_root>
 
     artifact_paths = ArtifactPaths()
 
@@ -370,8 +373,28 @@ def write_all_artefacts(
             lig_key = f"{comp_id}:{chain_name}:{resseq}"
             artifact_paths.ligands.setdefault(lig_key, {})
             artifact_paths.ligands[lig_key]["pdb"] = _rel(lig_path, base)
-            artifact_paths.ligands[lig_key]["sdf"] = None
             artifact_paths.ligands[lig_key]["mol2"] = None
+
+            # Copy the SDF produced by stage 8 (ligand parameterization) if
+            # it exists and matches this ligand instance.
+            sdf_dest: str | None = None
+            for lig_param in report.ligands:
+                if (
+                    lig_param.comp_id == comp_id
+                    and lig_param.chain == chain_name
+                    and lig_param.resseq == resseq
+                    and lig_param.artifact_sdf
+                ):
+                    import shutil  # noqa: PLC0415
+                    sdf_src = Path(lig_param.artifact_sdf)
+                    if sdf_src.is_file():
+                        sdf_filename = f"ligand_{comp_id}_{chain_name}_{resseq}.sdf"
+                        sdf_path = prepared_dir / sdf_filename
+                        shutil.copy2(sdf_src, sdf_path)
+                        sdf_dest = _rel(sdf_path, base)
+                        logger.debug("Copied ligand SDF %s → %s", sdf_src, sdf_path)
+                    break
+            artifact_paths.ligands[lig_key]["sdf"] = sdf_dest
             logger.debug("Wrote ligand %s → %s", lig_key, lig_path)
 
     # ------------------------------------------------------------------
@@ -447,6 +470,35 @@ def write_all_artefacts(
         )
 
     # ------------------------------------------------------------------
+    # sequences/residue_numbering.json
+    # Author numbering is the public API; sequence and UniProt positions are
+    # explicit translations rather than assumptions made by downstream tools.
+    # ------------------------------------------------------------------
+    numbering_path = sequences_dir / "residue_numbering.json"
+    numbering_payload = {
+        "construct_form": report.construct_form,
+        "entries": [
+            entry.model_dump(mode="json") for entry in report.residue_numbering
+        ],
+    }
+    _atomic_write_text(
+        numbering_path,
+        json.dumps(numbering_payload, indent=2),
+    )
+    artifact_paths.residue_numbering_json = _rel(numbering_path, base)
+
+    # ------------------------------------------------------------------
+    # prepared/aligned_complex.pdb — if alignment was applied, write the
+    # transformed complex as a distinct artifact so downstream tools have
+    # a named path rather than guessing from the job directory.
+    # ------------------------------------------------------------------
+    if report.alignment.performed:
+        aligned_path = prepared_dir / f"aligned_complex{ext}"
+        _write_structure(structure, aligned_path, output_format=fmt, strip_h=False)
+        artifact_paths.aligned_complex = _rel(aligned_path, base)
+        logger.debug("Wrote aligned complex: %s", aligned_path)
+
+    # ------------------------------------------------------------------
     # sequences/entity_map.json
     # Human- and machine-readable summary of entity roles.
     # ------------------------------------------------------------------
@@ -474,6 +526,12 @@ def write_all_artefacts(
             for l in ligand_residues
         ],
         "ambiguous_groups": role_map.ambiguous_groups,
+        "construct_form": report.construct_form,
+        "construct_assessment": [
+            assessment.model_dump(mode="json")
+            for assessment in report.construct_assessment
+        ],
+        "residue_numbering": artifact_paths.residue_numbering_json,
     }
     entity_map_path = sequences_dir / "entity_map.json"
     _atomic_write_text(entity_map_path, json.dumps(entity_map, indent=2))
@@ -524,6 +582,7 @@ def write_manifest(
             "water": report.artifacts.water,
             "ions": report.artifacts.ions,
             "sequences_fasta": report.artifacts.sequences_fasta,
+            "residue_numbering_json": report.artifacts.residue_numbering_json,
             "entity_map": report.artifacts.entity_map,
             "inventory_json": report.artifacts.inventory_json,
             "report_json": report.artifacts.report_json,
@@ -533,6 +592,7 @@ def write_manifest(
         "warnings": report.warnings,
         "n_ligands": len(report.ligands),
         "n_waters_retained": report.n_waters_retained,
+        "construct_form": report.construct_form,
         "protonation_method": report.protonation_method,
         "protonation_ph": report.protonation_ph,
         "minimization_performed": report.minimization.performed,
