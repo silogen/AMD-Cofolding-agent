@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Fragmenter registry.
 
 Add a backend by registering it under a new ``method`` key in

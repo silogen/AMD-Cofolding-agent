@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for Phase 4: background job manager, TOML generation, and optimization tools.
 
 Covers:

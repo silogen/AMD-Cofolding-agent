@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Input/output helpers: batch parsing and structure loading."""
 
 from __future__ import annotations

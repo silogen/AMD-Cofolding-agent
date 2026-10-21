@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Build a hierarchical medchem composition for one ligand.
 
 Combines three levels, all preserving atom indices into the ligand Mol:

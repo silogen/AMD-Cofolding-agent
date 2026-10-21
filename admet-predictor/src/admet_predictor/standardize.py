@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Structure standardization used as an INTERNAL helper for unit conversion.
 
 Protocol (order per user request, lightly corrected):

@@ -14,7 +14,7 @@ for **AMD (ROCm)** and **NVIDIA (CUDA)**. The Docker Compose setup
 | `depends_on` + healthchecks | `apptainer instance start` + `/health` polling in `run.sh` |
 | named volumes / mounts     | `--bind` (all services share one `/shared`)                 |
 | `runtime: amd`             | `--rocm` (AMD) / `--nv` (NVIDIA), chosen by `--vendor`       |
-| `extra_hosts` LLM relay    | host loopback is shared directly (see *LLM gateway* below)  |
+| bridge-network egress      | host networking: the host's own DNS and routes               |
 
 ## Services / ports / GPU
 
@@ -117,43 +117,12 @@ source services/env.local.sh    # LLM_GATEWAY_KEY, REINVENT4_AGENT_*, GPUs
 bash services/singularity/run.sh --vendor amd
 ```
 
-### LLM gateway reachability (SSH tunnel)
+### LLM gateway reachability
 
-The Docker SSH tunnel works here too — **and it's simpler**: with host networking
-the container shares the host's loopback, so the `llm_tunnel_relay.py` bridge is
-**no longer needed** (it only existed to bridge the Docker bridge IP to the host
-loopback). Compare:
-
-```
-# Docker:   container -> 172.17.0.1:PORT (relay) -> 127.0.0.1:PORT (ssh -R) -> laptop -> gateway
-# Apptainer: container -> 127.0.0.1:PORT (ssh -R) -> laptop -> gateway      (no relay)
-```
-
-Workflow (see `../../TENSORWAVE_INSTRUCTIONS.md` for the full Docker version):
-
-1. Open the reverse tunnel to the **compute node that runs Apptainer** (loopback
-   is per-host, so it must be the same node — same caveat as Docker):
-   ```bash
-   ssh -R 127.0.0.1:9579:llm-api.amd.com:443 <node>
-   ```
-2. Point the agent at the tunnel port and keep TLS verification on (the hostname
-   matches the real cert; connecting by IP/`localhost` would fail cert checks):
-   ```bash
-   export LLM_GATEWAY_KEY=...
-   export REINVENT4_AGENT_BASE_URL="https://llm-api.amd.com:9579/Anthropic"
-   export REINVENT4_AGENT_NO_VERIFY_SSL="false"
-   ```
-   (These live in `env.local.sh`; sourcing it is enough.)
-3. Run with `--gateway-loopback` so `run.sh` binds a `/etc/hosts` mapping
-   `llm-api.amd.com -> 127.0.0.1` into the agent (replacing Compose's
-   `extra_hosts`), letting the hostname resolve to the loopback tunnel:
-   ```bash
-   bash services/singularity/run.sh --vendor amd --gateway-loopback
-   ```
-
-If the gateway is **directly reachable** from the compute node, skip the tunnel
-and `--gateway-loopback` entirely and just set `LLM_GATEWAY_KEY` (+ a direct
-`REINVENT4_AGENT_BASE_URL`).
+The compute node must reach the LLM endpoint directly. Set `LLM_GATEWAY_KEY`
+(or `REINVENT4_AGENT_API_KEY`) and `REINVENT4_AGENT_BASE_URL` in `env.local.sh`
+and source it before `run.sh`; with host networking the container uses the
+host's own DNS and routing, so nothing further is needed.
 
 ## Validation
 

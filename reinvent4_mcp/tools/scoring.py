@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Scoring tool: score a list of SMILES using REINVENT4 scoring components.
 
 Supports two modes:

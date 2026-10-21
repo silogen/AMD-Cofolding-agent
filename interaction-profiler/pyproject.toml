@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -9,7 +12,6 @@ description = "Per-complex composition + tripartite (fragment, residue, interact
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Pierre Llompart" }]
 keywords = [
     "cheminformatics",
     "structural-biology",

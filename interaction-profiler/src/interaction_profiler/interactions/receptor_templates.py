@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Residue templates for receptor pharmacophore features.
 
 Perceiving protein/nucleic chemistry by reading a PDB into RDKit is

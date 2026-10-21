@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """TTP (Therapeutic Target Profile) schema, storage, and mapping.
 
 A TTP fully specifies a multi-property optimization objective:

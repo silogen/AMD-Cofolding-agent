@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Rich terminal formatting for the Drug Discovery Agent.
 
 Provides formatted output for score tables, molecule results, progress

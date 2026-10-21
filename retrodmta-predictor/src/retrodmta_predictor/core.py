@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Project-endpoint inference: per-target, per-temporal-window models (RetroDMTA).
 
 Pick a target + window (+ method), predict that target's endpoints for input SMILES.

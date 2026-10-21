@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """TTP-to-REINVENT4 Scorer configuration mapper.
 
 Translates a TTP into the dict structure expected by REINVENT4's

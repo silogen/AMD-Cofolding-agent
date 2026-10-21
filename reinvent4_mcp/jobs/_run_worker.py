@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Worker process: registers custom scoring components then runs REINVENT4.
 
 Launched as a subprocess by the job manager. It puts REINVENT4 and the custom

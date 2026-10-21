@@ -32,7 +32,7 @@ FastAPI app in [../services/admet-predictor/app.py](../services/admet-predictor/
 
 ## Install
 
-Model weights are **not** in git. First restore the central model dir from the SharePoint zip:
+Model weights are **not** in git. First restore the central model dir from the model weights archive:
 
 ```bash
 # from dd_agentic/ : unzip so that dd_agentic/models/admet/ and dd_agentic/models/retrodmta/ exist
@@ -52,7 +52,7 @@ docker build -f services/admet-predictor/Dockerfile -t admet-predictor:latest .
 # from dd_agentic/
 pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 pip install ./admet-predictor
-export MODELS_DIR=$PWD/models/admet   # central model dir (restore from SharePoint zip)
+export MODELS_DIR=$PWD/models/admet   # central model dir (restore from the weights archive)
 ```
 </details>
 

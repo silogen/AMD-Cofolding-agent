@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Geometric cutoffs and confidence bands for each interaction class.
 
 Cutoffs follow common structural-interaction conventions (PLIP / ProLIF

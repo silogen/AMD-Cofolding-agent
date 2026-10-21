@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Stress / robustness test for the interaction profiler + REST service.
 
 Throws adversarial SMILES and dirty / big / complex structures at the

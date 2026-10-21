@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Ligand preparation.
 
 The old pipeline handed ProLIF a ligand with zero hydrogens and wrong

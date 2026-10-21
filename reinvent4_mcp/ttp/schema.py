@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """TTP Pydantic models and validation.
 
 Defines the Therapeutic Target Profile schema used throughout the MCP

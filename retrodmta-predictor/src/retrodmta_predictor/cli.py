@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """CLI entry point for batch project-endpoint prediction (delegates to core.main)."""
 from retrodmta_predictor.core import main
 
