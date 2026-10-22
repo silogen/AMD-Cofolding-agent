@@ -130,6 +130,26 @@ the Kubernetes version either.
   "Security" in `services/ui/README.md`. Decide whether a token is needed
   before the UI is used on nodes that are shared with other users.
 
+## Agent fixes that only the Kubernetes version has
+
+The Kubernetes version of the agent has four fixes that this repository does
+not have. Without them, the UI can show long loops of failed tool calls and
+answers that fail because the LLM context is full.
+
+- Stop a turn after 3 failed tool calls with the same arguments
+  (`MAX_IDENTICAL_FAILURES` in `reinvent4_agent/agent.py`).
+- Cut one tool result at 12000 characters before it is added to the
+  conversation (`MAX_TOOL_RESULT_CHARS` in `reinvent4_agent/agent.py`).
+- List only the 40 newest paths per category in `list_shared_assets`
+  (`_MAX_LISTED` in `reinvent4_mcp/tools/external.py`).
+- Repair tool arguments that the LLM sends as encoded JSON text
+  (`JsonArgument` in `reinvent4_mcp/server.py`).
+
+The source is `solution-blueprints/cofolding-agent/packages/` in
+silogen/blueprints. Port the tests with the fixes
+(`test_repeated_tool_failure.py`, `test_context_overflow.py`,
+`test_json_arguments.py`).
+
 ## Product decisions to confirm
 
 - The page title is now "AI Cofolding Drug Design Agent". The Kubernetes
