@@ -105,7 +105,7 @@ export function Header({
           <span
             aria-hidden="true"
             className={`size-1.5 rounded-full ${connection === "connecting" || connection === "closed" ? "animate-pulse" : ""}`}
-            style={{ background: healthy && !gatewayError ? "var(--color-molecule)" : "var(--color-accent)" }}
+            style={{ background: healthy && !gatewayError ? "var(--color-ok)" : "var(--color-accent)" }}
           />
           <span className="hidden sm:inline">{CONNECTION_LABEL[connection]}</span>
         </button>

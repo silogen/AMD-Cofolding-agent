@@ -236,7 +236,7 @@ function StepIcon({ state }: { state: "running" | "ok" | "failed" }) {
     <span
       aria-label={state === "ok" ? "Done" : "Failed"}
       className="grid size-3 shrink-0 place-items-center rounded-full text-[8px] font-bold text-white"
-      style={{ background: state === "ok" ? "var(--color-molecule)" : "var(--color-accent)" }}
+      style={{ background: state === "ok" ? "var(--color-ok)" : "var(--color-accent)" }}
     >
       {state === "ok" ? "✓" : "✕"}
     </span>

@@ -230,7 +230,7 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
                   aria-label={`gate ${status}`}
                   className="size-1.5 shrink-0 rounded-full"
                   style={{
-                    background: status === "pass" ? "var(--color-molecule)" : status === "fail" ? "var(--color-accent)" : "var(--text-faint)",
+                    background: status === "pass" ? "var(--color-ok)" : status === "fail" ? "var(--color-accent)" : "var(--text-faint)",
                   }}
                 />
                 <span className="truncate">{structureTitle(item)}</span>
@@ -530,7 +530,7 @@ function ActivityTab({ artifacts }: Props) {
               <span
                 aria-label={state}
                 className={`size-2 shrink-0 rounded-full ${state === "running" ? "animate-pulse" : ""}`}
-                style={{ background: state === "ok" ? "var(--color-molecule)" : "var(--color-accent)" }}
+                style={{ background: state === "ok" ? "var(--color-ok)" : "var(--color-accent)" }}
               />
               <span className="text-faint shrink-0 font-mono">{clock(step.at)}</span>
               <span className="shrink-0 font-mono font-semibold">{step.name}</span>

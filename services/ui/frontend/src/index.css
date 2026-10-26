@@ -44,6 +44,10 @@
   --color-structure: #008ba0;
   --color-molecule: #d9531a;
   --color-table: #a38a3e;
+
+  /* Status: a check that passed, a healthy job, a live connection. */
+  --color-ok: #1f9d6a;
+  --color-warn: #c27c00;
 }
 
 /*
@@ -85,6 +89,9 @@
     --color-structure: #00c2de;
     --color-molecule: #f26522;
     --color-table: #c1a968;
+
+    --color-ok: #3ccf91;
+    --color-warn: #f5a524;
   }
 
   * {

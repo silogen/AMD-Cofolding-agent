@@ -454,7 +454,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             role="status"
             className="bg-raised border-subtle shadow-card absolute right-2 bottom-12 left-2 z-30 mx-auto flex max-w-xl items-start gap-2 rounded-lg border px-3 py-1.5 text-[11px]"
           >
-            <span aria-hidden="true" className="mt-1 size-1.5 shrink-0 rounded-full" style={{ background: message.tone === "ok" ? "var(--color-molecule)" : "var(--color-accent)" }} />
+            <span aria-hidden="true" className="mt-1 size-1.5 shrink-0 rounded-full" style={{ background: message.tone === "ok" ? "var(--color-ok)" : "var(--color-accent)" }} />
             <span className="min-w-0 flex-1">{message.text}</span>
             {message.ask && (
               <ChipButton
@@ -532,7 +532,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
 // ---------------------------------------------------------------------------
 
 function Badge({ tone, children }: { tone: "structure" | "ok" | "bad" | "muted"; children: ReactNode }) {
-  const colour = { structure: "var(--color-structure)", ok: "var(--color-molecule)", bad: "var(--color-accent)", muted: "var(--text-faint)" }[tone];
+  const colour = { structure: "var(--color-structure)", ok: "var(--color-ok)", bad: "var(--color-accent)", muted: "var(--text-faint)" }[tone];
   return (
     <span className="shrink-0 rounded-full border px-1.5 py-px text-[10px] font-semibold whitespace-nowrap" style={{ color: colour, borderColor: colour }}>
       {children}
@@ -564,7 +564,7 @@ function GateStrip({ verdict, panel }: { verdict: Gate; panel: StructurePanel })
   }
   const affinity = affinityText(m);
   return (
-    <div className="border-subtle flex shrink-0 items-baseline gap-2 overflow-hidden border-b px-3 py-1.5 text-[11px]" style={{ background: "color-mix(in oklch, var(--color-molecule) 8%, transparent)" }}>
+    <div className="border-subtle flex shrink-0 items-baseline gap-2 overflow-hidden border-b px-3 py-1.5 text-[11px]" style={{ background: "color-mix(in oklch, var(--color-ok) 8%, transparent)" }}>
       <span className="text-body truncate">
         {values.join(" · ")}
         {affinity && ` · affinity ${affinity} log₁₀(IC₅₀/µM)`}
@@ -897,7 +897,7 @@ function QualityTab({ panel, verdict }: { panel: StructurePanel; verdict: Gate }
                   {check.ok === null ? (
                     <span className="text-faint">not run</span>
                   ) : (
-                    <span style={{ color: check.ok ? "var(--color-molecule)" : "var(--color-accent)" }}>{check.ok ? "✓" : "✕"}</span>
+                    <span style={{ color: check.ok ? "var(--color-ok)" : "var(--color-accent)" }}>{check.ok ? "✓" : "✕"}</span>
                   )}
                 </td>
               </tr>

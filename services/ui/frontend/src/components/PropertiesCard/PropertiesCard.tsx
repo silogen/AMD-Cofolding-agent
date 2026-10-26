@@ -98,7 +98,7 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
                   ) : (
                     <span
                       title={molecule.adPass ? "Inside the applicability domain" : "Outside the applicability domain: treat with caution"}
-                      style={{ color: molecule.adPass ? "var(--color-molecule)" : "var(--color-accent)" }}
+                      style={{ color: molecule.adPass ? "var(--color-ok)" : "var(--color-accent)" }}
                     >
                       {molecule.adPass ? "✓" : "!"}
                     </span>

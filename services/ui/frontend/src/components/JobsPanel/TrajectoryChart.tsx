@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useMemo, useState, type PointerEvent } from "react";
-import { fmt, linePath, linear, runningBest, scoreDomain, ticks, toneColor, type JobStatus } from "../../lib/jobs";
+import { fmt, linePath, linear, runningBest, scoreDomain, ticks, type JobStatus } from "../../lib/jobs";
 
 interface Props {
   status: JobStatus;
@@ -13,10 +13,10 @@ const HEIGHT = 220;
 const PAD = { left: 36, right: 12, top: 12, bottom: 24 };
 
 const MEAN = "var(--color-structure)";
-const BEST = toneColor("warn");
+const BEST = "var(--color-molecule)";
 const COMPONENT_COLOURS = [
-  "var(--color-molecule)",
   "var(--color-table)",
+  "var(--color-ok)",
   "oklch(0.7 0.12 200)",
   "oklch(0.68 0.16 340)",
   "oklch(0.76 0.13 95)",

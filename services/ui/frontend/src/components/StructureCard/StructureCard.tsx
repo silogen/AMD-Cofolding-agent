@@ -46,8 +46,8 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
           <span
             className="ml-auto shrink-0 rounded-full border px-1.5 py-px text-[10px] font-semibold"
             style={{
-              color: verdict.status === "pass" ? "var(--color-molecule)" : "var(--color-accent)",
-              borderColor: verdict.status === "pass" ? "var(--color-molecule)" : "var(--color-accent)",
+              color: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-accent)",
+              borderColor: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-accent)",
             }}
             title={verdict.reasons.join(" · ") || "Confidence > 0.6, ligand ipTM > 0.5, PoseBusters all pass"}
           >

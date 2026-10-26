@@ -277,8 +277,7 @@ export const isActive = (state: JobState) => state === "running" || state === "q
 export function stateTone(state: JobState): Tone {
   if (state === "completed") return "ok";
   if (state === "failed") return "bad";
-  if (state === "running" || state === "queued") return "info";
-  if (state === "stopped") return "warn";
+  if (state === "running" || state === "queued" || state === "stopped") return "warn";
   return "muted";
 }
 
@@ -307,13 +306,13 @@ export function convergenceTone(status: string | null): Tone {
 export function toneColor(tone: Tone): string {
   switch (tone) {
     case "ok":
-      return "var(--color-molecule)";
+      return "var(--color-ok)";
     case "bad":
       return "var(--color-accent)";
     case "info":
       return "var(--color-structure)";
     case "warn":
-      return "oklch(0.72 0.16 65)";
+      return "var(--color-warn)";
     default:
       return "var(--text-muted)";
   }
