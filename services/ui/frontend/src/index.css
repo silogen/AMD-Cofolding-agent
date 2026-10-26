@@ -33,17 +33,17 @@
  * structure wherever it appears.
  */
 @theme {
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: Arial, "Helvetica Neue", Helvetica, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
 
-  --color-accent: oklch(0.55 0.21 27);
-  --color-accent-strong: oklch(0.48 0.22 27);
-  --color-accent-soft: oklch(0.96 0.03 27);
+  /* AMD corporate palette: red #ED1C24, orange #F26522, cyan #00C2DE, gold #C1A968. */
+  --color-accent: #ed1c24;
+  --color-accent-strong: #c8141b;
+  --color-accent-soft: #fde8e9;
 
-  --color-structure: oklch(0.62 0.16 250);
-  --color-molecule: oklch(0.6 0.15 155);
-  --color-table: oklch(0.65 0.14 300);
+  --color-structure: #008ba0;
+  --color-molecule: #d9531a;
+  --color-table: #a38a3e;
 }
 
 /*
@@ -53,39 +53,38 @@
  */
 @layer base {
   :root {
-    --surface-page: oklch(0.98 0.004 260);
-    --surface-raised: oklch(1 0 0);
-    --surface-sunken: oklch(0.95 0.006 260);
-    --surface-inset: oklch(0.93 0.008 260);
-    --border-subtle: oklch(0.89 0.008 260);
-    --border-strong: oklch(0.8 0.01 260);
-    --text-body: oklch(0.25 0.015 260);
-    --text-muted: oklch(0.52 0.015 260);
-    --text-faint: oklch(0.63 0.013 260);
-    --shadow-card: 0 1px 2px oklch(0.2 0.02 260 / 0.06), 0 1px 3px oklch(0.2 0.02 260 / 0.04);
+    --surface-page: #ffffff;
+    --surface-raised: #ffffff;
+    --surface-sunken: #f6f6f7;
+    --surface-inset: #f0f0f2;
+    --border-subtle: #e3e3e6;
+    --border-strong: #d0d0d5;
+    --text-body: #0a0a0b;
+    --text-muted: #5e5e5e;
+    --text-faint: #85878a;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.06);
   }
 
   .dark {
-    --surface-page: oklch(0.17 0.012 260);
-    --surface-raised: oklch(0.21 0.014 260);
-    --surface-sunken: oklch(0.14 0.012 260);
-    --surface-inset: oklch(0.25 0.015 260);
-    --border-subtle: oklch(0.3 0.015 260);
-    --border-strong: oklch(0.4 0.018 260);
-    --text-body: oklch(0.93 0.005 260);
-    --text-muted: oklch(0.7 0.012 260);
-    --text-faint: oklch(0.58 0.012 260);
-    --shadow-card: 0 1px 2px oklch(0 0 0 / 0.3), 0 1px 3px oklch(0 0 0 / 0.2);
+    --surface-page: #000000;
+    --surface-raised: #121214;
+    --surface-sunken: #0b0b0c;
+    --surface-inset: #1a1a1d;
+    --border-subtle: #26262a;
+    --border-strong: #34343a;
+    --text-body: #f4f4f5;
+    --text-muted: #9d9fa2;
+    --text-faint: #7a7c80;
+    --shadow-card: 0 1px 0 rgb(255 255 255 / 0.03), 0 8px 24px rgb(0 0 0 / 0.45);
 
-    /* Lift the accent in dark mode; AMD red at full saturation vibrates
-       against a dark surface and is hard to read as text. */
-    --color-accent: oklch(0.66 0.19 27);
-    --color-accent-strong: oklch(0.72 0.18 27);
-    --color-accent-soft: oklch(0.28 0.06 27);
+    /* Pure AMD red reads as text on black only when lifted a little. */
+    --color-accent: #ed1c24;
+    --color-accent-strong: #ff4048;
+    --color-accent-soft: #2a0d0e;
 
-    --color-structure: oklch(0.72 0.14 250);
-    --color-molecule: oklch(0.72 0.13 155);
-    --color-table: oklch(0.74 0.12 300);
+    --color-structure: #00c2de;
+    --color-molecule: #f26522;
+    --color-table: #c1a968;
   }
 
   * {
@@ -268,13 +267,79 @@
   }
 }
 
+/* A residue named in an answer; it shows the residue in the 3D viewer. */
+.markdown .residue-link {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--color-structure);
+  border-bottom: 1px dashed currentColor;
+  line-height: 1.2;
+}
+.markdown .residue-link:hover {
+  color: var(--color-accent);
+}
+
 /*
- * 3Dmol injects its own absolutely positioned canvas and, in some builds, a
- * white background div. Force it to inherit the card surface so the viewer
- * does not flash white in dark mode.
+ * Mol* sizes itself from its container. It must fill the host exactly and
+ * never shrink to zero, or the canvas stays blank until the next resize.
  */
-.viewer-host canvas {
-  border-radius: inherit;
+.molstar-host .msp-plugin {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+}
+.molstar-host .msp-layout-standard,
+.molstar-host .msp-layout-main,
+.molstar-host .msp-layout-region-main,
+.molstar-host .msp-viewport {
+  background: transparent;
+}
+.molstar-host canvas {
+  display: block;
+}
+/* Keep Mol*'s own viewport buttons clear of the overlay row on the left. */
+.molstar-host .msp-viewport-controls {
+  top: 8px;
+  right: 8px;
+}
+.molstar-host .msp-viewport-controls-buttons .msp-btn-icon {
+  background: var(--surface-raised) !important;
+  color: var(--text-muted) !important;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.25rem;
+  opacity: 0.9;
+}
+.molstar-host .msp-viewport-controls-buttons .msp-btn-icon svg,
+.molstar-host .msp-viewport-controls-buttons .msp-btn-icon svg * {
+  fill: currentColor !important;
+}
+.molstar-host .msp-viewport-controls-buttons .msp-btn-icon:hover,
+.molstar-host .msp-viewport-controls-buttons .msp-btn-link-toggle-on {
+  opacity: 1;
+  color: var(--text-body) !important;
+}
+.molstar-host .msp-viewport-controls-buttons .msp-btn-icon:hover {
+  color: var(--color-accent-strong) !important;
+}
+/* The hover label sits top right, next to Mol*'s buttons, clear of the command line. */
+.molstar-host .msp-highlight-toast-wrapper {
+  top: 8px;
+  right: 48px;
+  bottom: auto;
+  max-width: calc(100% - 22rem);
+}
+.molstar-host .msp-highlight-info {
+  background: var(--surface-raised);
+  color: var(--text-body);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.375rem;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.95;
+}
+.molstar-host .msp-highlight-info-additional {
+  color: var(--text-muted);
 }
 
 @media (prefers-reduced-motion: reduce) {

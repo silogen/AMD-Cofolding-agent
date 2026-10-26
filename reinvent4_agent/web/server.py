@@ -411,7 +411,7 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         return {
             "name": name,
             "result": parsed if parsed is not None else raw,
-            "panels": extract_panels(name, raw),
+            "panels": extract_panels(name, raw, arguments),
         }
 
     @app.get("/api/jobs/{job_id}/files/{name}")

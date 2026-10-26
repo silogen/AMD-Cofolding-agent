@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { availableCommands, firstPlaceholder, type SlashCommand } from "../../lib/commands";
+import { availableCommands, firstPlaceholder, VIEW_PREFIX, type SlashCommand } from "../../lib/commands";
 
 interface Props {
   value: string;
@@ -71,9 +71,10 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   }
 
   function submit() {
-    if (busy || !connected) return;
     const content = value.trim();
     if (!content) return;
+    const local = content.toLowerCase().startsWith(VIEW_PREFIX);
+    if (!local && (busy || !connected)) return;
     if (firstPlaceholder(content) && !window.confirm("The message still has a {PLACEHOLDER}. Send it anyway?")) return;
     if (onSend(content)) onChange("");
   }

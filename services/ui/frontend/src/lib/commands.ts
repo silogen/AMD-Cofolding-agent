@@ -14,7 +14,16 @@ export interface SlashCommand {
   tools: string[];
 }
 
+/** Runs in the browser on the 3D viewer; never sent to the agent. */
+export const VIEW_PREFIX = "/view";
+
 export const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    cmd: VIEW_PREFIX,
+    desc: "Drive the 3D viewer: pocket, focus ASN140, surface, show hbonds…",
+    template: `${VIEW_PREFIX} {COMMAND}`,
+    tools: [],
+  },
   {
     cmd: "/design",
     desc: "De novo REINVENT campaign against a target",

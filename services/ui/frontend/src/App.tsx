@@ -11,10 +11,11 @@ import { Transcript } from "./components/Transcript/Transcript";
 import { Composer, type ComposerHandle } from "./components/Composer/Composer";
 import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
 import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
-import type { ViewStyle } from "./components/StructureViewer/StructureViewer";
 import type { SessionSummary, StructurePanel } from "./types/api";
-import { collectArtifacts } from "./lib/artifacts";
-import { availableCommands } from "./lib/commands";
+import { collectArtifacts, sameFile } from "./lib/artifacts";
+import { availableCommands, VIEW_PREFIX } from "./lib/commands";
+import { onOpenRequest, sendToViewer } from "./lib/viewerBus";
+import { parseViewerCommand, VIEWER_HELP, type ViewerAction } from "./lib/viewerCommands";
 import { download, sessionEvents } from "./lib/api";
 import { sessionToMarkdown, slug } from "./lib/exportSession";
 
@@ -25,6 +26,12 @@ function sessionFromHash(): string | null {
 }
 
 const wide = () => window.matchMedia("(min-width: 1024px)").matches;
+
+/** A structure file from the shared volume that no step of this conversation produced. */
+function structureAt(path: string): StructurePanel {
+  const name = path.split("/").pop() ?? path;
+  return { kind: "structure", tool: "assets", name, path, url: `/api/artifacts/${path}`, format: /\.pdb$/i.test(name) ? "pdb" : "cif" };
+}
 
 /**
  * Conversations, chat and workbench.
@@ -63,9 +70,12 @@ export default function App() {
 
   const artifacts = useMemo(() => collectArtifacts(transcript.turns), [transcript.turns]);
   const [picked, setPicked] = useState<StructurePanel | null>(null);
-  const [style, setStyle] = useState<ViewStyle>("cartoon");
   const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
+  const [hints, setHints] = useState<{ id: number; message: string }[]>([]);
   const activeStructure = picked ?? artifacts.structures[0]?.item ?? null;
+
+  const hint = useCallback((message: string) => setHints((list) => [...list.slice(-2), { id: Date.now(), message }]), []);
+  const dismissHint = useCallback((id: number) => setHints((list) => list.filter((entry) => entry.id !== id)), []);
 
   const open = useCallback((id: string | null) => {
     setRequest((previous) => ({ id, nonce: previous.nonce + 1 }));
@@ -95,12 +105,37 @@ export default function App() {
     if (!wide()) setSheetOpen(true);
   }, []);
 
-  const openStructure = useCallback(
-    (panel: StructurePanel) => {
-      setPicked(panel);
-      showWorkbench("structure");
+  // Anything that asks the viewer for something brings it up, on the structure it names.
+  useEffect(
+    () =>
+      onOpenRequest((request) => {
+        const target = request.path;
+        const found = target ? artifacts.structures.find(({ item }) => sameFile(item.path, target)) : undefined;
+        if (found) setPicked(found.item);
+        else if (target && /\.(pdb|cif|mmcif)$/i.test(target)) setPicked(structureAt(target));
+        else if (!artifacts.structures.length) hint("There is no structure in this conversation yet.");
+        showWorkbench("structure");
+      }),
+    [artifacts.structures, showWorkbench, hint],
+  );
+
+  const view = useCallback((action: ViewerAction) => sendToViewer({ action, source: "palette" }), []);
+
+  /** "/view …" runs on the viewer, here; everything else goes to the agent. */
+  const { send: sendToAgent } = chat;
+  const send = useCallback(
+    (text: string) => {
+      if (!text.toLowerCase().startsWith(VIEW_PREFIX)) return sendToAgent(text);
+      const command = text.slice(VIEW_PREFIX.length).trim();
+      const action = parseViewerCommand(command || "help");
+      if (!action) {
+        hint(`“${command}” is not a viewer command. Try: ${VIEWER_HELP}`);
+        return false;
+      }
+      sendToViewer({ action, source: "composer" });
+      return true;
     },
-    [showWorkbench],
+    [sendToAgent, hint],
   );
 
   const openMolecule = useCallback(
@@ -129,14 +164,17 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setPaletteOpen((value) => !value);
-      }
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "k") setPaletteOpen((value) => !value);
+      else if (key === "b") setWorkbenchOpen((value) => !value);
+      else if (key === "j") toggle();
+      else return;
+      event.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [toggle]);
 
   const paletteItems = useMemo<PaletteItem[]>(() => {
     const items: PaletteItem[] = [
@@ -150,6 +188,20 @@ export default function App() {
         : []),
       { id: "tab-structure", group: "Workbench", label: "Show the structure", run: () => showWorkbench("structure") },
       { id: "tab-molecules", group: "Workbench", label: "Show molecules", run: () => showWorkbench("molecules") },
+      { id: "tab-properties", group: "Workbench", label: "Show predicted properties", run: () => showWorkbench("properties") },
+      ...(artifacts.structures.length
+        ? [
+            { id: "v-ligand", group: "Viewer", label: "Focus the ligand", hint: "/view ligand", run: () => view({ kind: "ligand" }) },
+            { id: "v-pocket", group: "Viewer", label: "Show the binding pocket", hint: "/view pocket", run: () => view({ kind: "pocket", radius: 5 }) },
+            { id: "v-hbond", group: "Viewer", label: "Show hydrogen bonds", hint: "/view hbonds", run: () => view({ kind: "contacts", type: "hbond" }) },
+            { id: "v-surface", group: "Viewer", label: "Surface view", hint: "/view surface", run: () => view({ kind: "style", style: "surface" }) },
+            { id: "v-cartoon", group: "Viewer", label: "Cartoon view", hint: "/view cartoon", run: () => view({ kind: "style", style: "cartoon" }) },
+            { id: "v-chain", group: "Viewer", label: "Colour by chain", hint: "/view color by chain", run: () => view({ kind: "color", color: "chain" }) },
+            { id: "v-plddt", group: "Viewer", label: "Colour by confidence", hint: "/view color by plddt", run: () => view({ kind: "color", color: "confidence" }) },
+            { id: "v-quality", group: "Viewer", label: "Pose quality and affinity", hint: "/view quality", run: () => view({ kind: "panel", tab: "quality" }) },
+            { id: "v-shot", group: "Viewer", label: "Save an image", hint: "/view screenshot", run: () => view({ kind: "screenshot" }) },
+          ]
+        : []),
       { id: "tab-tables", group: "Workbench", label: "Show tables", run: () => showWorkbench("tables") },
       { id: "tab-activity", group: "Workbench", label: "Show tool activity", run: () => showWorkbench("activity") },
       { id: "rail", group: "View", label: railOpen ? "Hide conversations" : "Show conversations", run: () => setRailOpen((v) => !v) },
@@ -176,17 +228,16 @@ export default function App() {
       })),
     ];
     return items;
-  }, [open, busy, chat.cancel, session, exportCurrent, showWorkbench, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
+  }, [open, busy, chat.cancel, session, exportCurrent, showWorkbench, artifacts.structures.length, view, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
 
   const workbenchProps = {
     tab,
     onTabChange: setTab,
     artifacts,
     theme,
+    sessionId: session?.id ?? null,
     activeStructure,
     onSelectStructure: setPicked,
-    style,
-    onStyleChange: setStyle,
     selectedSmiles,
     onSelectSmiles: setSelectedSmiles,
     onAsk: ask,
@@ -248,10 +299,11 @@ export default function App() {
             <Transcript
               turns={transcript.turns}
               theme={theme}
-              onOpenStructure={openStructure}
               openStructurePath={activeStructure?.path ?? null}
               onOpenMolecule={openMolecule}
+              onShowProperties={() => showWorkbench("properties")}
               onPickPrompt={ask}
+              hasStructure={artifacts.structures.length > 0}
             />
             {activeStructure && !sheetOpen && (
               <button
@@ -268,7 +320,7 @@ export default function App() {
             ref={composerRef}
             value={draft}
             onChange={setDraft}
-            onSend={chat.send}
+            onSend={send}
             onStop={chat.cancel}
             busy={busy}
             connected={connected}
@@ -282,10 +334,13 @@ export default function App() {
           </div>
         )}
 
-        {chat.notices.length > 0 && (
-          <div className="pointer-events-none absolute top-3 left-1/2 z-50 flex -translate-x-1/2 flex-col gap-2" aria-live="polite">
+        {(chat.notices.length > 0 || hints.length > 0) && (
+          <div className="pointer-events-none absolute top-3 left-1/2 z-50 flex max-w-[min(36rem,90vw)] -translate-x-1/2 flex-col gap-2" aria-live="polite">
             {chat.notices.map((notice) => (
               <Toast key={notice.id} id={notice.id} message={notice.message} onDismiss={chat.dismissNotice} />
+            ))}
+            {hints.map((entry) => (
+              <Toast key={`h${entry.id}`} id={entry.id} message={entry.message} onDismiss={dismissHint} />
             ))}
           </div>
         )}

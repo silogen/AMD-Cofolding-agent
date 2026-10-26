@@ -4,17 +4,38 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
-import type { Artifacts } from "../../lib/artifacts";
+import { runOf, structureTitle, type Artifacts } from "../../lib/artifacts";
 import { clock, duration } from "../../lib/format";
 import { descriptors } from "../../lib/rdkit";
-import { StructureViewer, type ViewStyle } from "../StructureViewer/StructureViewer";
+import { gate } from "../../lib/gate";
+import { endpointLabel, formatValue, serviceName } from "../../lib/properties";
+import { sendToViewer } from "../../lib/viewerBus";
+import { StructureWorkspace } from "../StructureWorkspace/StructureWorkspace";
+import { PropertiesCard } from "../PropertiesCard/PropertiesCard";
 import { DataTable } from "../DataTable/DataTable";
 import { CopyButton } from "../CopyButton/CopyButton";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { useRDKit } from "../../hooks/useRDKit";
 import { summarise } from "../../lib/format";
+import { extractTargetFacts, toolEvents } from "../../lib/ttp";
+import { buildCandidates } from "../../lib/candidates";
+import { CandidatesPanel } from "../CandidatesPanel/CandidatesPanel";
+import { JobsPanel } from "../JobsPanel/JobsPanel";
+import { TtpPanel } from "../TtpPanel/TtpPanel";
+import { TargetCard } from "../TargetCard/TargetCard";
+import { AssetsPanel } from "../AssetsPanel/AssetsPanel";
 
-export type WorkbenchTab = "structure" | "molecules" | "tables" | "activity";
+export type WorkbenchTab =
+  | "structure"
+  | "candidates"
+  | "molecules"
+  | "properties"
+  | "jobs"
+  | "ttp"
+  | "target"
+  | "assets"
+  | "tables"
+  | "activity";
 export type WorkbenchLayout = "sidebar" | "sheet";
 
 interface Props {
@@ -23,10 +44,9 @@ interface Props {
   onTabChange: (tab: WorkbenchTab) => void;
   artifacts: Artifacts;
   theme: Theme;
+  sessionId: string | null;
   activeStructure: StructurePanel | null;
   onSelectStructure: (panel: StructurePanel) => void;
-  style: ViewStyle;
-  onStyleChange: (style: ViewStyle) => void;
   selectedSmiles: string | null;
   onSelectSmiles: (smiles: string | null) => void;
   /** Put a prompt in the composer. */
@@ -36,7 +56,13 @@ interface Props {
 
 const TABS: { id: WorkbenchTab; label: string; colour: string }[] = [
   { id: "structure", label: "Structure", colour: "var(--color-structure)" },
+  { id: "candidates", label: "Candidates", colour: "var(--color-molecule)" },
   { id: "molecules", label: "Molecules", colour: "var(--color-molecule)" },
+  { id: "properties", label: "Properties", colour: "var(--color-table)" },
+  { id: "jobs", label: "Jobs", colour: "var(--color-structure)" },
+  { id: "ttp", label: "TTP", colour: "var(--color-table)" },
+  { id: "target", label: "Target", colour: "var(--color-structure)" },
+  { id: "assets", label: "Assets", colour: "var(--text-faint)" },
   { id: "tables", label: "Tables", colour: "var(--color-table)" },
   { id: "activity", label: "Activity", colour: "var(--color-accent)" },
 ];
@@ -64,16 +90,23 @@ export function Workbench(props: Props) {
     };
   }, [isSheet, onClose]);
 
+  const candidateCount = useMemo(() => buildCandidates(artifacts).length, [artifacts]);
   const counts: Record<WorkbenchTab, number> = {
     structure: artifacts.structures.length,
+    candidates: candidateCount,
     molecules: artifacts.molecules.length,
+    properties: artifacts.properties.length,
+    jobs: 0,
+    ttp: 0,
+    target: 0,
+    assets: 0,
     tables: artifacts.tables.length,
     activity: artifacts.steps.length,
   };
 
   const shell = isSheet
     ? "fixed inset-0 z-50 flex flex-col bg-raised"
-    : "flex w-[26rem] xl:w-[34rem] 2xl:w-[40rem] shrink-0 flex-col border-l border-subtle bg-raised";
+    : "flex w-[28rem] xl:w-[38rem] 2xl:w-[46rem] shrink-0 flex-col border-l border-subtle bg-raised";
 
   return (
     <aside className={shell} role={isSheet ? "dialog" : undefined} aria-modal={isSheet || undefined} aria-label="Workbench">
@@ -113,7 +146,15 @@ export function Workbench(props: Props) {
 
       <div className="flex min-h-0 flex-1 flex-col">
         {tab === "structure" && <StructureTab {...props} />}
+        {tab === "candidates" && <CandidatesTab {...props} />}
         {tab === "molecules" && <MoleculesTab {...props} />}
+        {tab === "properties" && <PropertiesTab {...props} />}
+        {tab === "jobs" && (
+          <div className="h-full min-h-0">
+            <JobsPanel sessionId={props.sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={(smiles) => openMolecule(props, smiles)} />
+          </div>
+        )}
+        {(tab === "ttp" || tab === "target" || tab === "assets") && <ContextTab {...props} />}
         {tab === "tables" && <TablesTab {...props} />}
         {tab === "activity" && <ActivityTab {...props} />}
       </div>
@@ -121,76 +162,120 @@ export function Workbench(props: Props) {
   );
 }
 
-const STYLES: { value: ViewStyle; label: string; hint: string }[] = [
-  { value: "cartoon", label: "Cartoon", hint: "Protein fold with the ligand as sticks" },
-  { value: "surface", label: "Surface", hint: "Binding pocket shape around the ligand" },
-  { value: "ligand", label: "Ligand", hint: "The designed molecule on its own" },
-];
+function openMolecule({ onSelectSmiles, onTabChange }: Props, smiles: string) {
+  onSelectSmiles(smiles);
+  onTabChange("molecules");
+}
 
-function StructureTab({ artifacts, activeStructure, onSelectStructure, style, onStyleChange, theme }: Props) {
+function CandidatesTab(props: Props) {
+  const { artifacts, theme, onSelectStructure, onTabChange, onAsk } = props;
+  return (
+    <div className="h-full min-h-0">
+      <CandidatesPanel
+        artifacts={artifacts}
+        theme={theme}
+        onOpenMolecule={(smiles) => openMolecule(props, smiles)}
+        onOpenStructure={(path) => {
+          const hit = artifacts.structures.find(({ item }) => item.path === path);
+          if (!hit) return;
+          onSelectStructure(hit.item);
+          onTabChange("structure");
+        }}
+        onAsk={onAsk}
+      />
+    </div>
+  );
+}
+
+/** The tabs about the campaign rather than its results: the profile, the target and the files. */
+function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
+  const events = useMemo(() => toolEvents(artifacts.steps), [artifacts.steps]);
+  const facts = useMemo(() => extractTargetFacts(events), [events]);
+  if (tab === "target") {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        <TargetCard facts={facts} onAsk={onAsk} />
+      </div>
+    );
+  }
+  if (tab === "ttp") return <TtpPanel sessionId={sessionId ?? "new"} events={events} onAsk={onAsk} />;
+  return <AssetsPanel events={events} onOpenStructure={(path) => sendToViewer({ path, source: "assets" })} onInsert={onAsk} />;
+}
+
+function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, onAsk }: Props) {
   const list = artifacts.structures;
   if (!activeStructure) {
     return <Empty>No structure yet. When the agent cofolds a complex with Boltz-2, it appears here.</Empty>;
   }
   return (
     <>
-      <div role="group" aria-label="View style" className="border-subtle flex shrink-0 gap-1 border-b px-3 py-2">
-        {STYLES.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            title={option.hint}
-            aria-pressed={style === option.value}
-            onClick={() => onStyleChange(option.value)}
-            className="flex-1 cursor-pointer rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors lg:flex-none touch:min-h-11"
-            style={
-              style === option.value
-                ? { background: "var(--color-accent)", color: "white" }
-                : { background: "var(--surface-inset)", color: "var(--text-muted)" }
-            }
-          >
-            {option.label}
-          </button>
-        ))}
-        <a
-          href={activeStructure.url}
-          download={activeStructure.name}
-          className="text-muted hover:text-body ml-auto self-center text-[11px] font-medium"
-        >
-          Download
-        </a>
-      </div>
-
-      <StructureViewer key={activeStructure.path} panel={activeStructure} theme={theme} style={style} className="min-h-0 flex-1" />
-
-      <div className="border-subtle shrink-0 border-t px-3 py-2">
-        <p className="truncate text-[11px] font-medium" title={activeStructure.path}>
-          {activeStructure.name}
-        </p>
-        <p className="text-faint truncate text-[11px]">from {activeStructure.tool}</p>
-      </div>
-
       {list.length > 1 && (
-        <ul className="border-subtle max-h-44 shrink-0 overflow-y-auto border-t p-2">
-          {list.map(({ item, at }) => (
-            <li key={item.path}>
+        <div role="listbox" aria-label="Structures" className="border-subtle flex shrink-0 gap-1 overflow-x-auto border-b px-2 py-1.5">
+          {list.map(({ item, at }) => {
+            const status = gate(item.metrics).status;
+            const current = activeStructure.path === item.path;
+            return (
               <button
+                key={item.path}
                 type="button"
+                role="option"
+                aria-selected={current}
                 onClick={() => onSelectStructure(item)}
-                aria-current={activeStructure.path === item.path}
-                className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] touch:min-h-11 ${
-                  activeStructure.path === item.path ? "bg-sunken font-semibold" : "hover:bg-sunken"
+                title={`${item.path} · ${clock(at)}`}
+                className={`flex max-w-48 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] ${
+                  current ? "border-[var(--color-accent)] font-semibold" : "border-subtle text-muted hover:text-body"
                 }`}
-                title={item.path}
               >
-                <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                <span className="text-faint shrink-0">{clock(at)}</span>
+                <span
+                  aria-label={`gate ${status}`}
+                  className="size-1.5 shrink-0 rounded-full"
+                  style={{
+                    background: status === "pass" ? "var(--color-molecule)" : status === "fail" ? "var(--color-accent)" : "var(--text-faint)",
+                  }}
+                />
+                <span className="truncate">{structureTitle(item)}</span>
+                {runOf(item.path) && <span className="text-faint shrink-0 font-mono font-normal">{runOf(item.path)}</span>}
               </button>
-            </li>
-          ))}
-        </ul>
+            );
+          })}
+        </div>
       )}
+      <StructureWorkspace
+        structures={list}
+        active={activeStructure}
+        onSelect={onSelectStructure}
+        interactions={artifacts.interactions}
+        theme={theme}
+        onAsk={onAsk}
+      />
     </>
+  );
+}
+
+function PropertiesTab({ artifacts, theme, onSelectSmiles, onTabChange }: Props) {
+  if (artifacts.properties.length === 0) {
+    return <Empty>No predictions yet. ADMET and RetroDMTA predictions appear here, molecules by endpoints.</Empty>;
+  }
+  return (
+    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+      {artifacts.properties.map(({ item, tool, at }, index) => (
+        <section key={index}>
+          <h3 className="text-muted mb-1 flex gap-2 text-[11px] font-medium">
+            <span>{serviceName(item)}</span>
+            <span className="text-faint font-mono">{tool}</span>
+            <span className="text-faint ml-auto">{clock(at)}</span>
+          </h3>
+          <PropertiesCard
+            panel={item}
+            theme={theme}
+            onOpenMolecule={(smiles) => {
+              onSelectSmiles(smiles);
+              onTabChange("molecules");
+            }}
+          />
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -277,6 +362,10 @@ function MoleculeDetail({
   const { rdkit } = useRDKit();
   const props = useMemo(() => (rdkit ? descriptors(rdkit, smiles) : null), [rdkit, smiles]);
   const rows = useMemo(() => rowsFor(smiles, artifacts), [smiles, artifacts]);
+  const complex = artifacts.structures.find(({ item }) => item.smiles === smiles)?.item;
+  const predicted = artifacts.properties.flatMap(({ item }) =>
+    item.molecules.filter((m) => m.ok && (m.smiles === smiles || m.standardized === smiles)).map((m) => ({ panel: item, molecule: m })),
+  )[0];
 
   const facts: [string, string][] = props
     ? [
@@ -330,9 +419,34 @@ function MoleculeDetail({
                 {label}…
               </button>
             ))}
+            {complex && (
+              <button
+                type="button"
+                onClick={() => sendToViewer({ path: complex.path, action: { kind: "ligand" }, source: "molecule" })}
+                className="cursor-pointer rounded-full px-2.5 py-0.5 text-[11px] font-medium text-white"
+                style={{ background: "var(--color-accent)" }}
+              >
+                Show complex
+              </button>
+            )}
           </div>
         </div>
       </div>
+      {predicted && (
+        <dl className="bg-raised border-subtle mt-3 grid grid-cols-3 gap-x-3 gap-y-1 rounded-lg border p-2 text-[11px] sm:grid-cols-4">
+          {predicted.panel.endpoints.map((endpoint) => {
+            const value = predicted.molecule.values[endpoint];
+            return (
+              <div key={endpoint} className="min-w-0">
+                <dt className="text-faint truncate">{endpointLabel(endpoint)}</dt>
+                <dd className="truncate font-mono tabular-nums" title={value?.unit}>
+                  {formatValue(value)}
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
+      )}
       {rows.length > 0 && (
         <div className="mt-3 space-y-2">
           {rows.slice(0, 4).map(({ tool, row }, index) => (

@@ -112,6 +112,7 @@ export function Header({
 
         <IconButton
           label={workbenchOpen ? "Hide the workbench" : "Show the workbench"}
+          shortcut="Ctrl+B"
           pressed={workbenchOpen}
           onClick={onToggleWorkbench}
         >
@@ -121,7 +122,7 @@ export function Header({
           </svg>
         </IconButton>
 
-        <IconButton label={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"} onClick={onToggleTheme}>
+        <IconButton label={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"} shortcut="Ctrl+J" onClick={onToggleTheme}>
           {theme === "dark" ? <SunIcon /> : <MoonIcon />}
         </IconButton>
       </div>
@@ -139,11 +140,13 @@ function Chip({ children, title }: { children: ReactNode; title?: string }) {
 
 function IconButton({
   label,
+  shortcut,
   pressed,
   onClick,
   children,
 }: {
   label: string;
+  shortcut?: string;
   pressed?: boolean;
   onClick: () => void;
   children: ReactNode;
@@ -154,7 +157,7 @@ function IconButton({
       onClick={onClick}
       aria-label={label}
       aria-pressed={pressed}
-      title={label}
+      title={shortcut ? `${label} (${shortcut})` : label}
       className="bg-inset text-muted hover:text-body grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg touch:size-11"
     >
       {children}

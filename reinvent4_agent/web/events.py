@@ -53,6 +53,7 @@ class WebSocketEventHandler:
         #: one after another, so at most one call per name is open.
         self._pending: dict[str, str] = {}
         self._started: dict[str, float] = {}
+        self._arguments: dict[str, dict[str, Any]] = {}
 
     # -- AgentEventHandler ------------------------------------------------
 
@@ -63,6 +64,7 @@ class WebSocketEventHandler:
         call_id = f"{self._id_prefix}-{next(self._ids)}"
         self._pending[name] = call_id
         self._started[call_id] = time.monotonic()
+        self._arguments[call_id] = arguments
         self._emit(
             {
                 "type": "tool_call",
@@ -75,7 +77,8 @@ class WebSocketEventHandler:
     def on_tool_result(self, name: str, result: str, is_error: bool) -> None:
         call_id = self._pending.pop(name, None)
         started = self._started.pop(call_id, None) if call_id else None
-        panels = [] if is_error else extract_panels(name, result)
+        arguments = self._arguments.pop(call_id, None) if call_id else None
+        panels = [] if is_error else extract_panels(name, result, arguments)
         excerpt = result if len(result) <= MAX_RESULT_CHARS else result[:MAX_RESULT_CHARS]
         self._emit(
             {

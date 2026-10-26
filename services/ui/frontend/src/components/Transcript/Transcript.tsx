@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useEffect, useRef } from "react";
-import type { StructurePanel, Turn } from "../../types/api";
+import type { Turn } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { clock } from "../../lib/format";
 import { AgentTurnView } from "./AgentTurnView";
@@ -10,10 +10,12 @@ import { AgentTurnView } from "./AgentTurnView";
 interface Props {
   turns: Turn[];
   theme: Theme;
-  onOpenStructure: (panel: StructurePanel) => void;
   openStructurePath: string | null;
   onOpenMolecule: (smiles: string) => void;
+  onShowProperties: () => void;
   onPickPrompt: (text: string) => void;
+  /** Whether the conversation has a structure to show residues on. */
+  hasStructure: boolean;
 }
 
 /**
@@ -22,7 +24,7 @@ interface Props {
  * Everything the agent did stays in place next to the question that caused
  * it, which is what lets a user answer "what was computed, when, and why".
  */
-export function Transcript({ turns, theme, onOpenStructure, openStructurePath, onOpenMolecule, onPickPrompt }: Props) {
+export function Transcript({ turns, theme, openStructurePath, onOpenMolecule, onShowProperties, onPickPrompt, hasStructure }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -49,7 +51,7 @@ export function Transcript({ turns, theme, onOpenStructure, openStructurePath, o
       <div className="mx-auto flex max-w-3xl flex-col gap-5 px-3 py-4 pb-20 sm:gap-6 sm:px-4 sm:py-6 lg:pb-6">
         {turns.length === 0 && <EmptyState onPick={onPickPrompt} />}
 
-        {turns.map((turn) =>
+        {turns.map((turn, index) =>
           turn.role === "user" ? (
             <UserBubble key={turn.id} content={turn.content} at={turn.at} />
           ) : (
@@ -57,9 +59,11 @@ export function Transcript({ turns, theme, onOpenStructure, openStructurePath, o
               key={turn.id}
               turn={turn}
               theme={theme}
-              onOpenStructure={onOpenStructure}
               openStructurePath={openStructurePath}
               onOpenMolecule={onOpenMolecule}
+              onShowProperties={onShowProperties}
+              linkResidues={hasStructure}
+              onFollowup={index === turns.length - 1 ? onPickPrompt : undefined}
             />
           ),
         )}
@@ -100,7 +104,7 @@ const STARTERS: { title: string; body: string; prompt: string }[] = [
   },
   {
     title: "Check ADMET",
-    body: "Solubility, permeability, clearance and more for a set of molecules.",
+    body: "Solubility, permeability, efflux and lipophilicity for a set of molecules.",
     prompt: "Predict ADMET properties for the top 10 candidates of the latest job.",
   },
 ];

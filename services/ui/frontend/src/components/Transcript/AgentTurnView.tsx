@@ -1,13 +1,17 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type AnchorHTMLAttributes } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AgentTurn, Panel, StructurePanel, TurnBlock } from "../../types/api";
+import type { AgentTurn, Panel, TurnBlock } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { toolSteps } from "../../lib/transcript";
 import { clock, duration, summarise } from "../../lib/format";
+import { panelKey } from "../../lib/artifacts";
+import { suggestFollowups } from "../../lib/followups";
+import { remarkResidueLinks, residueFromHref } from "../../lib/residueLinks";
+import { sendToViewer } from "../../lib/viewerBus";
 import { PanelGrid } from "../PanelGrid/PanelGrid";
 import { CopyButton } from "../CopyButton/CopyButton";
 
@@ -16,9 +20,13 @@ type ToolStep = Extract<TurnBlock, { kind: "tool" }>;
 interface Props {
   turn: AgentTurn;
   theme: Theme;
-  onOpenStructure: (panel: StructurePanel) => void;
   openStructurePath: string | null;
   onOpenMolecule: (smiles: string) => void;
+  onShowProperties: () => void;
+  /** Turn residue names in answers into viewer links; only useful once there is a structure. */
+  linkResidues: boolean;
+  /** Set on the latest answer only: offers next questions and puts the chosen one in the composer. */
+  onFollowup?: (text: string) => void;
 }
 
 /** Re-render every second while *running*, for live timers. */
@@ -39,14 +47,18 @@ function useNow(running: boolean): number {
  * is doing now, the steps it took (each with its duration and output), what
  * those steps produced, and finally its answer.
  */
-export function AgentTurnView({ turn, theme, onOpenStructure, openStructurePath, onOpenMolecule }: Props) {
+export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, onShowProperties, linkResidues, onFollowup }: Props) {
   const running = !turn.done;
   const now = useNow(running);
   const steps = toolSteps(turn);
   const elapsed = (turn.endedAt ?? now) - turn.at;
-  const panels = steps.flatMap((step) => step.result?.panels ?? []);
+  const panels = steps.flatMap((step) =>
+    (step.result?.panels ?? []).filter((panel) => !(panel.kind === "molecule" && step.name === "profile_interactions")),
+  );
   const lastThinking = [...turn.blocks].reverse().find((block) => block.kind === "thinking");
   const failedSteps = steps.filter((step) => step.result?.isError).length;
+  const answered = turn.done && turn.blocks.some((block) => block.kind === "text") && !turn.blocks.some((block) => block.kind === "cancelled");
+  const followups = onFollowup && answered ? suggestFollowups(panels, steps.map((step) => step.name)) : [];
 
   return (
     <article className="flex flex-col gap-3" aria-busy={running}>
@@ -78,16 +90,16 @@ export function AgentTurnView({ turn, theme, onOpenStructure, openStructurePath,
         <TurnResults
           panels={panels}
           theme={theme}
-          onOpenStructure={onOpenStructure}
           openStructurePath={openStructurePath}
           onOpenMolecule={onOpenMolecule}
+          onShowProperties={onShowProperties}
         />
       )}
 
       {turn.blocks.map((block) => {
         switch (block.kind) {
           case "text":
-            return <AnswerBlock key={block.id} content={block.content} />;
+            return <AnswerBlock key={block.id} content={block.content} linkResidues={linkResidues} />;
           case "error":
             return <ErrorBlock key={block.id} message={block.message} />;
           case "cancelled":
@@ -102,6 +114,22 @@ export function AgentTurnView({ turn, theme, onOpenStructure, openStructurePath,
             return null;
         }
       })}
+
+      {followups.length > 0 && onFollowup && (
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span className="text-faint text-[10px] font-semibold tracking-wider uppercase">Next</span>
+          {followups.map((text) => (
+            <button
+              key={text}
+              type="button"
+              onClick={() => onFollowup(text)}
+              className="text-muted cursor-pointer text-xs hover:text-[var(--color-structure)] hover:underline"
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+      )}
     </article>
   );
 }
@@ -223,16 +251,12 @@ function LiveStatus({ steps, thinking, now }: { steps: ToolStep[]; thinking: str
 
   return (
     <div className="flex flex-col gap-1" role="status">
-      <p className="text-muted flex items-center gap-2 text-xs">
-        <span className="flex gap-1" aria-hidden="true">
-          {[0, 150, 300].map((delay) => (
-            <span
-              key={delay}
-              className="size-1.5 animate-bounce rounded-full"
-              style={{ background: "var(--color-accent)", animationDelay: `${delay}ms` }}
-            />
-          ))}
-        </span>
+      <p className={`text-muted flex items-center gap-2 text-xs ${runningStep ? "" : "italic"}`}>
+        <span
+          aria-hidden="true"
+          className={`${runningStep ? "size-1.5" : "size-[7px]"} animate-pulse rounded-full`}
+          style={{ background: runningStep ? "var(--color-molecule)" : "var(--color-structure)" }}
+        />
         {label}…
       </p>
       {preview && !runningStep && (
@@ -246,19 +270,19 @@ function LiveStatus({ steps, thinking, now }: { steps: ToolStep[]; thinking: str
 function TurnResults({
   panels,
   theme,
-  onOpenStructure,
   openStructurePath,
   onOpenMolecule,
+  onShowProperties,
 }: {
   panels: Panel[];
   theme: Theme;
-  onOpenStructure: (panel: StructurePanel) => void;
   openStructurePath: string | null;
   onOpenMolecule: (smiles: string) => void;
+  onShowProperties: () => void;
 }) {
   const seen = new Set<string>();
   const unique = panels.filter((panel) => {
-    const key = panel.kind === "structure" ? panel.path : panel.kind === "molecule" ? panel.smiles : JSON.stringify(panel.columns) + panel.rows.length;
+    const key = panelKey(panel);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -267,18 +291,46 @@ function TurnResults({
     <PanelGrid
       panels={unique}
       theme={theme}
-      onOpenStructure={onOpenStructure}
       openStructurePath={openStructurePath}
       onOpenMolecule={onOpenMolecule}
+      onShowProperties={onShowProperties}
     />
   );
 }
 
-function AnswerBlock({ content }: { content: string }) {
+/** Links in answers; a residue link shows the residue in the 3D viewer instead of navigating. */
+function AnswerLink({ href, title, children }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const residue = residueFromHref(href);
+  if (!residue) {
+    return (
+      <a href={href} title={title} target="_blank" rel="noreferrer">
+        {children}
+      </a>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="residue-link"
+      title={`Show ${residue.resnum}${residue.chain ? `.${residue.chain}` : ""} in the 3D viewer`}
+      onClick={() => sendToViewer({ action: { kind: "residues", residues: [residue], mode: "focus" }, source: "answer" })}
+    >
+      {children}
+    </button>
+  );
+}
+
+const PLAIN_PLUGINS = [remarkGfm];
+const LINKED_PLUGINS = [remarkGfm, remarkResidueLinks];
+const COMPONENTS = { a: AnswerLink };
+
+function AnswerBlock({ content, linkResidues }: { content: string; linkResidues: boolean }) {
   return (
     <div className="group relative">
       <div className="markdown text-[0.9375rem]">
-        <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        <Markdown remarkPlugins={linkResidues ? LINKED_PLUGINS : PLAIN_PLUGINS} components={COMPONENTS}>
+          {content}
+        </Markdown>
       </div>
       <div className="mt-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 touch:opacity-100">
         <CopyButton value={content} label="Copy answer" />

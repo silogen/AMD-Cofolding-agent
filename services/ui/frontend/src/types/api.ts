@@ -23,6 +23,85 @@ export interface StructurePanel {
   /** Where to fetch the file from. */
   url: string;
   format: "cif" | "pdb";
+  /** The ligand in this complex, when the tool result says which it is. */
+  smiles?: string;
+  label?: string | null;
+  metrics?: StructureMetrics;
+}
+
+/** Boltz and PoseBusters values of one predicted complex. */
+export interface StructureMetrics {
+  confidence?: number;
+  ligandIptm?: number;
+  iptm?: number;
+  plddt?: number;
+  /** log10(IC50 / 1 µM); lower binds tighter. */
+  affinity?: number;
+  affinity1?: number;
+  affinity2?: number;
+  binderProbability?: number;
+  posebustersPassed?: number;
+  posebustersTotal?: number;
+  failedChecks?: string[];
+}
+
+/** One predicted endpoint: an ensemble mean, its spread and its unit. */
+export interface PropertyValue {
+  mean: number;
+  std?: number;
+  unit?: string;
+  condition?: string;
+}
+
+/** ADMET or RetroDMTA predictions, endpoints by molecule. */
+export interface PropertiesPanel {
+  kind: "properties";
+  tool: string;
+  service: string | null;
+  target: string | null;
+  endpoints: string[];
+  molecules: {
+    smiles: string | null;
+    standardized: string | null;
+    label: string | null;
+    ok: boolean;
+    error: string | null;
+    /** Inside the models' applicability domain. */
+    adPass: boolean | null;
+    values: Record<string, PropertyValue>;
+  }[];
+}
+
+/** One protein-ligand contact from the interaction profiler. */
+export interface Contact {
+  type: string;
+  subtype: string | null;
+  chain: string | null;
+  resname: string;
+  resnum: number | null;
+  /** "ASN140". */
+  label: string;
+  receptorAtom: string | null;
+  ligandAtom: string | null;
+  /** 0-based index into the ligand's atoms, -1 or null when not attributable. */
+  ligandAtomIndex: number | null;
+  distance: number | null;
+  fragment: string | null;
+  confidence: unknown;
+}
+
+/** The contacts of one complex. */
+export interface InteractionsPanel {
+  kind: "interactions";
+  tool: string;
+  name: string | null;
+  /** The structure these contacts were measured on, as a structure panel path. */
+  structurePath: string | null;
+  smiles: string | null;
+  error: string | null;
+  counts: Record<string, number>;
+  contacts: Contact[];
+  totalContacts: number;
 }
 
 /** A ligand as SMILES, drawn as a 2D graph. */
@@ -43,7 +122,7 @@ export interface TablePanel {
   truncated: boolean;
 }
 
-export type Panel = StructurePanel | MoleculePanel | TablePanel;
+export type Panel = StructurePanel | MoleculePanel | TablePanel | PropertiesPanel | InteractionsPanel;
 
 // ---------------------------------------------------------------------------
 // events — what the gateway pushes down the WebSocket

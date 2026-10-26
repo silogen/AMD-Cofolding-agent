@@ -165,3 +165,193 @@ def test_a_relative_path_is_read_from_the_shared_volume(shared_root):
 def test_a_relative_path_cannot_escape_the_shared_volume():
     raw = json.dumps({"structures": ["../outside/model_0.cif"]})
     assert artifacts.extract_panels("list_shared_assets", raw) == []
+
+
+# -- structures carry their molecule and confidence ------------------------
+
+
+def test_scored_structure_carries_smiles_and_gate_metrics(shared_root):
+    path = str(shared_root / "predictions" / "out_1" / "model_0.pdb")
+    raw = json.dumps(
+        {
+            "molecules": [
+                {
+                    "smiles": "CCO",
+                    "total_score": 0.7,
+                    "components": {
+                        "boltz": {
+                            "raw": -1.2,
+                            "details": {
+                                "structure_path": path,
+                                "confidence_score": 0.81,
+                                "ligand_iptm": 0.66,
+                                "affinity_pred_value": -1.2,
+                                "affinity_probability_binary": 0.9,
+                            },
+                        },
+                        "posebusters": {
+                            "raw": 1.0,
+                            "details": {"n_checks_passed": 18, "n_checks_total": 19, "failed_checks": ["minimum_distance"]},
+                        },
+                    },
+                },
+                {"smiles": "CCN", "total_score": 0.1, "components": {}},
+            ]
+        }
+    )
+
+    structure = only(artifacts.extract_panels("score_molecules", raw), "structure")
+
+    assert structure["path"] == "predictions/out_1/model_0.pdb"
+    assert structure["smiles"] == "CCO"
+    assert structure["metrics"] == {
+        "confidence": 0.81,
+        "ligandIptm": 0.66,
+        "affinity": -1.2,
+        "binderProbability": 0.9,
+        "posebustersPassed": 18,
+        "posebustersTotal": 19,
+        "failedChecks": ["minimum_distance"],
+    }
+
+
+# -- ADMET and RetroDMTA ---------------------------------------------------
+
+
+def test_admet_result_yields_a_property_panel_and_the_molecule():
+    raw = json.dumps(
+        {
+            "service": "admet",
+            "n": 1,
+            "results": [
+                {
+                    "input_smiles": "Cn1cnc2c1c(=O)n(C)c(=O)n2C",
+                    "standardized_smiles": "Cn1c(=O)c2c(ncn2C)n(C)c1=O",
+                    "ok": True,
+                    "predictions": {
+                        "logp": {"mean": 0.05, "std": 0.07, "unit": "logP", "n_models": 3, "per_model": {"a": 0.1}},
+                        "aqueous_solubility": {"mean": -0.86, "std": 0.15, "unit": "log10(mol/L)"},
+                    },
+                    "applicability_domain": {"AD Tanimoto": {"pass": True}, "AD Pass": True},
+                }
+            ],
+        }
+    )
+
+    panels = artifacts.extract_panels("predict_admet", raw)
+
+    assert kinds(panels) == ["properties", "molecule"]
+    props = panels[0]
+    assert props["endpoints"] == ["logp", "aqueous_solubility"]
+    molecule = props["molecules"][0]
+    assert molecule["smiles"] == "Cn1cnc2c1c(=O)n(C)c(=O)n2C"
+    assert molecule["adPass"] is True
+    assert molecule["values"]["logp"] == {"mean": 0.05, "std": 0.07, "unit": "logP"}
+    assert panels[1]["smiles"] == "Cn1cnc2c1c(=O)n(C)c(=O)n2C"
+
+
+def test_flat_retrodmta_records_pair_mean_and_std():
+    raw = json.dumps(
+        {
+            "service": "retrodmta",
+            "target": "FXA",
+            "results": [
+                {"smiles": "CCO", "pIC50_mean": 6.1, "pIC50_std": 0.3},
+                {"smiles": "CCN", "pIC50_mean": 5.2, "pIC50_std": 0.4},
+            ],
+        }
+    )
+
+    props = only(artifacts.extract_panels("predict_retrodmta", raw), "properties")
+
+    assert props["target"] == "FXA"
+    assert props["endpoints"] == ["pIC50"]
+    assert props["molecules"][1]["values"] == {"pIC50": {"mean": 5.2, "std": 0.4}}
+
+
+# -- interaction profiles --------------------------------------------------
+
+
+def test_interaction_profile_yields_contacts_linked_to_the_structure(shared_root):
+    path = str(shared_root / "predictions" / "out_1" / "model_0.pdb")
+    raw = json.dumps(
+        {
+            "batch_id": "profile",
+            "molecules": [
+                {
+                    "metadata": {"name": "mol_0", "source": path, "ligand_smiles": "CCO"},
+                    "interactions": [
+                        {
+                            "interaction_type": "hbond",
+                            "receptor_chain": "A",
+                            "receptor_resname": "ASN",
+                            "receptor_resnum": 140,
+                            "receptor_atom_name": "ND2",
+                            "ligand_atom_name": "O1",
+                            "ligand_atom_idx": 2,
+                            "distance": 2.9,
+                            "fragment": "hydroxyl",
+                        },
+                        {"interaction_type": "hydrophobic", "receptor_chain": "A", "receptor_resname": "LEU", "receptor_resnum": 92},
+                    ],
+                    "error": None,
+                }
+            ],
+        }
+    )
+
+    panels = artifacts.extract_panels("profile_interactions", raw)
+
+    profile = only(panels, "interactions")
+    assert "table" not in kinds(panels)
+    assert profile["structurePath"] == "predictions/out_1/model_0.pdb"
+    assert profile["smiles"] == "CCO"
+    assert profile["counts"] == {"hbond": 1, "hydrophobic": 1}
+    first = profile["contacts"][0]
+    assert first["label"] == "ASN140"
+    assert first["chain"] == "A"
+    assert first["ligandAtomIndex"] == 2
+    assert first["distance"] == 2.9
+
+
+def test_profile_without_paths_uses_the_structures_it_was_given(shared_root):
+    path = str(shared_root / "predictions" / "out_2" / "model_0.pdb")
+    raw = json.dumps(
+        {
+            "molecules": [
+                {
+                    "metadata": {"name": "mol_0", "source": None, "ligand_smiles": "CCO"},
+                    "composition": {"fragments": [{"name": "benzene", "smiles": "c1ccccc1"}]},
+                    "interactions": [{"interaction_type": "ch_pi", "receptor_resname": "TRP", "receptor_resnum": 81}],
+                }
+            ]
+        }
+    )
+
+    panels = artifacts.extract_panels("profile_interactions", raw, {"structure_paths": [path]})
+
+    assert kinds(panels) == ["interactions"]
+    assert only(panels, "interactions")["structurePath"] == "predictions/out_2/model_0.pdb"
+
+
+def test_scores_reported_as_text_are_read_as_numbers(shared_root):
+    path = str(shared_root / "predictions" / "out_3" / "mol_0_model_0.pdb")
+    raw = json.dumps(
+        {
+            "molecules": [
+                {
+                    "smiles": "CCO",
+                    "components": {
+                        "Boltz Affinity": {
+                            "details": {"confidence_score": "0.98", "ligand_iptm": "0.97", "structure_path": path}
+                        },
+                        "Pose Quality": {"details": {"n_checks_passed": "18", "n_checks_total": "22"}},
+                    },
+                }
+            ]
+        }
+    )
+
+    structure = only(artifacts.extract_panels("score_molecules", raw), "structure")
+
+    assert structure["metrics"] == {"confidence": 0.98, "ligandIptm": 0.97, "posebustersPassed": 18, "posebustersTotal": 22}
