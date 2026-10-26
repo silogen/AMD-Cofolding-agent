@@ -27,7 +27,7 @@ export function splitResidues(text: string): Segment[] {
   for (const match of text.matchAll(IN_TEXT)) {
     const start = match.index ?? 0;
     if (start > last) out.push({ text: text.slice(last, start) });
-    out.push({ text: match[0], residue: { chain: match[3] ?? null, resnum: Number(match[2]) } });
+    out.push({ text: match[0], residue: { chain: match[3] ?? null, resnum: Number(match[2]), resname: match[1].toUpperCase() } });
     last = start + match[0].length;
   }
   if (last < text.length) out.push({ text: text.slice(last) });
@@ -36,15 +36,19 @@ export function splitResidues(text: string): Segment[] {
 
 const HREF_PREFIX = "#residue/";
 
+/** "#residue/ASN140/A"; the name tells the viewer which numbering the answer used. */
 export function residueHref(residue: Residue): string {
-  return `${HREF_PREFIX}${residue.resnum}${residue.chain ? `/${residue.chain}` : ""}`;
+  return `${HREF_PREFIX}${residue.resname ?? ""}${residue.resnum}${residue.chain ? `/${residue.chain}` : ""}`;
 }
 
 export function residueFromHref(href: string | undefined): Residue | null {
   if (!href?.startsWith(HREF_PREFIX)) return null;
-  const [resnum, chain] = href.slice(HREF_PREFIX.length).split("/");
-  const value = Number(resnum);
-  return Number.isFinite(value) ? { resnum: value, chain: chain || null } : null;
+  const [id, chain] = href.slice(HREF_PREFIX.length).split("/");
+  const match = /^([A-Z]{3})?(\d+)$/.exec(id ?? "");
+  if (!match) return null;
+  const residue: Residue = { resnum: Number(match[2]), chain: chain || null };
+  if (match[1]) residue.resname = match[1];
+  return residue;
 }
 
 /** Remark plugin: residue names in text become residue links. Code and existing links are left alone. */

@@ -868,6 +868,8 @@ export interface TargetFacts {
   function: string | null;
   sequence: string | null;
   sequenceLength: number | null;
+  /** The canonical sequence from UniProt, which residue numbers refer to; `sequence` may be a construct. */
+  uniprotSequence: string | null;
   chains: string[];
   pdbIds: string[];
   pdbCount: number | null;
@@ -891,6 +893,7 @@ export const emptyTargetFacts = (): TargetFacts => ({
   function: null,
   sequence: null,
   sequenceLength: null,
+  uniprotSequence: null,
   chains: [],
   pdbIds: [],
   pdbCount: null,
@@ -961,6 +964,7 @@ export function mergeUniprot(facts: TargetFacts, payload: unknown, tool = "fetch
       function: str(entry.function) ?? facts.function,
       sequence: sequence ?? facts.sequence,
       sequenceLength: num(entry.sequence_length) ?? (sequence ? sequence.length : facts.sequenceLength),
+      uniprotSequence: sequence ?? facts.uniprotSequence,
       pdbIds: pdbIds.length ? pdbIds : facts.pdbIds,
       pdbCount: num(entry.pdb_count) ?? facts.pdbCount,
     },

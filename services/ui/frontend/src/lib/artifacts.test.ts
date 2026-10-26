@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { InteractionsPanel, Panel, StructurePanel, ToolResultEvent, Turn } from "../types/api";
-import { collectArtifacts, contactsFor, sameFile } from "./artifacts";
+import { collectArtifacts, contactsFor, isResultPanel, sameFile } from "./artifacts";
 
 const profile: InteractionsPanel = {
   kind: "interactions",
@@ -18,7 +18,7 @@ const profile: InteractionsPanel = {
   totalContacts: 1,
 };
 
-function turnWith(panels: Panel[]): Turn {
+function turnWith(panels: Panel[], tool = "profile_interactions"): Turn {
   return {
     role: "agent",
     id: "t1",
@@ -28,7 +28,7 @@ function turnWith(panels: Panel[]): Turn {
       {
         kind: "tool",
         id: "c1",
-        name: "profile_interactions",
+        name: tool,
         arguments: {},
         at: 1,
         result: { panels } as unknown as ToolResultEvent,
@@ -62,6 +62,14 @@ describe("collectArtifacts", () => {
     const { structures } = collectArtifacts([turnWith([predicted, profile])]);
     expect(structures).toHaveLength(1);
     expect(structures[0].item.metrics).toEqual({ confidence: 0.98 });
+  });
+});
+
+describe("isResultPanel", () => {
+  it("keeps a listing of the shared volume out of the conversation's structures", () => {
+    const listed: StructurePanel = { kind: "structure", tool: "list_shared_assets", name: "a.pdb", path: "predictions/out_1/a.pdb", url: "", format: "pdb" };
+    expect(collectArtifacts([turnWith([listed], "list_shared_assets")]).structures).toHaveLength(0);
+    expect(isResultPanel("score_molecules", listed)).toBe(true);
   });
 });
 

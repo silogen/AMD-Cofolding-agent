@@ -31,6 +31,18 @@ export interface Artifacts {
   steps: ToolStep[];
 }
 
+/**
+ * Whether a panel of a tool's result is a result. Older sessions stored a
+ * contact profile's fragments (an ester, a benzene) as molecules, and a
+ * listing of the shared volume names every complex ever predicted; those
+ * stay in the Assets tab.
+ */
+export function isResultPanel(tool: string, panel: Panel): boolean {
+  if (panel.kind === "molecule" && tool === "profile_interactions") return false;
+  if (panel.kind === "structure" && tool === "list_shared_assets") return false;
+  return true;
+}
+
 /** One key per distinct result, so a result shown twice is shown once. */
 export function panelKey(panel: Panel): string {
   switch (panel.kind) {
@@ -72,14 +84,13 @@ export function collectArtifacts(turns: Turn[]): Artifacts {
       if (block.kind !== "tool") continue;
       steps.push(block);
       for (const panel of block.result?.panels ?? []) {
+        if (!isResultPanel(block.name, panel)) continue;
         const sourced = { tool: block.name, at: block.at };
         switch (panel.kind) {
           case "structure":
             latest(structures, panel.path, { item: panel, ...sourced });
             break;
           case "molecule":
-            // Older sessions stored a contact profile's fragments (an ester, a benzene) as molecules.
-            if (block.name === "profile_interactions") break;
             latest(molecules, panel.smiles, { item: panel, ...sourced });
             break;
           case "interactions":

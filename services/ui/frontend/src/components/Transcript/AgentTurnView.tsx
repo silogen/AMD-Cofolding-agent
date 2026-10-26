@@ -8,7 +8,7 @@ import type { AgentTurn, Panel, StructurePanel, TurnBlock } from "../../types/ap
 import type { Theme } from "../../hooks/useTheme";
 import { toolSteps } from "../../lib/transcript";
 import { clock, duration, summarise } from "../../lib/format";
-import { panelKey } from "../../lib/artifacts";
+import { isResultPanel, panelKey } from "../../lib/artifacts";
 import { remarkResidueLinks, residueFromHref } from "../../lib/residueLinks";
 import { sendToViewer } from "../../lib/viewerBus";
 import { openWorkbench } from "../../lib/workbenchBus";
@@ -56,7 +56,7 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
   const steps = toolSteps(turn);
   const elapsed = (turn.endedAt ?? now) - turn.at;
   const panels = steps.flatMap((step) =>
-    (step.result?.panels ?? []).filter((panel) => !(panel.kind === "molecule" && step.name === "profile_interactions")),
+    (step.result?.panels ?? []).filter((panel) => isResultPanel(step.name, panel)),
   );
   const lastThinking = [...turn.blocks].reverse().find((block) => block.kind === "thinking");
   const failedSteps = steps.filter((step) => step.result?.isError).length;
@@ -154,7 +154,7 @@ function GateCallout({ structures }: { structures: StructurePanel[] }) {
     <Callout tone="warn" title={one ? `${one.label || one.name} fails the confidence gate` : `${structures.length} poses fail the confidence gate`}>
       <p>
         {one
-          ? `${gate(one.metrics).reasons.join("; ")}. Treat its affinity as unreliable.`
+          ? `${gate(one.metrics).reasons.join("; ")}. Read the affinity with caution.`
           : "Their affinities are not reliable; check the pose quality before comparing them."}
       </p>
     </Callout>

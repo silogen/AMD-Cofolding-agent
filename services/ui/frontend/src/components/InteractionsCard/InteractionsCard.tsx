@@ -91,8 +91,7 @@ export function InteractionsCard({ panel }: { panel: InteractionsPanel }) {
         <button
           type="button"
           onClick={() => sendToViewer({ path, action: { kind: "contacts", type: null }, source: "chat" })}
-          className="cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold text-white hover:opacity-90"
-          style={{ background: "var(--color-accent)" }}
+          className="border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium whitespace-nowrap"
         >
           Show on structure
         </button>

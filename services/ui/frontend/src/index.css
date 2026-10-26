@@ -329,7 +329,7 @@
 .molstar-host .msp-viewport-controls-buttons .msp-btn-icon:hover {
   color: var(--color-accent-strong) !important;
 }
-/* The hover label sits top right, next to Mol*'s buttons, clear of the command line. */
+/* The hover label sits top right, next to Mol*'s buttons. */
 .molstar-host .msp-highlight-toast-wrapper {
   top: 8px;
   right: 48px;

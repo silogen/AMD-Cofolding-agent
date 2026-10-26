@@ -8,9 +8,9 @@ describe("splitResidues", () => {
   it("finds residues in prose", () => {
     expect(splitResidues("the ASN140 hydrogen bond and a Trp 81.A stack")).toEqual([
       { text: "the " },
-      { text: "ASN140", residue: { chain: null, resnum: 140 } },
+      { text: "ASN140", residue: { chain: null, resnum: 140, resname: "ASN" } },
       { text: " hydrogen bond and a " },
-      { text: "Trp 81.A", residue: { chain: "A", resnum: 81 } },
+      { text: "Trp 81.A", residue: { chain: "A", resnum: 81, resname: "TRP" } },
       { text: " stack" },
     ]);
   });
@@ -24,6 +24,7 @@ describe("residue hrefs", () => {
   it("round-trips", () => {
     expect(residueFromHref(residueHref({ chain: "B", resnum: 92 }))).toEqual({ chain: "B", resnum: 92 });
     expect(residueFromHref(residueHref({ chain: null, resnum: 140 }))).toEqual({ chain: null, resnum: 140 });
+    expect(residueFromHref(residueHref({ chain: "A", resnum: 140, resname: "ASN" }))).toEqual({ chain: "A", resnum: 140, resname: "ASN" });
     expect(residueFromHref("https://example.org")).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { callTool } from "../../lib/api";
 import {
   TRANSFORM_TYPES,
@@ -36,8 +36,9 @@ import {
   type TtpSection,
   type TtpSummary,
 } from "../../lib/ttp";
-import { TtpBuilder } from "../TtpBuilder/TtpBuilder";
 import { TransformCurve } from "./TransformCurve";
+
+const TtpBuilder = lazy(() => import("../TtpBuilder/TtpBuilder").then((module) => ({ default: module.TtpBuilder })));
 
 interface Props {
   /** Edits are kept per session, in localStorage. */
@@ -402,14 +403,16 @@ function Shell({
       </div>
       {children}
       {building && (
-        <TtpBuilder
-          onClose={() => setBuilding(false)}
-          onCreated={(ttp) => {
-            setBuilding(false);
-            onSelect(ttp.id);
-            onRefresh();
-          }}
-        />
+        <Suspense fallback={null}>
+          <TtpBuilder
+            onClose={() => setBuilding(false)}
+            onCreated={(ttp) => {
+              setBuilding(false);
+              onSelect(ttp.id);
+              onRefresh();
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );

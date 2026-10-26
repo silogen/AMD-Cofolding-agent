@@ -90,8 +90,7 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
         <button
           type="button"
           onClick={() => show()}
-          className="cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold text-white transition-opacity hover:opacity-90 touch:min-h-11 touch:px-3"
-          style={{ background: "var(--color-accent)" }}
+          className="border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium whitespace-nowrap touch:min-h-11 touch:px-3"
         >
           {isOpen ? "Showing in viewer" : "Open viewer"}
         </button>

@@ -28,9 +28,9 @@ export function PanelGrid({ panels, theme, openStructurePath, onOpenMolecule, on
   const tables: TablePanel[] = of("table");
 
   return (
-    <div className="space-y-3">
+    <div className="@container space-y-3">
       {structures.length > 0 && (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 @2xl:grid-cols-2">
           {structures.slice(0, 6).map((panel) => (
             <StructureCard key={panel.path} panel={panel} theme={theme} isOpen={openStructurePath === panel.path} />
           ))}
@@ -50,7 +50,7 @@ export function PanelGrid({ panels, theme, openStructurePath, onOpenMolecule, on
 
       {molecules.length > 0 && (
         <Folded label={`${molecules.length} molecule${molecules.length === 1 ? "" : "s"}`}>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 @md:grid-cols-2 @3xl:grid-cols-3">
             {molecules.map((panel) => (
               <MoleculeCard key={panel.smiles} panel={panel} theme={theme} onOpen={onOpenMolecule} />
             ))}
