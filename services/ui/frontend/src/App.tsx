@@ -1,57 +1,212 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useCallback, useState } from "react";
-import { useChat } from "./hooks/useChat";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "./hooks/useTheme";
+import { useSession, type SessionRequest } from "./hooks/useSession";
+import { useSessions } from "./hooks/useSessions";
 import { Header } from "./components/Header/Header";
+import { SessionRail } from "./components/SessionRail/SessionRail";
 import { Transcript } from "./components/Transcript/Transcript";
-import { Composer } from "./components/Composer/Composer";
-import { WorkspacePanel } from "./components/WorkspacePanel/WorkspacePanel";
+import { Composer, type ComposerHandle } from "./components/Composer/Composer";
+import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
+import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
 import type { ViewStyle } from "./components/StructureViewer/StructureViewer";
-import type { StructurePanel } from "./types/api";
+import type { SessionSummary, StructurePanel } from "./types/api";
+import { collectArtifacts } from "./lib/artifacts";
+import { availableCommands } from "./lib/commands";
+import { download, sessionEvents } from "./lib/api";
+import { sessionToMarkdown, slug } from "./lib/exportSession";
+
+/** The conversation in the address, so a reload or a shared link reopens it. */
+function sessionFromHash(): string | null {
+  const match = /^#\/s\/(s-[0-9-]+-[0-9a-f]+)$/.exec(window.location.hash);
+  return match ? match[1] : null;
+}
+
+const wide = () => window.matchMedia("(min-width: 1024px)").matches;
 
 /**
- * Chat and structure viewer.
+ * Conversations, chat and workbench.
  *
- * The layout is mobile first. One column is the base case: the conversation
- * fills the screen and the viewer opens over it on demand. The side-by-side
- * arrangement is an enhancement that appears at ``lg``, where there is finally
- * room for a viewer wide enough to rotate a protein in.
- *
- * Both halves are driven by the same conversation state: a structure the agent
- * produces appears inline in the transcript and, when opened, fills the viewer.
- * Nothing in the viewer exists without a message that produced it.
+ * Three columns on a wide screen: the saved conversations, the chat, and the
+ * workbench with what the chat produced. On a narrow screen the chat fills
+ * the screen and the other two open over it.
  */
 export default function App() {
   const { theme, toggle } = useTheme();
-  const { turns, connection, busy, model, tools, structures, send, reconnect } = useChat();
+  const [request, setRequest] = useState<SessionRequest>(() => ({ id: sessionFromHash(), nonce: 0 }));
+  const sessions = useSessions();
+  const { refresh: refreshSessions } = sessions;
 
-  // Only the structure the user picked is state. What the viewer shows is
-  // derived: until a pick is made, the newest structure wins, so the first
-  // complex appears by itself and later ones do not steal the view from a
-  // structure someone is reading.
+  const onAttached = useCallback(
+    (session: SessionSummary) => {
+      const hash = `#/s/${session.id}`;
+      if (window.location.hash !== hash) window.history.replaceState(null, "", hash);
+      refreshSessions();
+    },
+    [refreshSessions],
+  );
+
+  const chat = useSession(request, onAttached);
+  const { transcript, session, connection, agent } = chat;
+  const busy = transcript.busy;
+  const connected = connection === "open" && !chat.gatewayError;
+
+  const [railOpen, setRailOpen] = useState(wide);
+  const [workbenchOpen, setWorkbenchOpen] = useState(true);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [tab, setTab] = useState<WorkbenchTab>("structure");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const composerRef = useRef<ComposerHandle>(null);
+
+  const artifacts = useMemo(() => collectArtifacts(transcript.turns), [transcript.turns]);
   const [picked, setPicked] = useState<StructurePanel | null>(null);
   const [style, setStyle] = useState<ViewStyle>("cartoon");
+  const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
+  const activeStructure = picked ?? artifacts.structures[0]?.item ?? null;
 
-  // Two independent pieces of state, because the two layouts have opposite
-  // defaults: the sidebar is open until it is dismissed, while the sheet
-  // covers the conversation and so must only ever open on request.
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sheetOpen, setSheetOpen] = useState(false);
-
-  const newest = structures.find((panel): panel is StructurePanel => panel.kind === "structure") ?? null;
-  const active = picked ?? newest;
-
-  const openStructure = useCallback((panel: StructurePanel) => {
-    setPicked(panel);
-    setSidebarOpen(true);
-    setSheetOpen(true);
+  const open = useCallback((id: string | null) => {
+    setRequest((previous) => ({ id, nonce: previous.nonce + 1 }));
+    setPicked(null);
+    setSelectedSmiles(null);
+    if (!wide()) setRailOpen(false);
   }, []);
 
-  const disabled = connection !== "open" || busy;
-  const disabledReason =
-    connection !== "open" ? "Waiting for the agent…" : "The agent is working on your last request…";
+  // Back and forward move between conversations.
+  useEffect(() => {
+    const onHash = () => {
+      const id = sessionFromHash();
+      if (id && id !== session?.id) open(id);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [open, session?.id]);
+
+  // The list shows "working" from the session; refresh it when a turn ends.
+  useEffect(() => {
+    refreshSessions();
+  }, [busy, session?.title, refreshSessions]);
+
+  const showWorkbench = useCallback((next: WorkbenchTab) => {
+    setTab(next);
+    setWorkbenchOpen(true);
+    if (!wide()) setSheetOpen(true);
+  }, []);
+
+  const openStructure = useCallback(
+    (panel: StructurePanel) => {
+      setPicked(panel);
+      showWorkbench("structure");
+    },
+    [showWorkbench],
+  );
+
+  const openMolecule = useCallback(
+    (smiles: string) => {
+      setSelectedSmiles(smiles);
+      showWorkbench("molecules");
+    },
+    [showWorkbench],
+  );
+
+  const ask = useCallback((text: string) => {
+    setSheetOpen(false);
+    composerRef.current?.fill(text);
+  }, []);
+
+  const exportCurrent = useCallback(
+    async (format: "md" | "json") => {
+      if (!session) return;
+      const { session: summary, events } = await sessionEvents(session.id);
+      const name = slug(summary.title, summary.id);
+      if (format === "md") download(`${name}.md`, sessionToMarkdown(summary, events), "text/markdown");
+      else download(`${name}.json`, JSON.stringify({ session: summary, events }, null, 2), "application/json");
+    },
+    [session],
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((value) => !value);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const paletteItems = useMemo<PaletteItem[]>(() => {
+    const items: PaletteItem[] = [
+      { id: "new", group: "Conversation", label: "New conversation", run: () => open(null) },
+      ...(busy ? [{ id: "stop", group: "Conversation", label: "Stop the agent", run: chat.cancel }] : []),
+      ...(session
+        ? [
+            { id: "export-md", group: "Conversation", label: "Export as Markdown", run: () => void exportCurrent("md") },
+            { id: "export-json", group: "Conversation", label: "Export as JSON", run: () => void exportCurrent("json") },
+          ]
+        : []),
+      { id: "tab-structure", group: "Workbench", label: "Show the structure", run: () => showWorkbench("structure") },
+      { id: "tab-molecules", group: "Workbench", label: "Show molecules", run: () => showWorkbench("molecules") },
+      { id: "tab-tables", group: "Workbench", label: "Show tables", run: () => showWorkbench("tables") },
+      { id: "tab-activity", group: "Workbench", label: "Show tool activity", run: () => showWorkbench("activity") },
+      { id: "rail", group: "View", label: railOpen ? "Hide conversations" : "Show conversations", run: () => setRailOpen((v) => !v) },
+      {
+        id: "workbench",
+        group: "View",
+        label: workbenchOpen ? "Hide the workbench" : "Show the workbench",
+        run: () => setWorkbenchOpen((v) => !v),
+      },
+      { id: "theme", group: "View", label: theme === "dark" ? "Light theme" : "Dark theme", run: toggle },
+      ...availableCommands(agent?.tools ?? []).map((command) => ({
+        id: `cmd-${command.cmd}`,
+        group: "Prompts",
+        label: command.desc,
+        hint: command.cmd,
+        run: () => ask(command.template),
+      })),
+      ...sessions.sessions.map((entry) => ({
+        id: `s-${entry.id}`,
+        group: "Open conversation",
+        label: entry.title || "Untitled conversation",
+        hint: new Date(entry.updated).toLocaleDateString(),
+        run: () => open(entry.id),
+      })),
+    ];
+    return items;
+  }, [open, busy, chat.cancel, session, exportCurrent, showWorkbench, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
+
+  const workbenchProps = {
+    tab,
+    onTabChange: setTab,
+    artifacts,
+    theme,
+    activeStructure,
+    onSelectStructure: setPicked,
+    style,
+    onStyleChange: setStyle,
+    selectedSmiles,
+    onSelectSmiles: setSelectedSmiles,
+    onAsk: ask,
+  };
+
+  const rail = (
+    <SessionRail
+      sessions={sessions.sessions}
+      activeId={session?.id ?? null}
+      error={sessions.error}
+      onSelect={(id) => open(id)}
+      onNew={() => open(null)}
+      onRename={sessions.rename}
+      onDelete={async (id) => {
+        await sessions.remove(id);
+        if (id === session?.id) open(null);
+      }}
+      onClose={wide() ? undefined : () => setRailOpen(false)}
+    />
+  );
 
   return (
     <div className="bg-page flex h-full flex-col">
@@ -59,82 +214,106 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggle}
         connection={connection}
-        model={model}
-        toolCount={tools.length}
-        onReconnect={reconnect}
-        workspaceOpen={sidebarOpen}
-        onToggleWorkspace={() => setSidebarOpen((open) => !open)}
+        agent={agent}
+        gatewayError={chat.gatewayError}
+        title={session?.title ?? ""}
+        busy={busy}
+        onReconnect={chat.reconnect}
+        railOpen={railOpen}
+        onToggleRail={() => setRailOpen((value) => !value)}
+        workbenchOpen={wide() ? workbenchOpen : sheetOpen}
+        onToggleWorkbench={() => (wide() ? setWorkbenchOpen((value) => !value) : setSheetOpen((value) => !value))}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
 
-      <div className="flex min-h-0 flex-1">
+      {chat.gatewayError && (
+        <p role="alert" className="border-subtle border-b px-4 py-1.5 text-center text-xs" style={{ background: "var(--color-accent-soft)" }}>
+          {chat.gatewayError}
+        </p>
+      )}
+
+      <div className="relative flex min-h-0 flex-1">
+        {railOpen && (
+          <>
+            <div className="hidden lg:flex">{rail}</div>
+            <div className="fixed inset-0 z-40 flex lg:hidden">
+              {rail}
+              <button type="button" aria-label="Close" className="flex-1 bg-black/40" onClick={() => setRailOpen(false)} />
+            </div>
+          </>
+        )}
+
         <main className="flex min-w-0 flex-1 flex-col">
-          {/* The floating button is positioned against the transcript, not
-              against the whole column, so it never covers the composer. */}
           <div className="relative flex min-h-0 flex-1 flex-col">
             <Transcript
-              turns={turns}
-              busy={busy}
+              turns={transcript.turns}
               theme={theme}
               onOpenStructure={openStructure}
-              openStructurePath={active?.path ?? null}
+              openStructurePath={activeStructure?.path ?? null}
+              onOpenMolecule={openMolecule}
+              onPickPrompt={ask}
             />
-
-            {/*
-              Below lg the viewer is not on screen, so without this the only way
-              to reach a structure is to scroll back to the message that made it.
-              The button appears only once there is something to show.
-            */}
-            {active && !sheetOpen && (
+            {activeStructure && !sheetOpen && (
               <button
                 type="button"
                 onClick={() => setSheetOpen(true)}
                 className="absolute right-4 bottom-4 z-30 flex min-h-11 items-center gap-2 rounded-full px-4 text-xs font-semibold text-white shadow-lg lg:hidden"
                 style={{ background: "var(--color-accent)" }}
               >
-                <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3Z" strokeLinejoin="round" />
-                  <path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" strokeLinejoin="round" />
-                </svg>
-                View structure
+                Workbench
               </button>
             )}
           </div>
-
-          <Composer onSend={send} disabled={disabled} disabledReason={disabledReason} />
+          <Composer
+            ref={composerRef}
+            value={draft}
+            onChange={setDraft}
+            onSend={chat.send}
+            onStop={chat.cancel}
+            busy={busy}
+            connected={connected}
+            tools={agent?.tools ?? []}
+          />
         </main>
 
-        {/* Wide screens: the viewer sits beside the conversation. */}
-        {sidebarOpen && (
+        {workbenchOpen && (
           <div className="hidden lg:flex">
-            <WorkspacePanel
-              layout="sidebar"
-              structures={structures}
-              active={active}
-              onSelect={setPicked}
-              style={style}
-              onStyleChange={setStyle}
-              theme={theme}
-              onClose={() => setSidebarOpen(false)}
-            />
+            <Workbench layout="sidebar" {...workbenchProps} onClose={() => setWorkbenchOpen(false)} />
+          </div>
+        )}
+
+        {chat.notices.length > 0 && (
+          <div className="pointer-events-none absolute top-3 left-1/2 z-50 flex -translate-x-1/2 flex-col gap-2" aria-live="polite">
+            {chat.notices.map((notice) => (
+              <Toast key={notice.id} id={notice.id} message={notice.message} onDismiss={chat.dismissNotice} />
+            ))}
           </div>
         )}
       </div>
 
-      {/* Narrow screens: the viewer covers the conversation while it is open. */}
       {sheetOpen && (
         <div className="lg:hidden">
-          <WorkspacePanel
-            layout="sheet"
-            structures={structures}
-            active={active}
-            onSelect={setPicked}
-            style={style}
-            onStyleChange={setStyle}
-            theme={theme}
-            onClose={() => setSheetOpen(false)}
-          />
+          <Workbench layout="sheet" {...workbenchProps} onClose={() => setSheetOpen(false)} />
         </div>
       )}
+
+      {paletteOpen && <CommandPalette items={paletteItems} onClose={() => setPaletteOpen(false)} />}
+    </div>
+  );
+}
+
+function Toast({ id, message, onDismiss }: { id: number; message: string; onDismiss: (id: number) => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(() => onDismiss(id), 6000);
+    return () => window.clearTimeout(timer);
+  }, [id, onDismiss]);
+  return (
+    <div className="bg-raised border-subtle shadow-card pointer-events-auto flex items-center gap-3 rounded-lg border px-3 py-2 text-xs">
+      <span aria-hidden="true" className="h-4 w-0.5 rounded-full" style={{ background: "var(--color-accent)" }} />
+      {message}
+      <button type="button" onClick={() => onDismiss(id)} aria-label="Dismiss" className="text-muted hover:text-body cursor-pointer">
+        ×
+      </button>
     </div>
   );
 }

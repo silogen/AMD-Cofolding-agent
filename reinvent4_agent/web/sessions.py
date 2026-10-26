@@ -198,6 +198,9 @@ class LiveSession:
             self.meta["title"] = first_line[:_TITLE_CHARS]
         self.publish({"type": "user_message", "content": content})
         self.publish({"type": "status", "state": "busy"})
+        self.meta["turns"] = sum(1 for event in self.events if event.get("type") == "user_message")
+        self.meta["updated"] = _now()
+        self.store.save_meta(self.meta)
         self.running = asyncio.create_task(self._run_turn(content))
         return True
 
@@ -298,10 +301,16 @@ class SessionManager:
         return live
 
     def list(self) -> list[dict[str, Any]]:
+        """Sessions with at least one message, newest first.
+
+        Every new browser tab gets a session before anyone types, so the
+        empty ones are left out rather than filling the list.
+        """
         summaries = {meta["id"]: {**meta, "busy": False} for meta in self.store.list_meta()}
         for live in self._live.values():
             summaries[live.id] = live.summary()
-        return sorted(summaries.values(), key=lambda m: m.get("updated", ""), reverse=True)
+        shown = [s for s in summaries.values() if s.get("turns") or s.get("busy")]
+        return sorted(shown, key=lambda m: m.get("updated", ""), reverse=True)
 
     def rename(self, session_id: str, title: str) -> dict[str, Any] | None:
         live = self.get(session_id)

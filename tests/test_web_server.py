@@ -168,7 +168,14 @@ def test_a_new_connection_starts_a_session(agents):
         session = receive_until(ws, "session")
         assert session["id"].startswith("s-")
         assert session["lastSeq"] == 0
-        assert [s["id"] for s in client.get("/api/sessions").json()] == [session["id"]]
+        # Listed only once something was asked, so idle tabs leave no trace.
+        assert client.get("/api/sessions").json() == []
+        ws.send_json({"type": "user_message", "content": "quick hello"})
+        receive_until(ws, "user_message")
+        listed = client.get("/api/sessions").json()
+        assert [s["id"] for s in listed] == [session["id"]]
+        assert listed[0]["title"] == "quick hello"
+        assert listed[0]["turns"] == 1
 
 
 def test_a_disconnect_leaves_the_turn_running_and_a_reconnect_replays_it(agents):

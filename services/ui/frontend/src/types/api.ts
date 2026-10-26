@@ -49,26 +49,56 @@ export type Panel = StructurePanel | MoleculePanel | TablePanel;
 // events — what the gateway pushes down the WebSocket
 // ---------------------------------------------------------------------------
 
+/**
+ * Fields the gateway adds to every event it records in a session. Events
+ * that concern one browser only (ready, session, notice) have neither.
+ */
+export interface Recorded {
+  seq: number;
+  /** ISO 8601, UTC. */
+  ts: string;
+}
+
+/** Sent first on every connection; not part of the conversation. */
 export interface ReadyEvent {
   type: "ready";
   model: string;
   backend: string;
+  reasoningEffort: string | null;
   tools: string[];
 }
 
-export interface ThinkingEvent {
+/** Which conversation this socket is attached to. Sent after ready. */
+export interface SessionEvent extends SessionSummary {
+  type: "session";
+  /** Events up to this number are replayed right after this one. */
+  lastSeq: number;
+}
+
+/** A message for this browser only, such as a refused second question. */
+export interface NoticeEvent {
+  type: "notice";
+  message: string;
+}
+
+export interface UserMessageEvent extends Recorded {
+  type: "user_message";
+  content: string;
+}
+
+export interface ThinkingEvent extends Recorded {
   type: "thinking";
   content: string;
 }
 
-export interface ToolCallEvent {
+export interface ToolCallEvent extends Recorded {
   type: "tool_call";
   id: string;
   name: string;
   arguments: Record<string, unknown>;
 }
 
-export interface ToolResultEvent {
+export interface ToolResultEvent extends Recorded {
   type: "tool_result";
   id: string | null;
   name: string;
@@ -76,50 +106,72 @@ export interface ToolResultEvent {
   truncated: boolean;
   isError: boolean;
   panels: Panel[];
+  elapsedMs: number | null;
 }
 
-export interface AssistantMessageEvent {
+export interface AssistantMessageEvent extends Recorded {
   type: "assistant_message";
   content: string;
   inputTokens: number;
   outputTokens: number;
 }
 
-export interface StatusEvent {
+export interface StatusEvent extends Recorded {
   type: "status";
   state: "busy" | "idle";
 }
 
-export interface ErrorEvent {
+export interface CancelledEvent extends Recorded {
+  type: "cancelled";
+}
+
+export interface ErrorEvent extends Recorded {
   type: "error";
   message: string;
 }
 
-export interface MonitorAlertEvent {
+export interface MonitorAlertEvent extends Recorded {
   type: "monitor_alert";
   alert: Record<string, unknown>;
 }
 
-export interface MonitorResponseEvent {
+export interface MonitorResponseEvent extends Recorded {
   type: "monitor_response";
   content: string;
 }
 
-export type AgentEvent =
-  | ReadyEvent
+/** Events that belong to the conversation and are replayed on reconnect. */
+export type ConversationEvent =
+  | UserMessageEvent
   | ThinkingEvent
   | ToolCallEvent
   | ToolResultEvent
   | AssistantMessageEvent
   | StatusEvent
+  | CancelledEvent
   | ErrorEvent
   | MonitorAlertEvent
   | MonitorResponseEvent;
 
-/** The only message the browser sends. */
-export interface UserMessage {
-  type: "user_message";
-  content: string;
+export type AgentEvent = ReadyEvent | SessionEvent | NoticeEvent | ConversationEvent;
+
+/** What the browser sends. */
+export type ClientMessage = { type: "user_message"; content: string } | { type: "cancel" };
+
+// ---------------------------------------------------------------------------
+// sessions — saved conversations
+// ---------------------------------------------------------------------------
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  /** ISO 8601, UTC. */
+  created: string;
+  updated: string;
+  turns: number;
+  busy: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,9 +185,18 @@ export interface UserMessage {
  */
 export type TurnBlock =
   | { kind: "thinking"; id: string; content: string }
-  | { kind: "tool"; id: string; name: string; arguments: Record<string, unknown>; result?: ToolResultEvent }
+  | {
+      kind: "tool";
+      id: string;
+      name: string;
+      arguments: Record<string, unknown>;
+      /** Epoch ms when the call started. */
+      at: number;
+      result?: ToolResultEvent;
+    }
   | { kind: "text"; id: string; content: string }
-  | { kind: "error"; id: string; message: string };
+  | { kind: "error"; id: string; message: string }
+  | { kind: "cancelled"; id: string };
 
 export interface UserTurn {
   role: "user";
@@ -147,7 +208,10 @@ export interface UserTurn {
 export interface AgentTurn {
   role: "agent";
   id: string;
+  /** Epoch ms when the turn started. */
   at: number;
+  /** Epoch ms when it ended; unset while running. */
+  endedAt?: number;
   blocks: TurnBlock[];
   /** Set once the turn finishes; drives the "working" indicator. */
   done: boolean;

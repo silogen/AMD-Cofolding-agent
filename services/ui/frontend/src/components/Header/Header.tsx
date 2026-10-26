@@ -1,18 +1,25 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+import type { ReactNode } from "react";
 import type { ConnectionState } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
+import type { AgentInfo } from "../../hooks/useSession";
 
 interface Props {
   theme: Theme;
   onToggleTheme: () => void;
   connection: ConnectionState;
-  model: string | null;
-  toolCount: number;
+  agent: AgentInfo | null;
+  gatewayError: string | null;
+  title: string;
+  busy: boolean;
   onReconnect: () => void;
-  workspaceOpen: boolean;
-  onToggleWorkspace: () => void;
+  railOpen: boolean;
+  onToggleRail: () => void;
+  workbenchOpen: boolean;
+  onToggleWorkbench: () => void;
+  onOpenPalette: () => void;
 }
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
@@ -22,77 +29,136 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   error: "Disconnected",
 };
 
+/** The model name without its organisation prefix: "Qwen3.8-27B", not "Qwen/Qwen3.8-27B". */
+function shortModel(model: string): string {
+  return model.split("/").pop() ?? model;
+}
+
 export function Header({
   theme,
   onToggleTheme,
   connection,
-  model,
-  toolCount,
+  agent,
+  gatewayError,
+  title,
+  busy,
   onReconnect,
-  workspaceOpen,
-  onToggleWorkspace,
+  railOpen,
+  onToggleRail,
+  workbenchOpen,
+  onToggleWorkbench,
+  onOpenPalette,
 }: Props) {
   const healthy = connection === "open";
+  const status = gatewayError ?? (agent ? null : "Starting the agent…");
 
   return (
-    <header className="border-subtle bg-raised flex shrink-0 items-center gap-3 border-b px-4 py-2.5">
-      {/*
-        On a phone the full title truncates, so the short name is shown
-        instead and the full title returns once there is room for it.
-      */}
-      <div className="min-w-0">
-        <h1 className="truncate text-sm font-semibold">
-          <span className="hidden sm:inline">AI Cofolding Drug Design Agent</span>
-          <span className="sm:hidden">Cofolding Agent</span>
-        </h1>
-        <p className="text-faint truncate text-[11px]">
-          {model ? `${model} · ${toolCount} tools` : "Starting the agent…"}
-        </p>
+    <header className="border-subtle bg-raised flex shrink-0 items-center gap-3 border-b px-3 py-2">
+      <IconButton label={railOpen ? "Hide conversations" : "Show conversations"} pressed={railOpen} onClick={onToggleRail}>
+        <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16" />
+        </svg>
+      </IconButton>
+
+      <div className="flex min-w-0 items-center gap-2">
+        <span aria-hidden="true" className="h-5 w-1 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />
+        <div className="min-w-0">
+          <h1 className="truncate text-sm font-semibold">
+            <span className="hidden md:inline">AI Cofolding Drug Design Agent</span>
+            <span className="md:hidden">Cofolding Agent</span>
+          </h1>
+          <p className="text-faint truncate text-[11px]" title={title}>
+            {title || "New conversation"}
+            {busy && <span style={{ color: "var(--color-accent)" }}> · working</span>}
+          </p>
+        </div>
       </div>
 
       <div className="ml-auto flex items-center gap-1 sm:gap-2">
-        {/*
-          On a phone the connection state is a dot with an accessible label.
-          The word costs a third of the header width and says nothing the
-          colour does not already say.
-        */}
+        {agent && (
+          <div className="text-muted hidden items-center gap-1.5 text-[11px] xl:flex">
+            <Chip title={`${agent.backend} backend`}>{shortModel(agent.model)}</Chip>
+            {agent.reasoningEffort && <Chip title="Reasoning effort">effort {agent.reasoningEffort}</Chip>}
+            <Chip title={agent.tools.join(", ")}>{agent.tools.length} tools</Chip>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onOpenPalette}
+          title="Commands (Ctrl+K)"
+          className="bg-inset text-muted hover:text-body hidden cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-[11px] font-medium sm:flex"
+        >
+          Commands
+          <kbd className="border-subtle rounded border px-1 font-mono text-[10px]">Ctrl K</kbd>
+        </button>
+
         <button
           type="button"
           onClick={healthy ? undefined : onReconnect}
           disabled={healthy}
-          title={healthy ? "Connected to the agent" : "Try to reconnect"}
+          title={status ?? (healthy ? "Connected to the agent" : "Try to reconnect")}
           aria-label={CONNECTION_LABEL[connection]}
           className="bg-inset flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium disabled:cursor-default touch:min-h-11 touch:min-w-11 touch:justify-center"
         >
           <span
             aria-hidden="true"
             className={`size-1.5 rounded-full ${connection === "connecting" || connection === "closed" ? "animate-pulse" : ""}`}
-            style={{ background: healthy ? "var(--color-molecule)" : "var(--color-accent)" }}
+            style={{ background: healthy && !gatewayError ? "var(--color-molecule)" : "var(--color-accent)" }}
           />
           <span className="hidden sm:inline">{CONNECTION_LABEL[connection]}</span>
         </button>
 
-        <button
-          type="button"
-          onClick={onToggleWorkspace}
-          aria-pressed={workspaceOpen}
-          title={workspaceOpen ? "Hide the structure viewer" : "Show the structure viewer"}
-          className="bg-inset text-muted hover:text-body hidden cursor-pointer rounded-lg px-2.5 py-1.5 text-[11px] font-medium lg:block"
+        <IconButton
+          label={workbenchOpen ? "Hide the workbench" : "Show the workbench"}
+          pressed={workbenchOpen}
+          onClick={onToggleWorkbench}
         >
-          {workspaceOpen ? "Hide viewer" : "Show viewer"}
-        </button>
+          <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M15 4v16" />
+          </svg>
+        </IconButton>
 
-        <button
-          type="button"
-          onClick={onToggleTheme}
-          aria-label={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"}
-          title={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"}
-          className="bg-inset text-muted hover:text-body grid size-8 cursor-pointer place-items-center rounded-lg touch:size-11"
-        >
+        <IconButton label={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"} onClick={onToggleTheme}>
           {theme === "dark" ? <SunIcon /> : <MoonIcon />}
-        </button>
+        </IconButton>
       </div>
     </header>
+  );
+}
+
+function Chip({ children, title }: { children: ReactNode; title?: string }) {
+  return (
+    <span title={title} className="bg-inset rounded-full px-2 py-0.5 font-mono">
+      {children}
+    </span>
+  );
+}
+
+function IconButton({
+  label,
+  pressed,
+  onClick,
+  children,
+}: {
+  label: string;
+  pressed?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      aria-pressed={pressed}
+      title={label}
+      className="bg-inset text-muted hover:text-body grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg touch:size-11"
+    >
+      {children}
+    </button>
   );
 }
 
