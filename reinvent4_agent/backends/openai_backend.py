@@ -59,6 +59,11 @@ _REASONING_MODEL_RE = re.compile(
 #: before a single visible token is produced.
 MIN_REASONING_TOKEN_CAP = 32768
 
+#: Seconds to wait for one reply.  The SDK default (10 minutes, then retry)
+#: suits hosted APIs; a local reasoning model writing tens of thousands of
+#: tokens can need longer, and every retry starts the reply from scratch.
+REQUEST_TIMEOUT = float(os.environ.get("REINVENT4_AGENT_REQUEST_TIMEOUT") or 3600)
+
 _DEPLOYMENTS_PATH = "/openai/deployments/"
 
 #: OpenAI-compatible route some endpoints expose alongside the Azure
@@ -133,7 +138,7 @@ class OpenAIBackend(LLMBackend):
             default_headers["Ocp-Apim-Subscription-Key"] = gateway_key
             default_headers["user"] = _get_username()
 
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = {"timeout": REQUEST_TIMEOUT}
         if default_headers:
             kwargs["default_headers"] = default_headers
         if not verify_ssl:
