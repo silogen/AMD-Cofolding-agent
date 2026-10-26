@@ -1,15 +1,24 @@
 # Kubernetes
 
-This directory deploys the six Compose containers as six Kubernetes
-Deployments plus an in-cluster AIM endpoint. Run the scripts from
-`examples/dd_agentic/` (the Dockerfiles and gitignored build inputs live
-there).
+This directory deploys the Compose stack as one Kubernetes Deployment per
+container, plus the fleet control plane and an in-cluster AIM endpoint. Run
+the scripts from `examples/dd_agentic/` (the Dockerfiles and gitignored build
+inputs live there).
+
+The manifests carry no architecture constraint and there is no per-arch
+variant: a `*:local` tag resolves to whatever was imported into that node's
+containerd, so the node's architecture is settled by where the images were
+built. Building on the node itself -- the documented path below -- makes the
+question moot. Building on an arm64 Mac does not: the base images
+(`python:3.1x-slim`, `mambaorg/micromamba`) are multi-arch, so the build
+silently produces arm64, containerd imports it without complaint, and the pods
+then crash-loop with `exec format error`. See "Building off-node" below.
 
 ```
 k8s/
 ├── README.md                 # this file
 ├── apply.sh                  # kustomize overlay: namespace + nodeSelector
-├── build-images.sh           # docker build of the six selected image tags
+├── build-images.sh           # docker build of the twelve image tags
 ├── load-images.sh            # import those tags into kubelet containerd
 ├── rbac.yaml                 # developer grant for demo-lux on internal staging
 ├── manifests/                # kustomize resources (Deployments, AIMService, …)
@@ -24,8 +33,8 @@ k8s/
     └── verify-boltz-placement.py   # concurrent batches land on idle replicas
 ```
 
-The manifests in [`manifests/`](manifests) run each of the six Compose
-containers as its own Deployment:
+The manifests in [`manifests/`](manifests) run each container as its own
+Deployment:
 
 | Deployment | Service | GPU | `/shared` |
 |------------|---------|-----|-----------|
@@ -41,6 +50,24 @@ containers as its own Deployment:
 | `dd-agentic-interaction-profiler` | `dd-agentic-interaction-profiler:8083` | no | yes |
 | `dd-agentic-admet` | `dd-agentic-admet:8084` | no | no |
 | `dd-agentic-retrodmta` | `dd-agentic-retrodmta:8085` | no | no |
+| `dd-agentic-synthesis-planner` | `dd-agentic-synthesis-planner:8088` | no | no |
+| `dd-agentic-structure-prep` | `dd-agentic-structure-prep:8089` | no | yes |
+| `dd-agentic-annotation` | `dd-agentic-annotation:8090` | no | yes |
+
+The last two are tool services rather than scorers: the agents call them
+between campaigns, not the scoring pipeline during one, so they carry no
+`service_url`. They are reached through `SP_SERVICE_URL` and
+`ANNOTATION_SERVICE_URL` in the ConfigMap, which the agent, supervisor and
+conductor all read. Unset, the structure-prep tools fall back to the Compose
+hostname `http://structure-prep:8080`, which does not resolve here, and the
+annotation fetchers go straight to UniProt instead of the cache -- both of
+which look like a broken tool rather than an unwired one.
+
+`dd-agentic-synthesis-planner` mounts the building-block catalog read-only
+from the volume's `aizynth-stock` subPath rather than from the image, which is
+why it is the one scorer with a volume but no `/shared`. The catalog is 1-10 GB
+and is staged separately; without it the service still starts, and
+availability checks answer `unknown` rather than failing.
 
 The `service_url`s in [`manifests/configmap.yaml`](manifests/configmap.yaml)
 are those Service names, unqualified so they resolve in whichever namespace
@@ -397,6 +424,27 @@ chmod +x k8s/build-images.sh k8s/load-images.sh k8s/apply.sh
 The default image tag is `local`. To use another tag, pass the same `--tag`
 value to all three scripts.
 
+### Building off-node
+
+`build-images.sh` assumes it runs where the images will run, so it sets no
+`--platform`. On an arm64 Mac that produces arm64 images, which import cleanly
+and then fail at runtime with `exec format error` -- there is no manifest-level
+guard against this, because the tag is resolved by containerd, not by the
+manifest. Two further things bite on an AMD laptop: Zscaler's TLS interception
+breaks the `conda.anaconda.org` fetches that `structure-prep` and
+`synthesis-planner` depend on, and `reinvent-runner` needs the ROCm base image.
+
+Build on the GPU node where possible. Where it is not, `build-images.local.sh`
+(gitignored, since it encodes one machine's proxy) forces
+`--platform linux/amd64`, injects the corporate CA into the Dockerfiles that
+need it, and verifies every tag is `amd64` before you import. Check the
+architecture of what you are about to ship either way:
+
+```bash
+docker image inspect --format '{{.Architecture}}  {{.RepoTags}}' \
+    $(docker images --filter 'reference=*:local' --format '{{.Repository}}:{{.Tag}}')
+```
+
 `apply.sh` pins **every** dd-agentic Deployment to `${NODE}` via
 `nodeSelector[kubernetes.io/hostname]` (not `spec.nodeName`, which some
 schedulers reject while scheduling gates are set) and
@@ -410,7 +458,7 @@ the pods. **AIM is not pinned** — see
 Two separate things make that pin necessary, and only one of them goes away on
 a multi-node cluster:
 
-- **Images are node-local.** `load-images.sh` imports the six `*:local` tags
+- **Images are node-local.** `load-images.sh` imports the `*:local` tags
   into one node's kubelet store, so every pod using them must land there.
 - **`/shared` is node-local.** Boltz writes structures to `/shared` and returns
   their absolute paths; PoseBusters and the interaction profiler then read
