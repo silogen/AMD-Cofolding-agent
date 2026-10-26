@@ -246,22 +246,23 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         say("Whole complex in view.");
         break;
       case "ligand":
-        view.focusLigand();
-        say("Focused the ligand and its contacts.");
+        if (view.focusLigand()) say("The ligand, the residues within 5 Å as sticks, and their interactions.");
+        else say("This structure has no ligand.", "bad");
         break;
       case "pocket":
-        view.focusPocket(action.radius);
-        say(`Residues within ${action.radius} Å of the ligand.`);
+        if (view.focusPocket(action.radius)) say("The pocket: the ligand's neighbours as sticks, with their interactions.");
+        else say("This structure has no ligand.", "bad");
         break;
       case "residues": {
-        view.focusResidues(action.residues, action.mode);
         const names = action.residues
           .map((r) => {
             const resname = profile?.contacts.find((c) => c.resnum === r.resnum && (!r.chain || c.chain === r.chain))?.resname;
             return `${resname ?? ""}${r.resnum}${r.chain ? ` (chain ${r.chain})` : ""}`;
           })
           .join(", ");
-        say(`${action.mode === "highlight" ? "Highlighted" : "Focused"} ${names}.`);
+        if (!view.focusResidues(action.residues, action.mode)) say(`${names} is not in this structure.`, "bad");
+        else if (action.mode === "highlight") say(`Highlighted ${names}.`);
+        else say(`${names} and its neighbours as sticks, with their interactions.`);
         break;
       }
       case "contacts": {

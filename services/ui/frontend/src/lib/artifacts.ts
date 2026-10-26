@@ -129,16 +129,27 @@ export function structureTitle(panel: StructurePanel): string {
   return panel.label || panel.name.replace(/\.(cif|mmcif|pdb)$/i, "");
 }
 
-/** Two paths to the same job file. Tools report them with different prefixes, so they are compared from the end. */
+/**
+ * Two paths to the same job file. Tools report them with different
+ * prefixes ("/shared/predictions/out_x/…" or "predictions/out_x/…"), so one
+ * must end with the other. Every run names its files mol_0_model_0.pdb, so
+ * the shared end must reach the run directory.
+ */
 export function sameFile(a: string, b: string): boolean {
-  const tail = (path: string) => path.replace(/\\/g, "/").split("/").slice(-3).join("/");
-  return a === b || tail(a) === tail(b);
+  if (a === b) return true;
+  const parts = (path: string) => path.replace(/\\/g, "/").split("/").filter(Boolean);
+  const [short, long] = [parts(a), parts(b)].sort((x, y) => x.length - y.length);
+  const tail = long.slice(-short.length);
+  return short.length >= 2 && short.every((part, i) => part === tail[i]) && (runOf(a) === runOf(b) || short.length === long.length);
 }
 
-/** The contact profile of a structure: measured on that file, or failing that on the same ligand. */
+/** The contact profile of a structure: measured on that file, or failing that on the same ligand in the same run. */
 export function contactsFor(structure: StructurePanel, all: Sourced<InteractionsPanel>[]): InteractionsPanel | null {
   const byPath = all.find(({ item }) => item.structurePath && sameFile(item.structurePath, structure.path));
   if (byPath) return byPath.item;
-  const bySmiles = structure.smiles ? all.find(({ item }) => item.smiles === structure.smiles) : undefined;
+  const run = runOf(structure.path);
+  const bySmiles = structure.smiles
+    ? all.find(({ item }) => item.smiles === structure.smiles && item.structurePath && runOf(item.structurePath) === run)
+    : undefined;
   return bySmiles?.item ?? null;
 }

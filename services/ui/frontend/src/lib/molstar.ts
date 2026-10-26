@@ -25,24 +25,25 @@ interface SchemaItem {
   auth_asym_id?: string;
   auth_seq_id?: number;
 }
-interface InteractivityOptions {
-  expression?: (Q: QueryBuilder) => Expression;
-  elements?: SchemaItem | { items: SchemaItem[] };
-  action: ("highlight" | "select" | "focus") | ("highlight" | "select" | "focus")[];
-  focusOptions?: { extraRadius?: number; durationMs?: number };
-}
 interface Observable<T> {
   subscribe: (next: (value: T) => void) => { unsubscribe: () => void };
 }
 interface StructureRef {
-  cell: unknown;
+  cell: { obj?: { data?: unknown } };
   components: unknown[];
 }
+type Loci = unknown;
 interface Plugin {
   canvas3d?: { setProps: (props: Record<string, unknown>) => void; requestCameraReset?: (options?: object) => void };
   managers: {
-    camera: { reset: (snapshot?: unknown, durationMs?: number) => void };
+    camera: {
+      reset: (snapshot?: unknown, durationMs?: number) => void;
+      focusLoci: (loci: Loci, options?: { extraRadius?: number; durationMs?: number }) => void;
+    };
+    interactivity: { lociSelects: { deselectAll: () => void }; lociHighlights: { clearHighlights: () => void; highlight: (loci: { loci: Loci }) => void } };
     structure: {
+      /** Shows the target and its surroundings as sticks, with the interactions between them. */
+      focus: { setFromLoci: (loci: Loci) => void; clear: () => void };
       hierarchy: { current: { structures: StructureRef[] } };
       component: {
         clear: (structures: StructureRef[]) => Promise<void>;
@@ -62,7 +63,6 @@ interface Plugin {
 interface MolstarViewer {
   plugin: Plugin;
   loadStructureFromUrl: (url: string, format: string, isBinary?: boolean, options?: { label?: string }) => Promise<void>;
-  structureInteractivity: (options: InteractivityOptions) => void;
   handleResize: () => void;
   dispose: () => void;
 }
@@ -78,7 +78,13 @@ interface ClickLoci {
 type Property<T> = (location: Location) => T;
 interface StructureLib {
   StructureElement: {
-    Loci: { is: (loci: unknown) => boolean; getFirstLocation: (loci: unknown) => Location | undefined };
+    Loci: {
+      is: (loci: unknown) => boolean;
+      isEmpty: (loci: unknown) => boolean;
+      getFirstLocation: (loci: unknown) => Location | undefined;
+      fromExpression: (structure: unknown, expression: (Q: QueryBuilder) => Expression) => Loci;
+      fromSchema: (structure: unknown, schema: { items: SchemaItem[] }) => Loci;
+    };
     Location: { create: (structure: unknown, unit: BondUnit, element: number) => Location };
   };
   StructureProperties: {
@@ -222,30 +228,60 @@ export class StructureView {
     this.plugin?.managers.camera.reset(undefined, 400);
   }
 
-  focusLigand(): void {
-    this.viewer?.structureInteractivity({ expression: ligand, action: ["select", "focus"], focusOptions: { extraRadius: 4 } });
+  /** The atoms an expression or a residue list picks in the loaded structure, or null if none. */
+  private lociOf(query: { expression: (Q: QueryBuilder) => Expression } | { items: SchemaItem[] }): Loci | null {
+    const lib = window.molstar?.lib?.structure;
+    const structure = this.plugin?.managers.structure.hierarchy.current.structures[0]?.cell.obj?.data;
+    if (!lib || !structure) return null;
+    const loci =
+      "expression" in query ? lib.StructureElement.Loci.fromExpression(structure, query.expression) : lib.StructureElement.Loci.fromSchema(structure, query);
+    return lib.StructureElement.Loci.isEmpty(loci) ? null : loci;
   }
 
-  focusPocket(radius = 5): void {
-    this.viewer?.structureInteractivity({
-      expression: (Q) => Q.struct.modifier.includeSurroundings({ 0: ligand(Q), radius, "as-whole-residues": true }),
-      action: ["select", "focus"],
-    });
+  /**
+   * Mol*'s focus: the target and every residue within 5 Å as sticks, with
+   * the hydrogen bonds, stacking and other contacts between them drawn as
+   * dashes; then the camera frames it. A camera move alone shows a cartoon.
+   */
+  private focus(loci: Loci, extraRadius: number): void {
+    const plugin = this.plugin;
+    if (!plugin) return;
+    plugin.managers.interactivity.lociSelects.deselectAll();
+    plugin.managers.structure.focus.setFromLoci(loci);
+    plugin.managers.camera.focusLoci(loci, { extraRadius, durationMs: 400 });
   }
 
-  /** Select residues and frame them. */
-  focusResidues(residues: Residue[], action: "focus" | "highlight" = "focus"): void {
-    if (!residues.length || !this.viewer) return;
+  /** False when the structure has no ligand. */
+  focusLigand(): boolean {
+    const loci = this.lociOf({ expression: ligand });
+    if (loci) this.focus(loci, 4);
+    return loci !== null;
+  }
+
+  /** The ligand's contacts with a wider frame, so the whole pocket is in view. */
+  focusPocket(radius = 5): boolean {
+    const loci = this.lociOf({ expression: ligand });
+    if (loci) this.focus(loci, radius + 4);
+    return loci !== null;
+  }
+
+  /** Focus residues with their contacts, or only light them up. False when none is in the structure. */
+  focusResidues(residues: Residue[], action: "focus" | "highlight" = "focus"): boolean {
+    if (!residues.length) return false;
     const items = residues.map((r) => (r.chain ? { auth_asym_id: r.chain, auth_seq_id: r.resnum } : { auth_seq_id: r.resnum }));
-    this.viewer.structureInteractivity({
-      elements: { items },
-      action: action === "focus" ? ["select", "focus"] : "highlight",
-      focusOptions: { extraRadius: 3 },
-    });
+    const loci = this.lociOf({ items });
+    if (!loci) return false;
+    if (action === "focus") this.focus(loci, 3);
+    else this.plugin?.managers.interactivity.lociHighlights.highlight({ loci });
+    return true;
   }
 
   clearSelection(): void {
-    this.viewer?.structureInteractivity({ action: ["select", "highlight"] });
+    const plugin = this.plugin;
+    if (!plugin) return;
+    plugin.managers.structure.focus.clear();
+    plugin.managers.interactivity.lociSelects.deselectAll();
+    plugin.managers.interactivity.lociHighlights.clearHighlights();
   }
 
   async setStyle(style: ViewStyleName): Promise<void> {
