@@ -1,0 +1,53 @@
+{
+  "query_id": "c7d8e9f0-0027-4879-8901-234567890123",
+  "result_type": "entry",
+  "total_count": 342,
+  "result_list": [
+    {"identifier": "2BFU", "score": 1.0, "services": null},
+    {"identifier": "4ZMH", "score": 1.0, "services": null},
+    {"identifier": "1N6O", "score": 1.0, "services": null},
+    {"identifier": "3J4F", "score": 1.0, "services": null},
+    {"identifier": "5MPL", "score": 1.0, "services": null},
+    {"identifier": "2BTV", "score": 1.0, "services": null},
+    {"identifier": "4AQT", "score": 1.0, "services": null},
+    {"identifier": "1IHV", "score": 1.0, "services": null},
+    {"identifier": "3J2V", "score": 1.0, "services": null},
+    {"identifier": "6C0V", "score": 1.0, "services": null},
+    {"identifier": "2C0W", "score": 1.0, "services": null},
+    {"identifier": "4IVU", "score": 1.0, "services": null},
+    {"identifier": "1YC6", "score": 1.0, "services": null},
+    {"identifier": "3J10", "score": 1.0, "services": null},
+    {"identifier": "5GRE", "score": 1.0, "services": null},
+    {"identifier": "2ERK", "score": 1.0, "services": null},
+    {"identifier": "4F8H", "score": 1.0, "services": null},
+    {"identifier": "1ZTW", "score": 1.0, "services": null},
+    {"identifier": "3J8A", "score": 1.0, "services": null},
+    {"identifier": "6BKD", "score": 1.0, "services": null},
+    {"identifier": "2XZG", "score": 1.0, "services": null},
+    {"identifier": "4EFX", "score": 1.0, "services": null},
+    {"identifier": "1M4X", "score": 1.0, "services": null},
+    {"identifier": "3ZW2", "score": 1.0, "services": null},
+    {"identifier": "5KIV", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "ELECTRON MICROSCOPY", "count": 278},
+        {"key": "X-RAY DIFFRACTION", "count": 64}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Human immunodeficiency virus 1", "count": 87},
+        {"key": "Tobacco mosaic virus", "count": 56},
+        {"key": "Influenza A virus", "count": 48},
+        {"key": "Adeno-associated virus", "count": 42},
+        {"key": "Bacteriophage HK97", "count": 38}
+      ]
+    }
+  ]
+}

@@ -4,13 +4,19 @@ Per-target, per-temporal-window **project-endpoint** prediction (RetroDMTA). Com
 `admet-predictor` (general ADMET): use the general models for ADMET, these for project
 (target) endpoints. See [SERVICE.md](SERVICE.md) for deployment, endpoints, and details.
 
-You pick a **target** + **window**; each `(target, window)` snapshot bundles three models
-trained on data up to that time cut:
+You pick a **target** + **window**. The runtime manifest currently includes
+legacy temporal targets `FXA`, `MMP8`, `PPARD`, `RENIN` plus project targets
+`Mpro`, `CHIKV_Mac`, `EV-A71_2A`, and `FatA`.
+
+Legacy snapshots bundle:
 
 - **Chemprop-MTL** and **CheMeleon-MTL** (multitask: 7 general ADME tasks + the target's endpoints)
 - one single-task **XGBoost** per target endpoint
 
-`method` = `ensemble` (mean ± std of the three, default) | `xgboost` | `chemprop` | `chemeleon`.
+`method` = `ensemble` (mean ± std of available members, default) |
+`xgboost` | `chemprop` | `chemeleon`. The four project targets are currently
+XGBoost-only because their training output did not contain usable Chemprop
+checkpoint files.
 
 | target | endpoints (one multitask model covers all) | windows |
 |---|---|---|

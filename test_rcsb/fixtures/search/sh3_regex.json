@@ -1,0 +1,53 @@
+{
+  "query_id": "b4c5d6e7-0014-4b6c-5678-901234567890",
+  "result_type": "polymer_entity",
+  "total_count": 7821,
+  "result_list": [
+    {"identifier": "1ABR_1", "score": 1.0, "services": null},
+    {"identifier": "2PII_1", "score": 1.0, "services": null},
+    {"identifier": "3LQC_1", "score": 1.0, "services": null},
+    {"identifier": "1BRS_1", "score": 1.0, "services": null},
+    {"identifier": "4AKH_1", "score": 1.0, "services": null},
+    {"identifier": "2YXF_1", "score": 1.0, "services": null},
+    {"identifier": "3M60_1", "score": 1.0, "services": null},
+    {"identifier": "1TUP_1", "score": 1.0, "services": null},
+    {"identifier": "4RGP_1", "score": 1.0, "services": null},
+    {"identifier": "2N0A_1", "score": 1.0, "services": null},
+    {"identifier": "3P7I_1", "score": 1.0, "services": null},
+    {"identifier": "1HAZ_1", "score": 1.0, "services": null},
+    {"identifier": "4CMF_1", "score": 1.0, "services": null},
+    {"identifier": "2MK1_1", "score": 1.0, "services": null},
+    {"identifier": "3RZD_1", "score": 1.0, "services": null},
+    {"identifier": "1VZB_1", "score": 1.0, "services": null},
+    {"identifier": "4X64_1", "score": 1.0, "services": null},
+    {"identifier": "2Q5E_1", "score": 1.0, "services": null},
+    {"identifier": "3TL2_1", "score": 1.0, "services": null},
+    {"identifier": "1UPO_1", "score": 1.0, "services": null},
+    {"identifier": "4WX3_1", "score": 1.0, "services": null},
+    {"identifier": "2RVR_1", "score": 1.0, "services": null},
+    {"identifier": "3OAB_1", "score": 1.0, "services": null},
+    {"identifier": "1IHF_1", "score": 1.0, "services": null},
+    {"identifier": "4YDV_1", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 5432},
+        {"key": "SOLUTION NMR", "count": 1876},
+        {"key": "ELECTRON MICROSCOPY", "count": 513}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 3241},
+        {"key": "Mus musculus", "count": 987},
+        {"key": "Saccharomyces cerevisiae", "count": 612},
+        {"key": "Rattus norvegicus", "count": 432}
+      ]
+    }
+  ]
+}

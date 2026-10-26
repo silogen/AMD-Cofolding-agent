@@ -33,10 +33,19 @@ scoring:
     recycling_steps: 3
     diffusion_samples: 1
     sampling_steps_affinity: 200
+    # pred_value = log10(IC50/µM): MORE NEGATIVE = tighter = BETTER
+    #   → use reverse_sigmoid(low=-2.0, high=0.0) in TTP transforms
+    # probability_binary = P(IC50 < 1µM) ∈ [0,1]: higher = better
+    #   → use sigmoid(low=0.3, high=0.8) in TTP transforms
     affinity_mode: "pred_value"
     cache_dir: "/data/boltz/cache"
-    use_msa_server: false
+    use_msa_server: true
     msa_server_url: "https://api.colabfold.com"
+    # If no local/cached MSA exists, automatically try the MSA server first.
+    auto_msa_fallback: true
+    # If the MSA server is unreachable, fall through to single-sequence mode
+    # rather than aborting the run. Confidence is reduced; a warning is emitted.
+    msa_free_fallback: true
   posebusters:
     enabled: true
     service_url: "http://posebusters:8080/score"
@@ -44,6 +53,7 @@ scoring:
   admet:
     enabled: true
     service_url: "http://admet-predictor:8084/score"
+    model_set: "drug"
   retrodmta:
     enabled: true
     service_url: "http://retrodmta-predictor:8085/score"
@@ -55,6 +65,11 @@ scoring:
     interaction_type: "all"    # default family counted by /score (hbond, ionic, ... , all)
     radius: 8.0
     ph: 7.4
+  synthesis_planner:
+    enabled: true
+    service_url: "http://synthesis-planner:8086/score"
+    iteration_limit: 25       # fast mode for RL (25 iterations ≈ 0.3-0.8s/mol)
+    score_fn: "solved_steps"  # 1.0=≤2 steps, 0.7=≤4 steps, 0.3=route found, 0.0=no route
 
 # The agent image is CPU-only and carries no REINVENT4, so RL jobs, in-process
 # scoring and the registries come from the reinvent-runner container.

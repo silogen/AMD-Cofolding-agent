@@ -1,0 +1,63 @@
+{
+  "query_id": "b2c3d4e5-0002-4f60-9bac-def012345678",
+  "result_type": "entry",
+  "total_count": 273,
+  "result_list": [
+    {"identifier": "3PXY", "score": 1.0, "services": null},
+    {"identifier": "1HCK", "score": 1.0, "services": null},
+    {"identifier": "2R3I", "score": 1.0, "services": null},
+    {"identifier": "1FIN", "score": 1.0, "services": null},
+    {"identifier": "3QTI", "score": 1.0, "services": null},
+    {"identifier": "2A0C", "score": 1.0, "services": null},
+    {"identifier": "4KD1", "score": 1.0, "services": null},
+    {"identifier": "3DDQ", "score": 1.0, "services": null},
+    {"identifier": "1OGU", "score": 1.0, "services": null},
+    {"identifier": "4BCK", "score": 1.0, "services": null},
+    {"identifier": "3PXF", "score": 1.0, "services": null},
+    {"identifier": "1QMZ", "score": 1.0, "services": null},
+    {"identifier": "2VTM", "score": 1.0, "services": null},
+    {"identifier": "1W8L", "score": 1.0, "services": null},
+    {"identifier": "3R7G", "score": 1.0, "services": null},
+    {"identifier": "2WIH", "score": 0.97, "services": null},
+    {"identifier": "3EKN", "score": 0.96, "services": null},
+    {"identifier": "2R3K", "score": 0.95, "services": null},
+    {"identifier": "1P5E", "score": 0.94, "services": null},
+    {"identifier": "4BCP", "score": 0.93, "services": null},
+    {"identifier": "2VTN", "score": 0.93, "services": null},
+    {"identifier": "5ET8", "score": 0.92, "services": null},
+    {"identifier": "4FKL", "score": 0.91, "services": null},
+    {"identifier": "1KE8", "score": 0.90, "services": null},
+    {"identifier": "2G9X", "score": 0.90, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 258},
+        {"key": "Bos taurus", "count": 19},
+        {"key": "Mus musculus", "count": 12}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 273},
+        {"key": "ELECTRON MICROSCOPY", "count": 0},
+        {"key": "SOLUTION NMR", "count": 0}
+      ]
+    },
+    {
+      "name": "Resolution",
+      "aggregation_type": "range",
+      "buckets": [
+        {"key": "0-1.5", "count": 48},
+        {"key": "1.5-2.0", "count": 225},
+        {"key": "2.0-2.5", "count": 0},
+        {"key": "2.5-3.0", "count": 0},
+        {"key": "3.0+", "count": 0}
+      ]
+    }
+  ]
+}

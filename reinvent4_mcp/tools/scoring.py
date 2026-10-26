@@ -67,11 +67,21 @@ def _normalize_endpoint_params(params: dict[str, Any]) -> dict[str, Any]:
     - Double-nested ``[[3]]``    -> ``[3]``
     - Double-nested ``[[True]]`` -> ``[True]``
     - Already OK    ``[3]``      -> ``[3]``  (unchanged)
-    - List param    ``[["CCO"]]``-> ``[["CCO"]]``  (unchanged)
+    - SMILES list   ``["CCO"]``  -> ``["CCO"]``    (one endpoint)
+    - Over-nested   ``[["CCO"]]``-> ``["CCO"]``    (agent repair)
     """
     result: dict[str, Any] = {}
     for key, value in params.items():
-        if not isinstance(value, list):
+        if (
+            key in {"smiles", "reference_smiles"}
+            and isinstance(value, list)
+            and len(value) == 1
+            and isinstance(value[0], list)
+        ):
+            # TTP params describe one endpoint. REINVENT's collect_params()
+            # adds the outer endpoint dimension later.
+            result[key] = value[0]
+        elif not isinstance(value, list):
             result[key] = [value]
         elif (
             len(value) == 1

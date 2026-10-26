@@ -1,0 +1,61 @@
+{
+  "query_id": "d0e1f2a3-0010-4768-1234-567890123456",
+  "result_type": "entry",
+  "total_count": 3241,
+  "result_list": [
+    {"identifier": "3CRO", "score": 1.0, "services": null},
+    {"identifier": "1LMB", "score": 1.0, "services": null},
+    {"identifier": "1TRO", "score": 1.0, "services": null},
+    {"identifier": "1RVA", "score": 1.0, "services": null},
+    {"identifier": "2OR1", "score": 1.0, "services": null},
+    {"identifier": "1HDD", "score": 1.0, "services": null},
+    {"identifier": "3ZKC", "score": 1.0, "services": null},
+    {"identifier": "1NKP", "score": 1.0, "services": null},
+    {"identifier": "2NGO", "score": 1.0, "services": null},
+    {"identifier": "4QQW", "score": 1.0, "services": null},
+    {"identifier": "1PUF", "score": 1.0, "services": null},
+    {"identifier": "3KZ8", "score": 1.0, "services": null},
+    {"identifier": "2GLU", "score": 1.0, "services": null},
+    {"identifier": "1RH6", "score": 1.0, "services": null},
+    {"identifier": "4I6X", "score": 1.0, "services": null},
+    {"identifier": "2OZG", "score": 1.0, "services": null},
+    {"identifier": "3FKI", "score": 1.0, "services": null},
+    {"identifier": "1YUI", "score": 1.0, "services": null},
+    {"identifier": "4QQX", "score": 1.0, "services": null},
+    {"identifier": "2O9E", "score": 1.0, "services": null},
+    {"identifier": "3KMR", "score": 1.0, "services": null},
+    {"identifier": "1A6Y", "score": 1.0, "services": null},
+    {"identifier": "4DQN", "score": 1.0, "services": null},
+    {"identifier": "2GLV", "score": 1.0, "services": null},
+    {"identifier": "5LZT", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "PolymerType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Protein", "count": 3241},
+        {"key": "DNA", "count": 3241}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "X-RAY DIFFRACTION", "count": 2891},
+        {"key": "ELECTRON MICROSCOPY", "count": 298},
+        {"key": "SOLUTION NMR", "count": 52}
+      ]
+    },
+    {
+      "name": "Organism",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Homo sapiens", "count": 1842},
+        {"key": "Mus musculus", "count": 412},
+        {"key": "Escherichia coli", "count": 387},
+        {"key": "Saccharomyces cerevisiae", "count": 156}
+      ]
+    }
+  ]
+}

@@ -87,19 +87,21 @@ export REINVENT4_AGENT_MULTI_AGENT="${REINVENT4_AGENT_MULTI_AGENT:-false}"
 export REINVENT4_AGENT_LOG_DIR="${REINVENT4_PROJECT_DIR}/logs"
 
 # --- GPU assignments --------------------------------------------------
-# REINVENT and Boltz run on separate GPUs.  When Slurm gives you two
-# GPUs (e.g. SLURM_STEP_GPUS="0,1"), the first is used for REINVENT
-# and the second for Boltz.  Override explicitly if needed.
+# Block 08 uses one allocated GPU. REINVENT runs on that GPU; any optional
+# Boltz work must share it sequentially rather than requesting another GPU.
 if [ -n "${SLURM_STEP_GPUS:-}" ]; then
     export REINVENT_GPU="${REINVENT_GPU:-${SLURM_STEP_GPUS%%,*}}"
-    export BOLTZ_GPU="${BOLTZ_GPU:-${SLURM_STEP_GPUS#*,}}"
+    export BOLTZ_GPU="${BOLTZ_GPU:-${REINVENT_GPU}}"
 else
     export REINVENT_GPU="${REINVENT_GPU:-0}"
-    export BOLTZ_GPU="${BOLTZ_GPU:-1}"
+    export BOLTZ_GPU="${BOLTZ_GPU:-0}"
 fi
 
 # --- Slurm defaults (override via sbatch flags if needed) -------------
-export SLURM_PARTITION="${SLURM_PARTITION:-batch}"
-export SLURM_CPUS="${SLURM_CPUS:-4}"
-export SLURM_MEM="${SLURM_MEM:-16G}"
-export SLURM_TIME="${SLURM_TIME:-4:00:00}"
+export SLURM_PARTITION="${SLURM_PARTITION:-AIG_Models}"
+export SLURM_RESERVATION="${SLURM_RESERVATION:-MDL}"
+export SLURM_NODELIST="${SLURM_NODELIST:-tw046}"
+export SLURM_GPUS="${SLURM_GPUS:-1}"
+export SLURM_CPUS="${SLURM_CPUS:-8}"
+export SLURM_MEM="${SLURM_MEM:-50G}"
+export SLURM_TIME="${SLURM_TIME:-2:00:00}"

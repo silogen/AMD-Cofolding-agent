@@ -261,11 +261,14 @@ def list_external_services() -> dict[str, Any]:
 
         # Surface the required selector(s) so the agent authors valid calls.
         if name == "admet":
-            entry["selector"] = "endpoint"
+            entry["selector"] = "model_set + endpoint"
             entry["endpoints"] = health.get("endpoints", [])
+            entry["default_model_set"] = health.get("default_model_set", "drug")
+            entry["model_sets"] = health.get("model_sets", {})
             entry["usage"] = (
-                "Direct: predict_admet(smiles, endpoints=[...]). "
-                "RL objective: service_params={'endpoint': '<one of endpoints>'}."
+                "Direct: predict_admet(smiles, model_set='drug'|'agro', "
+                "endpoints=[...]). RL objective: "
+                "service_params={'model_set': '<set>', 'endpoint': '<name>'}."
             )
         elif name == "retrodmta":
             entry["selector"] = "target (+ optional endpoint)"
@@ -301,18 +304,25 @@ def list_external_services() -> dict[str, Any]:
 def predict_admet(
     smiles: list[str],
     endpoints: Optional[list[str]] = None,
+    model_set: str = "drug",
     batch_size: Optional[int] = None,
 ) -> dict[str, Any]:
     """Predict ADMET properties for a list of SMILES (direct, out-of-band).
 
     Calls the ADMET service ``/predict`` (all endpoints), then filters to the
-    requested ``endpoints`` if given. Returns per-molecule mean/std plus the
-    applicability-domain flag. Use this to answer property questions directly;
-    for RL scoring use a TTP external objective instead.
+    requested ``endpoints`` if given. Returns per-molecule mean/std, accepted
+    and physically excluded model members, the chemical-space applicability
+    domain, and each endpoint's p01-p99 training-response domain flag. Use this
+    to answer property questions directly; for RL scoring use a TTP external
+    objective instead.
     """
 
     base = _base_url(_get_service_url("admet"))
-    payload: dict[str, Any] = {"smiles": smiles, "format": "records"}
+    payload: dict[str, Any] = {
+        "smiles": smiles,
+        "model_set": model_set,
+        "format": "records",
+    }
     if batch_size:
         payload["batch_size"] = batch_size
     r = requests.post(f"{base}/predict", json=payload, timeout=_TIMEOUT)
@@ -325,7 +335,13 @@ def predict_admet(
             preds = rec.get("predictions", {})
             rec["predictions"] = {k: v for k, v in preds.items() if k in wanted}
 
-    return {"service": "admet", "endpoints": endpoints, "n": len(smiles), "results": records}
+    return {
+        "service": "admet",
+        "model_set": model_set,
+        "endpoints": endpoints,
+        "n": len(smiles),
+        "results": records,
+    }
 
 
 def predict_retrodmta(
@@ -412,3 +428,80 @@ def profile_interactions(
     r = requests.post(f"{base}/analyze", json=payload, timeout=_TIMEOUT)
     r.raise_for_status()
     return r.json()
+
+
+def ingest_fragment_activities(
+    path: str,
+    smiles_col: str = "std_smiles",
+    value_col: str = "activity_value",
+    unit_col: str = "activity_unit",
+    type_col: str = "activity_type",
+    id_col: str = "compound_id",
+) -> dict[str, Any]:
+    """Load fragment activities from a CSV and return a SMILES-keyed potency dict (O4).
+
+    The resulting dict maps canonical SMILES to
+    ``{"experimental": {"value": float, "unit": str, "type": str}}``,
+    which is the shape accepted by ``profile_complex_interaction(potency=...)``.
+
+    Parameters
+    ----------
+    path:
+        Path to a reference CSV (e.g. validation/reference/reference.csv).
+    smiles_col, value_col, unit_col, type_col, id_col:
+        Column names for SMILES, numeric activity value, unit, type, and ID.
+
+    Returns
+    -------
+    dict with keys "n_loaded", "n_no_value", "activities" (the potency dict).
+    """
+    try:
+        import pandas as pd  # noqa: PLC0415
+        from rdkit import Chem  # noqa: PLC0415
+        from rdkit import RDLogger  # noqa: PLC0415
+        RDLogger.DisableLog("rdApp.*")
+    except ImportError as exc:
+        return {"error": f"pandas or RDKit unavailable: {exc}"}
+
+    try:
+        df = pd.read_csv(path, low_memory=False)
+    except Exception as exc:
+        return {"error": f"Cannot read CSV: {exc}"}
+
+    required = {smiles_col, value_col}
+    missing = required - set(df.columns)
+    if missing:
+        return {"error": f"Missing columns: {missing}"}
+
+    n_loaded = 0
+    n_no_value = 0
+    activities: dict[str, dict] = {}
+
+    for _, row in df.iterrows():
+        smi = str(row.get(smiles_col, "")).strip()
+        val = row.get(value_col)
+        if not smi or pd.isna(val):
+            n_no_value += 1
+            continue
+        try:
+            val = float(val)
+        except (ValueError, TypeError):
+            n_no_value += 1
+            continue
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            n_no_value += 1
+            continue
+        can = Chem.MolToSmiles(mol)
+        unit = str(row.get(unit_col, "pIC50")).strip() if unit_col in df.columns else "pIC50"
+        atype = str(row.get(type_col, "pIC50")).strip() if type_col in df.columns else "pIC50"
+        activities[can] = {
+            "experimental": {"value": val, "unit": unit, "type": atype},
+        }
+        n_loaded += 1
+
+    return {
+        "n_loaded": n_loaded,
+        "n_no_value": n_no_value,
+        "activities": activities,
+    }

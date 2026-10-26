@@ -137,6 +137,17 @@ def predict_admet(
             ),
         ),
     ] = None,
+    model_set: Annotated[
+        str,
+        Field(
+            default="drug",
+            description=(
+                "ADMET model stack: 'drug' (pharmaceutical, default) or "
+                "'agro' (agrochemical). 'pharma' is accepted as an alias "
+                "for 'drug' but is never emitted."
+            ),
+        ),
+    ] = "drug",
 ) -> str:
     """Predict ADMET properties for molecules directly (out-of-band, not RL).
 
@@ -149,7 +160,11 @@ def predict_admet(
 
     from reinvent4_mcp.tools.external import predict_admet as _impl
 
-    return json.dumps(_impl(smiles, endpoints), indent=2, default=_json_default)
+    return json.dumps(
+        _impl(smiles, endpoints, model_set=model_set),
+        indent=2,
+        default=_json_default,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +566,8 @@ def delete_ttp(
     """Delete a stored TTP and all its version history.
 
     This is irreversible. The TTP and all versioned snapshots are removed.
+    Prefer update_ttp for corrections and campaign retries so provenance is
+    preserved. Delete only when abandoning the identifier.
     """
 
     from reinvent4_mcp.tools.ttp import delete_ttp as _impl
@@ -1016,8 +1033,161 @@ def list_shared_assets(prefix: str = "", limit: int = 10) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool: fetch_target_info
+# Tool: read_shared_file
 # ---------------------------------------------------------------------------
+
+@mcp.tool()
+def read_shared_file(
+    path: Annotated[str, Field(description="Shared-volume relative path (e.g. 'mpro_fbdd/fragments.csv')")],
+    max_bytes: Annotated[int, Field(default=131072, description="Maximum bytes to return (default 128 KB).")] = 131072,
+) -> str:
+    """Read a text file from the shared volume and return its contents.
+
+    Use this to read CSV manifests, FASTA files, SMILES lists, and similar
+    text assets staged under /shared/. Paths are resolved relative to the
+    shared-volume root (/shared/) and are sandboxed to that directory.
+
+    Returns the file contents as a string, or an error dict if the file
+    cannot be read.
+    """
+    import os  # noqa: PLC0415
+
+    shared_root = os.environ.get("IP_SHARED_DIR", "/shared")
+    p = path.strip()
+    if os.path.isabs(p):
+        abs_path = p
+    else:
+        abs_path = os.path.join(shared_root, p)
+
+    # Sandbox: must stay inside shared_root
+    abs_path = os.path.realpath(abs_path)
+    if not abs_path.startswith(os.path.realpath(shared_root)):
+        return json.dumps({"error": f"Path escapes shared volume: {path}"})
+
+    try:
+        size = os.path.getsize(abs_path)
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read(max_bytes)
+        truncated = size > max_bytes
+        return json.dumps({
+            "path": path,
+            "size_bytes": size,
+            "truncated": truncated,
+            "content": content,
+        })
+    except FileNotFoundError:
+        return json.dumps({"error": f"File not found: {path}"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Tool: parse_ligand_file
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def parse_ligand_file(
+    path: Annotated[str, Field(description=(
+        "Shared-volume path to an SDF, MOL, or MOL2 file. "
+        "Example: 'structure-prep/abc123/prepared/ligand_LIG_A_1001.sdf'"
+    ))],
+    max_mols: Annotated[int, Field(default=10, description=(
+        "Maximum number of molecules to return from a multi-molecule SDF. "
+        "Set to 1 for single-ligand files."
+    ))] = 10,
+) -> str:
+    """Parse a ligand file (SDF / MOL / MOL2) and return structured data.
+
+    Extracts SMILES, molecular properties and any SDF property blocks
+    without requiring the agent to manually parse the molfile format.
+
+    Returns a list of molecules, each with:
+      - smiles: canonical RDKit SMILES
+      - inchikey: standard InChIKey
+      - n_heavy_atoms: heavy atom count
+      - mw: molecular weight
+      - formula: molecular formula
+      - n_confs: number of 3D conformers in file
+      - properties: dict of any >PROPERTY< tags from SDF
+
+    Use this instead of read_shared_file when you need SMILES or
+    molecular properties from a prepared ligand SDF artifact.
+    """
+    import os  # noqa: PLC0415
+
+    shared_root = os.environ.get("IP_SHARED_DIR", "/shared")
+    p = path.strip()
+    if not os.path.isabs(p):
+        abs_path = os.path.join(shared_root, p)
+    else:
+        abs_path = p
+
+    abs_path = os.path.realpath(abs_path)
+    if not abs_path.startswith(os.path.realpath(shared_root)):
+        return json.dumps({"error": f"Path escapes shared volume: {path}"})
+    if not os.path.isfile(abs_path):
+        return json.dumps({"error": f"File not found: {path}"})
+
+    try:
+        from rdkit import Chem  # noqa: PLC0415
+        from rdkit.Chem import Descriptors, AllChem  # noqa: PLC0415
+
+        ext = os.path.splitext(abs_path)[1].lower()
+
+        if ext in (".sdf", ".mol"):
+            supplier = Chem.SDMolSupplier(abs_path, removeHs=True, sanitize=True)
+            mols_raw = [m for m in supplier if m is not None]
+            prop_suppliers = list(supplier)  # to access SDF properties
+        elif ext == ".mol2":
+            mol = Chem.MolFromMol2File(abs_path, removeHs=True, sanitize=True)
+            mols_raw = [mol] if mol is not None else []
+            prop_suppliers = mols_raw
+        else:
+            return json.dumps({"error": f"Unsupported format: {ext}. Use .sdf, .mol, or .mol2"})
+
+        results = []
+        for i, mol in enumerate(mols_raw[:max_mols]):
+            if mol is None:
+                continue
+            # Sanitize and clean stereo
+            Chem.SanitizeMol(mol)
+            AllChem.AssignStereochemistry(mol, cleanIt=True, force=True)
+            smiles = Chem.MolToSmiles(mol, isomericSmiles=True)
+            inchikey = Chem.MolToInchiKey(Chem.MolFromSmiles(smiles) or mol)
+            mw = round(Descriptors.MolWt(mol), 2)
+            formula = Chem.rdMolDescriptors.CalcMolFormula(mol)
+            n_ha = mol.GetNumHeavyAtoms()
+            n_confs = mol.GetNumConformers()
+
+            # SDF property tags
+            props = {}
+            if hasattr(mol, "GetPropsAsDict"):
+                props = {k: v for k, v in mol.GetPropsAsDict().items()
+                         if not k.startswith("_")}
+
+            results.append({
+                "mol_index": i,
+                "smiles": smiles,
+                "inchikey": inchikey,
+                "n_heavy_atoms": n_ha,
+                "mw": mw,
+                "formula": formula,
+                "n_confs": n_confs,
+                "properties": props,
+            })
+
+        n_total = len(mols_raw)
+        return json.dumps({
+            "path": path,
+            "format": ext.lstrip(".").upper(),
+            "n_mols_in_file": n_total,
+            "n_returned": len(results),
+            "truncated": n_total > max_mols,
+            "molecules": results,
+        }, indent=2)
+
+    except Exception as exc:
+        return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 @mcp.tool()
 def fetch_target_info(
@@ -1542,6 +1712,12 @@ def main() -> None:
         logger.info("REINVENT4 is importable")
     except RuntimeError as exc:
         logger.warning(f"REINVENT4 not found at startup: {exc}")
+
+    # Load all extension tool modules (blocks 01-10).
+    # Each module must export register_tools(mcp) -> None.
+    # A failure in one extension is logged and isolated; others still load.
+    from reinvent4_mcp.registry import load_extensions  # noqa: PLC0415
+    load_extensions(mcp)
 
     mcp.run(transport="stdio")
 

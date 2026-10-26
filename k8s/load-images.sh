@@ -21,6 +21,9 @@ IMAGES=(
     admet-predictor
     retrodmta-predictor
     interaction-profiler
+    synthesis-planner
+    structure-prep
+    annotation
     boltz-gateway
     campaign-store
     reinvent-runner

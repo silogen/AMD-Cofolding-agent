@@ -34,6 +34,14 @@ resources:
   - scorers/interaction-profiler.yaml
   - scorers/admet.yaml
   - scorers/retrodmta.yaml
+  # AiZynthFinder retrosynthesis, scored as an RL objective rather than the
+  # heuristic SAScore.
+  - scorers/synthesis-planner.yaml
+  # Tool services: called by the agents between campaigns, not by the scorer
+  # pipeline during one. They are here for the same reason the scorers are --
+  # a Service name the ConfigMap and the tool env vars can dial.
+  - tools/structure-prep.yaml
+  - tools/annotation.yaml
 
 labels:
   - pairs:
@@ -71,4 +79,13 @@ images:
     newTag: local
   - name: interaction-profiler
     newName: interaction-profiler
+    newTag: local
+  - name: synthesis-planner
+    newName: synthesis-planner
+    newTag: local
+  - name: structure-prep
+    newName: structure-prep
+    newTag: local
+  - name: annotation
+    newName: annotation
     newTag: local

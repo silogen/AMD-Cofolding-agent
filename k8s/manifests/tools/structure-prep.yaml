@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-structure-prep
+  labels:
+    app.kubernetes.io/name: dd-agentic-structure-prep
+    app.kubernetes.io/component: tool-service
+spec:
+  # A tool service, not a scorer: the agent calls it between campaigns to turn
+  # a downloaded PDB into a cofolding-ready structure, so it is off the RL hot
+  # path entirely and one replica is ample.
+  replicas: 1
+  strategy:
+    # Mounts the ReadWriteOnce claim, so a surge pod landing on another node
+    # could not attach it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-structure-prep
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-structure-prep
+        app.kubernetes.io/component: tool-service
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: structure-prep
+          image: structure-prep:local
+          imagePullPolicy: IfNotPresent
+          # args, not command: the image has a micromamba ENTRYPOINT that
+          # activates the environment before exec'ing this. gemmi, pdb2pqr and
+          # openmm all live in that environment.
+          args:
+            - micromamba
+            - run
+            - -n
+            - base
+            - python
+            - -m
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8089"
+          ports:
+            - name: prep-http
+              containerPort: 8089
+          env:
+            - name: SP_SHARED_DIR
+              value: /shared
+            - name: SP_PORT
+              value: "8089"
+            # Minimization is the expensive stage and is single-threaded;
+            # a second concurrent preparation only lengthens both.
+            - name: SP_MAX_CONCURRENCY
+              value: "1"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: prep-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: prep-http
+            # A minimization run holds the worker, so a short liveness timeout
+            # would restart the pod mid-preparation.
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+            # Writes the prepared structures and extracted ligand SDFs that
+            # Boltz and the profiler then open by the absolute path this
+            # service returned. Same PVC, same node, same mount path.
+            - name: data
+              mountPath: /shared
+              subPath: shared
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-structure-prep
+  labels:
+    app.kubernetes.io/name: dd-agentic-structure-prep
+    app.kubernetes.io/component: tool-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-structure-prep
+  ports:
+    - name: prep-http
+      port: 8089
+      targetPort: prep-http

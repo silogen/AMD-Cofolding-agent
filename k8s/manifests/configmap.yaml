@@ -17,6 +17,17 @@ data:
   REINVENT4_AGENT_NO_VERIFY_SSL: "false"
   REINVENT4_AGENT_MULTI_AGENT: "true"
   REINVENT4_AGENT_LOG_DIR: /logs
+  # Tool services the MCP tools dial directly, rather than through the scoring
+  # pipeline. They are plain env vars because the tools read them from the
+  # environment, and reinvent4_agent.mcp_client forwards exactly these three
+  # into the MCP server subprocess -- unset, the structure-prep tools fall back
+  # to a Compose hostname that does not resolve here, and the annotation
+  # fetchers go straight to the internet the cluster may not reach.
+  SP_SERVICE_URL: http://dd-agentic-structure-prep:8089
+  ANNOTATION_SERVICE_URL: http://dd-agentic-annotation:8090
+  # Where the shared volume is mounted. The tools resolve every returned
+  # structure path against it, and it is the same path in every pod.
+  IP_SHARED_DIR: /shared
   reinvent4_mcp_config.yaml: |
     reinvent:
       device: "cuda:0"
@@ -76,6 +87,14 @@ data:
         interaction_type: "all"
         radius: 8.0
         ph: 7.4
+      synthesis_planner:
+        enabled: true
+        service_url: "http://dd-agentic-synthesis-planner:8088/score"
+        # The RL budget, not the planner's default: 25 iterations costs
+        # 0.3-0.8 s per molecule, which is affordable per batch. The agent's
+        # out-of-band plan_synthesis tool asks for a deeper search itself.
+        iteration_limit: 25
+        score_fn: "solved_steps"
 
     jobs:
       working_dir: "/data/reinvent4_mcp/jobs"

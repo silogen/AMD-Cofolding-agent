@@ -1,8 +1,9 @@
 # admet-predictor — REST service
 
-HTTP service for consensus ADMET prediction (7 endpoints) with a double applicability domain.
-Models load **once** at startup and stay resident; each request is pure compute. Single FastAPI
-app in `services/admet-predictor/app.py` (boltz2/posebusters convention). See
+HTTP service for consensus ADMET prediction with selectable `drug` (17 endpoints)
+and `agro` (25 endpoints) model sets. Models and domain references load **once**
+at startup and stay resident; each request is pure compute. Single FastAPI app
+in `services/admet-predictor/app.py` (boltz2/posebusters convention). See
 [README.md](README.md) for the library/CLI.
 
 **Role:** REINVENT scorer (`POST /score`, one objective per endpoint) *and* agent analysis
@@ -19,7 +20,7 @@ MODELS_DIR=$PWD/models/admet \
 
 curl -s http://localhost:8084/health
 curl -s http://localhost:8084/score -H 'Content-Type: application/json' \
-     -d '{"smiles":["CC(=O)Oc1ccccc1C(=O)O"],"params":{"endpoint":"logp"}}'
+     -d '{"smiles":["CC(=O)Oc1ccccc1C(=O)O"],"params":{"endpoint":"logp","model_set":"drug"}}'
 ```
 
 ## 2. Docker build + run + test
@@ -39,7 +40,7 @@ docker run -d --name admetp -p 8084:8084 admet-predictor:latest
 ```bash
 curl -s http://localhost:8084/health          # {"status":"ok","device":"cpu",...}
 curl -s http://localhost:8084/predict -H 'Content-Type: application/json' \
-     -d '{"smiles":["CCO","c1ccccc1O"],"format":"compact"}'
+     -d '{"smiles":["CCO","c1ccccc1O"],"model_set":"drug","format":"compact"}'
 printf "smiles\nCCO\nc1ccccc1O\n" > /tmp/t.csv
 curl -s -F "file=@/tmp/t.csv" -F "format=csv" http://localhost:8084/predict_csv
 docker rm -f admetp
@@ -63,11 +64,16 @@ returned; the TTP `transform`/`weight` own the direction (no baked "more = bette
 
 ```jsonc
 // request
-{"smiles": ["CCO", "c1ccccc1O"], "params": {"endpoint": "logp"}}
+{"smiles": ["CCO", "c1ccccc1O"],
+ "params": {"endpoint": "logp", "model_set": "drug"}}
 // response
 {"scores": [-0.17, 1.53],
- "metadata": {"endpoint": "logp", "unit": "logP (dimensionless)",
-              "std": [0.21, 0.04], "ad_pass": [true, true]},
+ "metadata": {"model_set": "drug", "endpoint": "logp",
+              "unit": "logP (dimensionless)",
+              "std": [0.21, 0.04], "ad_pass": [true, true],
+              "response_ad_pass": [true, true],
+              "out_of_training_range": [false, false],
+              "excluded_models": [{}, {}]},
  "artifacts": {}}
 ```
 
@@ -85,13 +91,23 @@ Bad endpoint -> HTTP 400. Example TTP objective:
   "input_smiles": "CC(=O)Oc1ccccc1C(=O)O",
   "standardized_smiles": "CC(=O)Oc1ccccc1C(=O)[O-]",
   "ok": true,
+  "model_set": "drug",
   "predictions": {
-    "logp": {"mean": 1.14, "std": 0.14, "n_models": 3, "unit": "logP (dimensionless)",
-             "condition": "...", "per_model": {"XGBoost": .., "Chemprop-MTL": .., "CheMeleon-MTL": ..}}
+    "logp": {
+      "mean": 1.14, "std": 0.14, "n_models": 2, "n_models_total": 2,
+      "unit": "logP (dimensionless)", "condition": "...",
+      "per_model": {"XGBoost": 1.23, "Chemprop-MTL": 1.05},
+      "excluded_models": {},
+      "physical_bounds": {"lower": -8.0, "upper": 14.0},
+      "response_domain": {
+        "method": "training_p01_p99", "available": true,
+        "lower": -1.0, "upper": 6.2, "n_train": 58388, "pass": true
+      },
+      "out_of_training_range": false
+    }
   },
   "applicability_domain": {
-    "AD Tanimoto": {"score": .., "top5_mean": .., "threshold": 0.4358, "pass": true},
-    "AD Property profile FFN": {"score": .., "top5_mean": .., "threshold": 0.7334, "pass": true},
+    "AD Tanimoto": {"score": 0.82, "threshold": 0.4358, "pass": true},
     "AD Pass": true
   }
 }
@@ -99,14 +115,15 @@ Bad endpoint -> HTTP 400. Example TTP objective:
 
 ### Output formats
 - `records` (default): list of the above, one per input (order preserved; failures → `ok:false`).
-- `compact`: `{endpoints, units, conditions, models, molecules:[{input_smiles, ok, mean[], std[], ad_pass}]}`.
+- `compact`: `{endpoints, units, conditions, molecules:[{input_smiles, ok, mean[], std[], response_ad_pass[], ad_pass}]}`.
 - `table`: `{columns, rows}` (one row per molecule) — direct to a DataFrame.
 
 ### Python client
 ```python
 import requests
 r = requests.post("http://localhost:8084/predict",
-                  json={"smiles": smiles_list, "format": "compact"})
+                  json={"smiles": smiles_list, "model_set": "drug",
+                        "format": "compact"})
 res = r.json()
 ```
 
@@ -114,31 +131,22 @@ res = r.json()
 
 | model | representation | notes |
 |---|---|---|
-| XGBoost | RDKit physchem (~210) + Avalon-2048 | 500 trees; 5-seed mean |
-| Chemprop-MTL | learned D-MPNN | 7-task multitask, from scratch |
-| CheMeleon-MTL | foundation-initialized D-MPNN | 7-task multitask |
+| XGBoost | Avalon-2048 plus the serialized descriptor contract | one model per endpoint |
+| Chemprop-MTL | learned D-MPNN | 17-task drug or 25-task agro checkpoint |
 
-Trained on 156,797 curated molecules; evaluated by a shared **Butina 5-fold scaffold-cluster
-CV** (generic Bemis-Murcko scaffolds, cutoff 0.4, whole clusters held out). Consensus = mean
-of the three. Multitask objective = MAE on standardized targets + per-head inverse-std weights.
-
-### Performance (out-of-fold consensus)
-
-| endpoint | R² | RMSE | MAE |
-|---|---:|---:|---:|
-| logp | 0.826 | 0.744 | 0.509 |
-| logd | 0.740 | 0.709 | 0.507 |
-| aqueous_solubility | 0.704 | 0.859 | 0.630 |
-| kinetic_solubility | 0.475 | 0.444 | 0.328 |
-| caco2_permeability | 0.414 | 0.467 | 0.342 |
-| efflux_mdck | 0.438 | 0.474 | 0.350 |
-| efflux_caco2 | 0.521 | 0.287 | 0.200 |
+Consensus is the mean of physically valid available members. Chemprop v2 embeds
+its inverse target scaler in the checkpoint; inference therefore uses checkpoint
+outputs directly and does not apply `mean + std × prediction` again.
 
 ## Applicability domain
-Two orthogonal nearest-neighbor signals to the 156k training set: **AD Tanimoto** (Avalon
-structural) and **AD Property profile FFN** (Chemprop latent cosine). Thresholds = 5th
-percentile of a 1M-compound scan (~95% of a screening library passes each axis). `AD Pass` =
-`true` only if both pass; `false` ⇒ extrapolation, treat cautiously.
+Three distinct checks are reported:
+
+1. **Chemical-space AD:** nearest-neighbor Avalon Tanimoto against training structures.
+2. **Physical member validation:** a model member outside absolute endpoint bounds
+   is excluded from consensus and retained under `excluded_models` for audit.
+3. **Response-domain AD:** the consensus is flagged when outside the endpoint's
+   observed training p01–p99 interval. This is a warning only; the value remains
+   available.
 
 ## Configuration (environment variables)
 
@@ -157,4 +165,5 @@ horizontally (multiple containers / `--workers N`, each loads its own models).
 
 ## Limitations
 Regression estimates, not measurements; harder endpoints (kinetic solubility, permeability,
-efflux) have modest R². Trained at pH 7.4. `AD Pass: false` = out of the training region.
+efflux) have modest R². Trained at pH 7.4. Chemical-space and response-domain
+flags measure different kinds of extrapolation and should both be reported.

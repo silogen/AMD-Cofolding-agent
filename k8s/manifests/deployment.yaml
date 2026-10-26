@@ -41,7 +41,8 @@ spec:
                 /data/logs \
                 /data/tb-logs \
                 /data/agent-logs \
-                /data/boltz-cache
+                /data/boltz-cache \
+                /data/aizynth-stock
               chmod -R 0777 /data
           volumeMounts:
             - name: data
@@ -91,6 +92,21 @@ spec:
                 secretKeyRef:
                   name: dd-agentic-llm
                   key: REINVENT4_AGENT_API_KEY
+            - name: SP_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: SP_SERVICE_URL
+            - name: ANNOTATION_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: ANNOTATION_SERVICE_URL
+            - name: IP_SHARED_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: IP_SHARED_DIR
           resources:
             # No amd.com/gpu. REINVENT4 lives in dd-agentic-reinvent-runner
             # now, so this pod holds the agent and the MCP server only and is

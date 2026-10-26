@@ -9,6 +9,7 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -221,9 +222,10 @@ class JobInfo:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "error": self.error,
             "exit_code": self.exit_code,
         }
+        if self.error is not None:
+            d["error"] = self.error
         if self.job_type == JobType.OPTIMIZATION:
             d["max_steps"] = self.max_steps
             d["csv_path"] = str(self.csv_path)
@@ -490,6 +492,104 @@ class JobManager:
             "n_training_smiles": len(smiles) if smiles else None,
         }
 
+    def submit_toml(
+        self,
+        toml_str: str,
+        job_name: str = "generation",
+        extra_files: dict[str, str] | None = None,
+        max_steps: int = 0,
+        model: str = "generation",
+    ) -> dict[str, Any]:
+        """Write *toml_str* to a new job directory and launch the worker subprocess.
+
+        This is the block-08 generation entry-point — it accepts a pre-built TOML
+        string (from ``generate_generation_toml``) instead of building it from a TTP,
+        making it mode-agnostic (reinvent / libinvent / linkinvent).
+
+        Parameters
+        ----------
+        extra_files:
+            Optional dict of ``{filename: content}`` for auxiliary files that the
+            TOML references (e.g. ``{"warheads.smi": "[*:1]c1cc...|[*:2]CC..."}``
+            for LinkInvent fragment pairs).
+
+        Returns the same lifecycle/path metadata shape as ``create_and_start``.
+        """
+        import uuid  # noqa: PLC0415
+
+        if (full := self._refuse_if_full()) is not None:
+            return full
+
+        job_id = uuid.uuid4().hex[:16]
+        job_dir = self._working_root / f"job_{job_id}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        toml_path = str(job_dir / "config.toml")
+        (job_dir / "config.toml").write_text(toml_str, encoding="utf-8")
+
+        # Write auxiliary files (e.g. warheads.smi for LinkInvent)
+        if extra_files:
+            for fname, content in extra_files.items():
+                (job_dir / fname).write_text(content, encoding="utf-8")
+        else:
+            # Auto-extract auxiliary SMILES files from TOML comments.
+            import re as _re  # noqa: PLC0415
+
+            # LinkInvent: # Fragments: SMILES1 | SMILES2  → warheads.smi
+            match = _re.search(r"^# Fragments: (.+)$", toml_str, _re.MULTILINE)
+            if match and "smiles_file" in toml_str:
+                frags = [f.strip() for f in match.group(1).split("|")]
+                if len(frags) >= 2:
+                    # RNN LinkinVent vocabulary uses bare [*] not [*:n]
+                    rnn_frags = [_re.sub(r'\[\*:\d+\]', '[*]', f) for f in frags]
+                    (job_dir / "warheads.smi").write_text("|".join(rnn_frags), encoding="utf-8")
+
+            # LibInvent: # Scaffold: SMILES  → scaffolds.smi
+            # - RNN prior: bare [*] (no map numbers; vocabulary limitation)
+            # - Transformer prior: keep [*:n] WITH map numbers so LibInvent can
+            #   fill each attachment position separately (richer vocabulary)
+            match2 = _re.search(r"^# Scaffold: (.+)$", toml_str, _re.MULTILINE)
+            if match2 and "scaffolds.smi" in toml_str:
+                scaffold = match2.group(1).strip()
+                # Only treat as a transformer prior when "transformer" appears in a
+                # model/prior-file assignment — not anywhere in the TOML (a stray
+                # occurrence in a comment or unrelated path must not flip handling).
+                is_transformer = bool(
+                    _re.search(
+                        r'(?:prior_file|agent_file|model_file|model)\s*=\s*'
+                        r'["\'][^"\']*transformer',
+                        toml_str,
+                        _re.IGNORECASE,
+                    )
+                )
+                if not is_transformer:
+                    scaffold = _re.sub(r'\[\*:\d+\]', '[*]', scaffold)
+                # transformer keeps [*:1], [*:2] intact
+                (job_dir / "scaffolds.smi").write_text(scaffold + "\n", encoding="utf-8")
+
+        job = JobInfo(
+            job_id=job_id,
+            ttp_id=job_name,
+            ttp_version=1,
+            model=model,
+            job_type=JobType.OPTIMIZATION,
+            state=JobState.QUEUED,
+            working_dir=str(job_dir),
+            toml_path=toml_path,
+            max_steps=max_steps,
+            created_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        )
+
+        self._save_metadata(job)
+
+        if (full := self._claim_slot(job)) is not None:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return full
+
+        self._start_process(job)
+
+        return job.to_dict()
+
     def get_status(self, job_id: str) -> dict[str, Any]:
         """Return current job status with score trajectory.
 
@@ -505,9 +605,21 @@ class JobManager:
         self._poll_process(job)
 
         result = job.to_dict()
-        trajectory = self._parse_trajectory(job)
-        if trajectory:
-            result["trajectory"] = trajectory
+        monitoring = self._parse_trajectory(job)
+        result["metrics_available"] = monitoring["metrics_available"]
+        result["csv_readiness"] = monitoring["csv_readiness"]
+        result["current_step"] = monitoring["current_step"]
+        result["max_steps"] = job.max_steps
+        result["last_csv_row"] = monitoring.get("last_csv_row")
+        result["data_policy"] = (
+            "metrics_available"
+            if monitoring["metrics_available"]
+            else "metrics_withheld"
+        )
+        if monitoring.get("reason"):
+            result["metrics_unavailable_reason"] = monitoring["reason"]
+        if monitoring["metrics_available"]:
+            result["trajectory"] = monitoring["trajectory"]
 
         return result
 
@@ -887,27 +999,61 @@ class JobManager:
     # CSV parsing for monitoring
     # ------------------------------------------------------------------
 
-    def _parse_trajectory(self, job: JobInfo) -> Optional[dict[str, Any]]:
+    def _parse_trajectory(self, job: JobInfo) -> dict[str, Any]:
         """Parse the output CSV to build a score trajectory for agent monitoring.
 
-        Returns per-step aggregated metrics: mean/max total score,
-        per-component means, validity rate, and current step count.
+        The return shape is explicit even before REINVENT writes its first row.
+        Callers must not infer metrics from a missing ``trajectory`` key.
         """
 
         csv_path = job.csv_path
         if not csv_path.exists():
-            return None
+            return {
+                "metrics_available": False,
+                "csv_readiness": "missing",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": "Results CSV has not been created yet.",
+            }
 
         try:
-            import pandas as pd
-
+            from pandas.errors import EmptyDataError
+        except ImportError as exc:
+            return {
+                "metrics_available": False,
+                "csv_readiness": "parse_error",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": f"pandas unavailable: {exc}",
+            }
+        try:
             df = read_results_csv(csv_path)
+        except EmptyDataError:
+            return {
+                "metrics_available": False,
+                "csv_readiness": "empty",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": "Results CSV exists but has no header or rows yet.",
+            }
         except Exception as exc:
             logger.warning("Failed to parse CSV for job %s: %s", job.job_id, exc)
-            return None
+            return {
+                "metrics_available": False,
+                "csv_readiness": "parse_error",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
 
         if df.empty:
-            return {"current_step": 0, "n_molecules_total": 0}
+            return {
+                "metrics_available": False,
+                "csv_readiness": "header_only",
+                "current_step": 0,
+                "last_csv_row": None,
+                "reason": "Results CSV has a header but no molecule rows yet.",
+            }
 
         total_col = score_column(df.columns)
 
@@ -959,10 +1105,21 @@ class JobManager:
         diagnostics = _compute_diagnostics(
             df, total_col, step_col, component_stats, job,
         )
+        aggregate_check = _aggregate_consistency_check(df, total_col)
+        if aggregate_check:
+            if diagnostics is None:
+                diagnostics = {}
+            diagnostics["aggregate_consistency"] = aggregate_check
         if diagnostics:
             trajectory["diagnostics"] = diagnostics
 
-        return trajectory
+        return {
+            "metrics_available": True,
+            "csv_readiness": "ready",
+            "current_step": current_step,
+            "last_csv_row": len(df) - 1,
+            "trajectory": trajectory,
+        }
 
     def _parse_top_candidates(
         self,
@@ -994,6 +1151,29 @@ class JobManager:
 
         if "SMILES_state" in df.columns:
             df = df[df["SMILES_state"] == 1]
+
+        # J1: chemical validity gate — RDKit sanitize + valence check.
+        # Filters out molecules that would crash Boltz or produce misleading
+        # cofolding results (as happened with compound 3 in the agro run).
+        def _is_chemically_valid(smi: str) -> bool:
+            try:
+                from rdkit import Chem  # noqa: PLC0415
+                from rdkit import RDLogger  # noqa: PLC0415
+                RDLogger.DisableLog("rdApp.*")
+                mol = Chem.MolFromSmiles(smi, sanitize=True)
+                if mol is None:
+                    return False
+                Chem.SanitizeMol(mol)
+                return True
+            except Exception:
+                return False
+
+        if smiles_col:
+            valid_mask = df[smiles_col].apply(lambda s: _is_chemically_valid(str(s)))
+            n_invalid = int((~valid_mask).sum())
+            df = df[valid_mask]
+            if n_invalid:
+                df.attrs["n_invalid_filtered"] = n_invalid
 
         if total_col and min_score is not None:
             df = df[df[total_col] >= min_score]
@@ -1258,6 +1438,76 @@ def _per_component_stats(df: Any) -> dict[str, dict[str, Any]]:
         stats[col] = entry
 
     return stats
+
+
+def _aggregate_consistency_check(
+    df: Any,
+    total_col: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Compare the latest reported total with simple component aggregates.
+
+    REINVENT may apply weights, so a mismatch is a diagnostic rather than a
+    hard failure.  It is still valuable: it prevents an agent from publishing
+    a total that is arithmetically incompatible with the component values it
+    displays in the same report.
+    """
+    if total_col is None or total_col not in df.columns or df.empty:
+        return None
+
+    skip_cols = {
+        "SMILES", "SMILES_state", "Step", "step", "batch", total_col,
+    }
+    component_cols = [
+        col
+        for col in df.columns
+        if col not in skip_cols
+        and "(raw)" not in col
+        and getattr(df[col].dtype, "kind", "") in ("f", "i", "u")
+    ]
+    if len(component_cols) < 2:
+        return None
+
+    latest = df.dropna(subset=[total_col]).tail(1)
+    if latest.empty:
+        return None
+
+    values: list[float] = []
+    for col in component_cols:
+        value = _safe_float(latest.iloc[0][col])
+        if value is not None:
+            values.append(value)
+    if len(values) < 2:
+        return None
+
+    reported = _safe_float(latest.iloc[0][total_col])
+    if reported is None:
+        return None
+
+    arithmetic = sum(values) / len(values)
+    if any(value <= 0 for value in values):
+        geometric = 0.0
+    else:
+        geometric = math.exp(sum(math.log(value) for value in values) / len(values))
+
+    tolerance = max(0.02, abs(reported) * 0.10)
+    nearest_delta = min(
+        abs(reported - arithmetic),
+        abs(reported - geometric),
+    )
+    consistent = nearest_delta <= tolerance
+    result: dict[str, Any] = {
+        "reported_total": round(reported, 4),
+        "unweighted_arithmetic_mean": round(arithmetic, 4),
+        "unweighted_geometric_mean": round(geometric, 4),
+        "n_components": len(values),
+        "matches_unweighted_aggregate": consistent,
+    }
+    if not consistent:
+        result["warning"] = (
+            "Reported total differs from both unweighted component aggregates; "
+            "verify component weights before narrating the trajectory."
+        )
+    return result
 
 
 def _step_trajectory(

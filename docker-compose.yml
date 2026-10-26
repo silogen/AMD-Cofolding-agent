@@ -50,7 +50,8 @@ services:
       # Azure deployments endpoint <base-url>/openai/deployments/<model>.
       - REINVENT4_AGENT_API_VERSION=${REINVENT4_AGENT_API_VERSION:-}
       - REINVENT4_AGENT_NO_VERIFY_SSL=${REINVENT4_AGENT_NO_VERIFY_SSL:-true}
-      - REINVENT4_AGENT_THINKING_BUDGET=${REINVENT4_AGENT_THINKING_BUDGET:-1024}
+      - REINVENT4_AGENT_THINKING_BUDGET=${REINVENT4_AGENT_THINKING_BUDGET:-4096}
+      - REINVENT4_AGENT_MAX_TOKENS=${REINVENT4_AGENT_MAX_TOKENS:-16384}
       - REINVENT4_AGENT_REASONING_EFFORT=${REINVENT4_AGENT_REASONING_EFFORT:-}
       - REINVENT4_AGENT_MULTI_AGENT=${REINVENT4_AGENT_MULTI_AGENT:-true}
       # Fixed to the /logs mount target inside the container (do NOT inherit
@@ -62,6 +63,9 @@ services:
       # to force timestamps in `docker compose logs`; leave empty for a clean
       # interactive session.
       - REINVENT4_AGENT_LOG_TIMESTAMPS=${REINVENT4_AGENT_LOG_TIMESTAMPS:-}
+      # Block 10 annotation cache/proxy.
+      - ANNOTATION_SERVICE_URL=http://annotation:8080
+      - SP_SERVICE_URL=http://structure-prep:8080
     # No extra_hosts: the gateway is reached directly by DNS. Nodes that
     # cannot resolve/reach it need the SSH tunnel, which is opt-in via
     # `-f docker-compose.yml -f docker-compose.tunnel.yml`.
@@ -77,6 +81,12 @@ services:
       retrodmta-predictor:
         condition: service_healthy
       interaction-profiler:
+        condition: service_healthy
+      synthesis-planner:
+        condition: service_healthy
+      annotation:
+        condition: service_healthy
+      structure-prep:
         condition: service_healthy
 
   # REINVENT4 lives here: RL/TL jobs, the in-process Scorer, the registries.
@@ -138,6 +148,29 @@ services:
       retries: 3
       start_period: 60s
 
+  structure-prep:
+    build:
+      context: .
+      dockerfile: services/structure-prep/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8087:8080"
+    volumes:
+      - ${DATA_DIR:-./data}/shared:/shared
+    environment:
+      - SP_SHARED_DIR=/shared
+      - SP_HOST=0.0.0.0
+      - SP_PORT=8080
+      - SP_MAX_CONCURRENCY=1
+    healthcheck:
+      test: ["CMD", "micromamba", "run", "-n", "base",
+             "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   posebusters:
     build: ./services/posebusters
     ports:
@@ -173,3 +206,54 @@ services:
       - "127.0.0.1:8083:8080"
     volumes:
       - ${DATA_DIR:-./data}/shared:/shared
+    environment:
+      - ANNOTATION_SERVICE_URL=http://annotation:8080
+    depends_on:
+      annotation:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  synthesis-planner:
+    build:
+      context: .
+      dockerfile: services/synthesis-planner/Dockerfile
+    ports:
+      # Host 8089, not 8086: reinvent-runner publishes 8086. Only the host side
+      # moves -- in-compose callers still reach it on 8086 via service DNS,
+      # which is what scoring.synthesis_planner.service_url points at.
+      - "127.0.0.1:8089:8086"
+    volumes:
+      - ${DATA_DIR:-./data}/shared:/shared
+      - ${AIZYNB_STOCK_DIR:-/data/aizynthfinder/stock}:/app/models/stock:ro
+      - ${DATA_DIR:-./data}/synthesis_cache:/cache
+    environment:
+      - PLANNER_MAX_CONCURRENCY=${PLANNER_MAX_CONCURRENCY:-2}
+      - SYNC_BATCH_LIMIT=${SYNC_BATCH_LIMIT:-5}
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/conda/bin/python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8086/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  annotation:
+    build:
+      context: services/annotation
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - ${DATA_DIR:-./data}/shared:/shared
+    environment:
+      - ANNOTATION_CACHE_DIR=/shared/annotations
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

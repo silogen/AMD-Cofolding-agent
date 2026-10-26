@@ -99,6 +99,21 @@ spec:
                 secretKeyRef:
                   name: dd-agentic-llm
                   key: REINVENT4_AGENT_API_KEY
+            - name: SP_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: SP_SERVICE_URL
+            - name: ANNOTATION_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: ANNOTATION_SERVICE_URL
+            - name: IP_SHARED_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: IP_SHARED_DIR
           resources:
             # No amd.com/gpu, and this is the whole point of the Phase 2 split:
             # N supervisors cost N CPU allocations, and the GPUs go to Boltz

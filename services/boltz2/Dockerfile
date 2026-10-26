@@ -26,7 +26,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e .
 
 # --- Install FastAPI wrapper ---
-COPY services/boltz2/app.py services/boltz2/requirements.txt /app/wrapper/
+COPY services/boltz2/app.py \
+     services/boltz2/structure_conditioning.py \
+     services/boltz2/requirements.txt \
+     services/boltz2/UPSTREAM_COMMIT \
+     /app/wrapper/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /app/wrapper/requirements.txt
 

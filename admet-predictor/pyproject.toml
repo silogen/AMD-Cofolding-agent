@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "admet-predictor"
 version = "1.0.0"
-description = "Consensus ADMET prediction (XGBoost + Chemprop-MTL + CheMeleon-MTL) with double applicability domain, over 7 physchem/ADME endpoints."
+description = "Manifest-driven drug/agro ADMET prediction with XGBoost + Chemprop ensembles and applicability-domain reporting."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

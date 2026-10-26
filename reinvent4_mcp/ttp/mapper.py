@@ -121,7 +121,8 @@ def ttp_to_scorer_config(ttp: TTP) -> dict[str, Any]:
 
     # 2. Scoring objectives -- topologically sorted so pipeline
     #    dependencies (depends_on) are respected
-    ordered = _topological_sort_objectives(ttp.scoring.objectives)
+    objectives = _objectives_with_pose_gate(ttp)
+    ordered = _topological_sort_objectives(objectives)
     for obj in ordered:
         if obj.type == "native":
             assert obj.component is not None
@@ -140,6 +141,45 @@ def ttp_to_scorer_config(ttp: TTP) -> dict[str, Any]:
         "type": ttp.scoring.aggregation,
         "component": scorer_components,
     }
+
+
+def _objectives_with_pose_gate(ttp: TTP) -> list[ScoringObjective]:
+    """Ensure every Boltz affinity reward is hard-gated by PoseBusters."""
+    objectives = list(ttp.scoring.objectives)
+    boltz = [
+        objective
+        for objective in objectives
+        if objective.type == "external" and objective.service == "boltz"
+    ]
+    if not boltz:
+        return objectives
+    if ttp.scoring.aggregation != "geometric_mean":
+        raise ValueError(
+            "Boltz affinity objectives require geometric_mean aggregation so "
+            "the automatic PoseBusters objective is a hard zero gate."
+        )
+
+    for producer in boltz:
+        already_gated = any(
+            objective.type == "external"
+            and objective.service == "posebusters"
+            and objective.depends_on == producer.name
+            for objective in objectives
+        )
+        if already_gated:
+            continue
+        objectives.append(
+            ScoringObjective(
+                name=f"{producer.name}_pose_gate",
+                type="external",
+                service="posebusters",
+                service_url="http://posebusters:8080/score",
+                depends_on=producer.name,
+                weight=1.0,
+                comment="Automatically added hard pose-validity gate.",
+            )
+        )
+    return objectives
 
 
 def ttp_to_native_scorer_config(ttp: TTP) -> dict[str, Any]:
@@ -220,7 +260,11 @@ def extract_native_components(ttp: TTP) -> list[dict[str, Any]]:
             if obj.params:
                 from reinvent4_mcp.tools.scoring import _normalize_endpoint_params
 
-                entry["params"] = _normalize_endpoint_params(obj.params)
+                entry["params"] = _normalize_endpoint_params(
+                    _native_component_params_with_defaults(
+                        obj.component or "", obj.params
+                    )
+                )
             components.append(entry)
 
     return components
@@ -369,21 +413,29 @@ def get_mapper_summary(
     n_pre_scoring = (
         len(ttp.pre_scoring.components) if ttp.pre_scoring else 0
     )
+    effective_objectives = _objectives_with_pose_gate(ttp)
     native_objectives = [
-        o.name for o in ttp.scoring.objectives if o.type == "native"
+        o.name for o in effective_objectives if o.type == "native"
     ]
     external_objectives = [
-        o.name for o in ttp.scoring.objectives if o.type == "external"
+        o.name for o in effective_objectives if o.type == "external"
     ]
     n_constraints = len(ttp.constraints) if ttp.constraints else 0
 
     pipeline_deps: list[dict[str, str]] = []
-    for obj in ttp.scoring.objectives:
+    for obj in effective_objectives:
         if obj.depends_on:
             pipeline_deps.append(
                 {"from": obj.depends_on, "to": obj.name}
             )
 
+    effective_ttp = ttp.model_copy(
+        update={
+            "scoring": ttp.scoring.model_copy(
+                update={"objectives": effective_objectives}
+            )
+        }
+    )
     return {
         "n_pre_scoring": n_pre_scoring,
         "n_native_objectives": len(native_objectives),
@@ -397,7 +449,9 @@ def get_mapper_summary(
         ),
         "native_objective_names": native_objectives,
         "external_objective_names": external_objectives,
-        "external_components": describe_external_objectives(ttp, scorer_config),
+        "external_components": describe_external_objectives(
+            effective_ttp, scorer_config
+        ),
         "pipeline_dependencies": pipeline_deps,
         "aggregation": ttp.scoring.aggregation,
     }
@@ -468,10 +522,26 @@ def _map_native_component(
     if isinstance(source, ScoringObjective) and source.params:
         from reinvent4_mcp.tools.scoring import _normalize_endpoint_params
 
-        endpoint["params"] = _normalize_endpoint_params(source.params)
+        endpoint["params"] = _normalize_endpoint_params(
+            _native_component_params_with_defaults(component_type, source.params)
+        )
     return {
         component_type: {"endpoint": [endpoint]},
     }
+
+
+def _native_component_params_with_defaults(
+    component_type: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Fill required endpoint parameters for well-known native components."""
+    out = dict(params)
+    normalized = component_type.lower().replace("-", "").replace("_", "")
+    if normalized in {"tanimotosimilarity", "tanimotodistance"}:
+        out.setdefault("radius", 2)
+        out.setdefault("use_counts", True)
+        out.setdefault("use_features", False)
+    return out
 
 
 def _map_external_objective(
@@ -527,10 +597,16 @@ def _map_external_objective(
     # Inject process config defaults for PoseBusters before TTP overrides
     if objective.service == "posebusters":
         params.update(_get_posebusters_defaults())
+        # Pose validity is a hard gate. Service errors and declined/null
+        # verdicts must score zero, never NaN (which REINVENT may drop from
+        # aggregation).
+        params["failure_score"] = 0.0
+
+    # Inject model-stack default before objective-level ADMET overrides.
+    if objective.service == "admet":
+        params.update(_get_admet_defaults())
 
     # Inject process config defaults for RetroDMTA (method/window) before TTP overrides.
-    # ADMET has no operational defaults; its endpoint is supplied per objective via
-    # service_params ({"endpoint": "logp"}).
     if objective.service == "retrodmta":
         params.update(_get_retrodmta_defaults())
 
@@ -573,6 +649,29 @@ def _map_external_objective(
             # present, else auto-enable the MSA server so the cofold never
             # fails for lack of an alignment.
             params.update(_resolve_boltz_msa(ttp.target.protein_sequence))
+
+        # L3: affinity-limit preflight
+        seq_len = len(ttp.target.protein_sequence)
+        if seq_len > 128:
+            import logging as _log  # noqa: PLC0415
+            _log.getLogger(__name__).warning(
+                "protein_sequence length %d exceeds the Boltz affinity-head "
+                "training maximum of 128 tokens; affinity output will be inaccurate.",
+                seq_len,
+            )
+
+        # E3: binding-site constraints from TargetConfig
+        if ttp.target.binding_site_residues:
+            params["pocket_constraints"] = [{
+                "binder": "B",
+                "contacts": ttp.target.binding_site_residues,
+                "max_distance": ttp.target.binding_site_max_distance_A,
+                "force": ttp.target.binding_site_force,
+            }]
+        if ttp.target.contact_pairs:
+            params["contact_constraints"] = ttp.target.contact_pairs
+        if ttp.target.covalent_bond:
+            params["bond_constraints"] = [ttp.target.covalent_bond]
 
     # protein_pdb_path is relevant for both structure prediction and
     # pose validation services
@@ -712,6 +811,14 @@ def _get_retrodmta_defaults() -> dict[str, Any]:
     return {"method": r.method, "window": r.window}
 
 
+def _get_admet_defaults() -> dict[str, Any]:
+    """Pull the default ADMET model stack from process configuration."""
+
+    from reinvent4_mcp.config import get_config
+
+    return {"model_set": get_config().scoring.admet.model_set}
+
+
 def _get_interaction_profiler_defaults() -> dict[str, Any]:
     """Pull interaction-profiler operational defaults from the process config."""
 
@@ -739,4 +846,90 @@ def _map_constraint(constraint: ConstraintConfig) -> dict[str, Any]:
 
     return {
         component_name: {"endpoint": [endpoint]},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Generation config mapping — block 08 addition
+# ---------------------------------------------------------------------------
+
+def ttp_to_generation_config(ttp: "TTP") -> dict[str, Any]:  # noqa: F821
+    """Map a TTP's generation section to a REINVENT4 generation config dict.
+
+    The returned dict is consumed by ``toml_generator.py`` to produce the
+    correct ``[reinvent]`` / ``[libinvent]`` / ``[linkinvent]`` TOML block.
+
+    Parameters
+    ----------
+    ttp:
+        A fully-validated TTP object.
+
+    Returns
+    -------
+    dict
+        Empty dict when ``ttp.generation`` is ``None`` (backward compat).
+        Otherwise a dict with all generation parameters.
+
+    Raises
+    ------
+    ValueError
+        If mode-specific required inputs are absent (e.g. linkinvent without
+        fragments).  These checks are redundant with schema validators but are
+        repeated here so ``ttp_to_generation_config`` is safe to call on dicts
+        deserialized outside the Pydantic stack.
+    """
+    from reinvent4_mcp.ttp.schema import GenerationMode  # noqa: PLC0415
+
+    if ttp.generation is None:
+        return {}
+
+    g = ttp.generation
+
+    # Defensive mode-specific checks (Pydantic validators already ran, but
+    # this function may also be called from non-Pydantic code paths)
+    if g.mode == GenerationMode.linkinvent:
+        if not g.linkinvent_input or not g.linkinvent_input.fragments:
+            raise ValueError(
+                "linkinvent mode requires linkinvent_input.fragments "
+                "(at least 2 fragment SMILES with attachment points)."
+            )
+        if len(g.linkinvent_input.fragments) < 2:
+            raise ValueError(
+                "linkinvent requires at least 2 fragment SMILES."
+            )
+
+    if g.mode == GenerationMode.libinvent:
+        if not g.libinvent_input or not g.libinvent_input.scaffold:
+            raise ValueError(
+                "libinvent mode requires libinvent_input.scaffold "
+                "(scaffold SMILES with [*:n] attachment points)."
+            )
+
+    if g.mode == GenerationMode.mol2mol:
+        if not g.mol2mol_input or not g.mol2mol_input.seed_smiles:
+            raise ValueError(
+                "mol2mol mode requires mol2mol_input.seed_smiles "
+                "(one or more valid seed SMILES)."
+            )
+
+    return {
+        "mode":               g.mode.value,
+        "model":              g.model,
+        "batch_size":         g.batch_size,
+        "n_steps":            g.n_steps,
+        "checkpoint_every_n": g.checkpoint_every_n,
+        "seed":               g.seed,
+        "device":             g.device,
+        "linkinvent_input": (
+            g.linkinvent_input.model_dump() if g.linkinvent_input else None
+        ),
+        "libinvent_input": (
+            g.libinvent_input.model_dump() if g.libinvent_input else None
+        ),
+        "mol2mol_input": (
+            g.mol2mol_input.model_dump() if g.mol2mol_input else None
+        ),
+        "target_artifact_ids":              g.target_artifact_ids,
+        "prepared_structure_artifact_ids":  g.prepared_structure_artifact_ids,
+        "site_artifact_ids":                g.site_artifact_ids,
     }

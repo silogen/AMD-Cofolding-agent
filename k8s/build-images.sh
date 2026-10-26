@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the eight dd_agentic images locally. No registry push.
+# Build the dd_agentic images locally. No registry push.
 #
 # Must be run from examples/dd_agentic/ (or pass --project-dir).
 # Requires REINVENT4/, boltz2/, models/admet/, and models/retrodmta/ as
@@ -55,6 +55,14 @@ docker build --file services/retrodmta-predictor/Dockerfile \
     --tag "retrodmta-predictor:${TAG}" .
 docker build --file services/interaction-profiler/Dockerfile \
     --tag "interaction-profiler:${TAG}" .
+# Downloads the AiZynthFinder policy + templates from Zenodo at build time; the
+# building-block stock is staged on the volume instead (see the manifest).
+docker build --file services/synthesis-planner/Dockerfile \
+    --tag "synthesis-planner:${TAG}" .
+docker build --file services/structure-prep/Dockerfile \
+    --tag "structure-prep:${TAG}" .
+docker build --file services/annotation/Dockerfile \
+    --tag "annotation:${TAG}" services/annotation
 docker build --file services/boltz-gateway/Dockerfile \
     --tag "boltz-gateway:${TAG}" services/boltz-gateway
 docker build --file services/campaign-store/Dockerfile \
@@ -71,6 +79,9 @@ echo "  posebusters:${TAG}"
 echo "  admet-predictor:${TAG}"
 echo "  retrodmta-predictor:${TAG}"
 echo "  interaction-profiler:${TAG}"
+echo "  synthesis-planner:${TAG}"
+echo "  structure-prep:${TAG}"
+echo "  annotation:${TAG}"
 echo "  boltz-gateway:${TAG}"
 echo "  campaign-store:${TAG}"
 echo "  reinvent-runner:${TAG}"

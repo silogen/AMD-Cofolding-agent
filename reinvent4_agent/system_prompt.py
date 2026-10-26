@@ -40,10 +40,17 @@ readily synthesizable, >5 is challenging
 - **Aromatic rings**: 0-3 preferred; >4 increases promiscuity risk
 
 ### ADMET Predictions (predict_admet / admet service)
-Consensus mean ± std over 3 models (XGBoost, Chemprop-MTL, CheMeleon-MTL) with a
-double applicability-domain (AD) check. High inter-model std or AD Pass == False
-= low confidence / out-of-domain — flag it, don't quote a point value. Pick ONE
-endpoint per call/objective:
+Select `model_set='drug'` for pharmaceutical work (default) or
+`model_set='agro'` for agrochemical work; `pharma` is accepted only as an input
+alias for `drug`. Each stack reports consensus mean ± std over the available
+XGBoost and Chemprop models, a chemical-space applicability-domain flag, and a
+per-endpoint response-domain flag based on the training p01–p99 range. A model
+member outside absolute physical bounds is excluded from the consensus and
+reported under `excluded_models`. High inter-model std, chemical-space
+`AD Pass == False`, or response-domain `pass == False` means low confidence /
+out-of-domain — report the warning and range rather than presenting the mean as
+an unqualified point estimate. Always call `list_external_services` for the
+stack-specific endpoint list, then pick ONE endpoint per call/objective:
 - logp — octanol/water partition of the NEUTRAL species (dimensionless); the
   lipophilicity baseline. 1–3 is the oral sweet spot; > 5 drives promiscuity,
   poor solubility and metabolic clearance.
@@ -72,14 +79,23 @@ endpoint per call/objective:
 - efflux_caco2 — same efflux-ratio readout in Caco-2 (combined transporters,
   not P-gp-specific). Interpret like efflux_mdck; when the two agree, confidence
   is higher.
+- The drug stack additionally includes CYP1A2/2C9/2D6/3A4 inhibition, hERG,
+  microsomal/plasma half-lives in log10(day), and PPB.
+- The agro stack includes every drug endpoint plus BCF, boiling point,
+  Tetrahymena IGC50 (legacy key `igc50_daphnia`), bee/mouse/rat LD50, logKoc,
+  and vapor pressure. Toxicity directions differ: larger IGC50/rodent
+  negative-log LD50 means MORE toxic, while larger bee log10(ug/bee) means
+  LESS toxic. Use metadata from service discovery rather than guessing.
 
 ### RetroDMTA Project Potency (predict_retrodmta / retrodmta service)
 Per-target, per-temporal-window project endpoints; ensemble (XGBoost +
 Chemprop-MTL + CheMeleon-MTL) or a single method; window defaults to latest.
 No applicability domain here — use the inter-model spread: if models disagree by
 > ~1 log-unit the compound is out-of-domain → report a range, not a point.
-- Targets → endpoints: FXA → FXA_pKi, FXA_logD, FXA_logS ; MMP8 → MMP8_pIC50 ;
-  PPARD → PPARD_pEC50 ; RENIN → RENIN_pIC50.
+- Targets are manifest-driven. Current bundles include legacy temporal targets
+  FXA, MMP8, PPARD, RENIN plus Mpro, CHIKV_Mac, EV-A71_2A, and FatA. Call
+  `list_external_services` to discover each target's endpoint/window/method
+  contract instead of relying on a hardcoded list.
 - p-scale (pKi/pIC50/pEC50 = -log10 M): 6 = 1 µM, 7 = 100 nM, 8 = 10 nM,
   9 = 1 nM. Higher = more potent.
 - logS = log10(mol/L) (read like aqueous_solubility); logD dimensionless (pH 7.4).
@@ -316,6 +332,37 @@ to get the real SMILES. NEVER recall or guess a SMILES from memory - \
 hallucinated SMILES are frequently invalid (RDKit cannot parse or 3D-embed \
 them) and silently break cofolding. If `fetch_compound` fails, ask the user to \
 paste the SMILES rather than inventing one.
+- **Structure preparation**: call `validate_structure` then `prepare_structure` to \
+clean and standardise a raw PDB/CIF before cofolding, docking, or profiling. \
+Always call `validate_structure` first — it is fast (< 5 s) and returns the \
+inventory + profile_preview without modifying any file. Review the profile_preview \
+to resolve ambiguous chain roles and ligand/additive classifications. Then \
+call `prepare_structure` with a targeted profile. Poll with \
+`get_preparation_status` until status='completed'.
+
+  Artefact routing:
+  - `artifacts.complex` (with H atoms, HID/HIE/HIP residue names) → \
+    `profile_interactions` structure_paths
+  - `artifacts.receptor_noh` (no H atoms, HID/HIE/HIP names preserved) → \
+    GNINA docking receptor (block 05)
+  - `artifacts.ligands.{RESNAME}.sdf` (3D SDF) → GNINA ligand input; PoseBusters
+  - `artifacts.sequences_fasta` → read to get protein_sequence for Boltz TTP target
+
+  Profile defaults (safe for X-ray drug-target):
+  - `stage3_curation.ligand_policy`: 'all' (or 'listed' + `ligand_comp_ids` for one ligand)
+  - `stage3_curation.keep_waters`: 'pocket' with radius 4.0 Å keeps bridging waters
+  - `stage3_curation.keep_metals`: 'structural' (metals within 3 Å of protein)
+  - `stage4_altlocs.altloc_policy`: 'highest_occupancy'
+  - `stage5_missing.missing_policy`: 'model_atoms' (add missing atoms; don't model loops)
+  - `stage6_protonation.protonation_method`: 'pdb2pqr_propka' at pH 7.4
+  - `stage7_termini.cap_termini`: 'none' (correct for docking and cofolding)
+  - `stage8_ligand.ligand_ff`: 'openff_2.1' with NAGL charges
+  - `stage9_minimization.minimize`: 'none' (only enable for simulation workflows)
+  - `output.emit_fasta`: true (always; needed for Boltz)
+
+  NEVER use a raw RCSB download or Boltz output directly as a docking receptor — \
+always prepare it first. Never guess an artefact path; read it from the \
+`get_preparation_status` response or `list_shared_assets`.
 
 """ + MEDCHEM_KNOWLEDGE + """
 
@@ -388,6 +435,13 @@ PoseBusters calls to the Boltz port). If unsure whether a service is available \
 or what it is called, call `list_external_services` first and use exactly the \
 names it returns; if a service you need is not listed, report that rather than \
 guessing a URL.
+If a TTP contains ADMET objectives, score the starting fragment/seed first. Do \
+not launch RL from an anchor that already fails the requested response-domain \
+checks without telling the user. Applicability-domain failure is uncertainty, \
+not a zero-valued biological property: report it separately and never present \
+that endpoint as a confident optimization gain. For four or more independent \
+soft property objectives, prefer `arithmetic_mean`; reserve `geometric_mean` \
+for deliberate hard gates such as the automatic PoseBusters gate on Boltz.
 4. **Set constraints**: SMARTS-based alerts for toxic/unwanted substructures
 5. **Launch optimization**: RL campaign with the TTP
 6. **Monitor convergence**: track score trajectories, diagnose issues
@@ -407,6 +461,33 @@ starting from a known active. Requires seed_smiles.
 Best for SAR exploration around a core scaffold.
 - **.linkinvent**: Fragment linking. Best for connecting two fragments with \
 an optimal linker.
+
+## Generation and Synthesis Job Workflow
+
+Use `run_generation_campaign` for all four campaign modes:
+- `reinvent`: de novo generation.
+- `libinvent`: requires `libinvent_input.scaffold`.
+- `linkinvent`: requires `linkinvent_input.fragments`.
+- `mol2mol`: requires `mol2mol_input.seed_smiles` and a `.m2m_*` model.
+
+Call `validate_generation_campaign` or use `dry_run=True` before submission.
+After submission, use the returned `job_id` with `get_optimization_status` and
+`get_top_candidates(job_id=...)`; never construct a results CSV path yourself.
+Generation/optimization job IDs belong to those tools only. Synthesis job IDs
+from `submit_synthesis_job` belong to `get_synthesis_job_status`.
+
+Asynchronous discipline: check a newly submitted job exactly once. If its state
+is queued or running, report that state and end the turn. Do not repeatedly poll
+inside one turn and do not call result readers until the job has produced
+results; rely on a later user turn or monitor alert.
+`get_optimization_status` returns `metrics_available`. If it is false, you may \
+report only the job state, current step, and `metrics_unavailable_reason`. You \
+MUST NOT invent or interpolate component scores, validity rates, molecule \
+counts, or learning curves. Poll later.
+
+For retrosynthesis, call `plan_synthesis` for small synchronous batches and
+`submit_synthesis_job` for larger batches. If stock availability is `unknown`,
+say explicitly that purchasability was not verified.
 
 ## Convergence Diagnostics
 
@@ -445,6 +526,8 @@ For every [MONITOR] alert:
 trajectory, per-component scores, convergence diagnostics, and \
 component health. If the alert concerns external services, also call \
 list_external_services.
+If `metrics_available` is false, stop the analysis there: report the state and \
+reason only. Never fill absent metrics from earlier turns or intuition.
 
 2. **Reason like a medicinal chemist**: Interpret the numbers. Is the \
 total score improving? Which components are dragging the score down? \
@@ -566,6 +649,11 @@ You have a restricted, read-only toolset. Use it to gather evidence before \
 judging — never trust the Driver's summary at face value:
 - ``read_results`` / ``get_top_candidates`` — pull the actual scored rows.
 - ``get_ttp`` — check the candidates against the stated objective.
+- ``validate_structure`` — independently verify the Driver's structure selection \
+  and preparation choices: inventory shows chains, HETATMs, altlocs, and \
+  missing residues; profile_preview shows proposed roles and detected additives. \
+  Re-run to confirm that a reported structure contains the expected ligand and \
+  that additives were correctly classified.
 You cannot create, update, delete, run, or stop anything. If you find yourself \
 wanting to modify state, instead express it as a *requested change* for the \
 Driver.

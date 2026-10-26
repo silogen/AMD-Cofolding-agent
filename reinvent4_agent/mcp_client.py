@@ -78,6 +78,18 @@ class MCPClient:
             "CONDA_DEFAULT_ENV",
             "REINVENT4_ROOT",
             "REINVENT4_MCP_CONFIG",
+            "REINVENT_MODELS_DIR",
+            "DD_MCP_PLUGINS_DIR",
+            # Internal service routing. The agent container may use host
+            # loopback under Slurm instead of Docker Compose DNS, so these
+            # overrides must reach the MCP subprocess that imports each tool.
+            "BOLTZ_SERVICE_URL",
+            "BOLTZ_SHARED_DIR",
+            "SYNTHESIS_SERVICE_URL",
+            "INTERACTION_PROFILER_URL",
+            "SP_SERVICE_URL",
+            "IP_SHARED_DIR",
+            "ANNOTATION_SERVICE_URL",
             # GPU access for the MCP server + the RL worker it spawns. Under
             # Apptainer --nv/--rocm, LD_LIBRARY_PATH points at the injected
             # driver libs (libcuda.so, ...); dropping it makes torch report

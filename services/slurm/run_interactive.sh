@@ -1,52 +1,125 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────
-# Run the agent interactively via Docker on a Slurm compute node.
-#
-# Usage from login node:
-#   srun --partition=batch --gres=gpu:2 --cpus-per-task=4 --mem=16G --time=4:00:00 \
-#        --pty bash services/slurm/run_interactive.sh
-#
-# Or if you already have an allocation (salloc / interactive shell):
-#   bash services/slurm/run_interactive.sh
-# ──────────────────────────────────────────────────────────────────────
+# Launch the complete Cofolding Agent stack on one Slurm GPU allocation.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# Source environment (use env.local.sh if it exists, otherwise env.sh)
-ENV_FILE="${SCRIPT_DIR}/env.local.sh"
-if [ ! -f "${ENV_FILE}" ]; then
-    ENV_FILE="${SCRIPT_DIR}/env.sh"
+if [ -z "${SLURM_JOB_ID:-}" ]; then
+    echo "ERROR: no SLURM allocation detected." >&2
+    echo "Launch this script through srun --pty on a GPU allocation." >&2
+    exit 1
 fi
-echo "Loading env from: ${ENV_FILE}"
+
+ENV_FILE="${PROJECT_DIR}/services/env.local.sh"
+if [ ! -f "${ENV_FILE}" ]; then
+    ENV_FILE="${PROJECT_DIR}/services/env.sh"
+fi
 source "${ENV_FILE}"
 
-IMAGE="${REINVENT4_AGENT_IMAGE:-dd-agent}"
-LOG_DIR="${REINVENT4_AGENT_LOG_DIR:-${PROJECT_DIR}/logs}"
-mkdir -p "${LOG_DIR}"
+echo "Agent configuration:"
+echo "  env file: ${ENV_FILE}"
+echo "  backend:  ${REINVENT4_AGENT_BACKEND}"
+echo "  model:    ${REINVENT4_AGENT_MODEL}"
+echo "  base URL: ${REINVENT4_AGENT_BASE_URL}"
 
-# Build the image on this node if it doesn't exist
+DATA_DIR="${DATA_DIR:-${PROJECT_DIR}/data}"
+export DATA_DIR
+mkdir -p \
+    "${DATA_DIR}/shared" \
+    "${DATA_DIR}/jobs" \
+    "${DATA_DIR}/logs" \
+    "${DATA_DIR}/tb_logs" \
+    "${DATA_DIR}/agent_logs" \
+    "${DATA_DIR}/synthesis_cache"
 
-docker build -f "${PROJECT_DIR}/services/dd-agent/Dockerfile" \
-    -t "${IMAGE}" "${PROJECT_DIR}"
-echo ""
+restore_pinned_checkout() {
+    local checkout="$1"
+    local repository="$2"
+    local ref_file="$3"
+    local required_path="$4"
+    local ref
+    ref="$(tr -d '[:space:]' < "${ref_file}")"
 
-echo "=== Drug Discovery Agent ==="
-echo "Node     : $(hostname)"
-echo "Image    : ${IMAGE}"
-echo "Backend  : ${REINVENT4_AGENT_BACKEND}"
-echo "Model    : ${REINVENT4_AGENT_MODEL}"
-echo "Endpoint : ${REINVENT4_AGENT_BASE_URL}"
-echo "Thinking : ${REINVENT4_AGENT_THINKING_BUDGET:-off}"
-echo "Logs     : ${LOG_DIR}"
-echo ""
+    if [ ! -e "${checkout}/${required_path}" ]; then
+        if [ -e "${checkout}" ]; then
+            echo "ERROR: ${checkout} exists but is not a valid checkout." >&2
+            exit 1
+        fi
+        echo "Restoring ${repository##*/} revision ${ref}..."
+        git init -q "${checkout}"
+        git -C "${checkout}" remote add origin "${repository}"
+        git -C "${checkout}" fetch -q --depth 1 origin "${ref}"
+        git -C "${checkout}" checkout -q --detach FETCH_HEAD
+    fi
 
-exec docker run -it --rm \
-    --device=/dev/kfd --device=/dev/dri \
-    --network host --ipc host --group-add video \
-    --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-    --shm-size 128G \
-    -e LLM_GATEWAY_KEY="${LLM_GATEWAY_KEY}" \
-    -v "${LOG_DIR}":/logs \
-    "${IMAGE}" "$@"
+    local current
+    current="$(git -C "${checkout}" rev-parse HEAD)"
+    if [ "${current}" != "${ref}" ]; then
+        echo "ERROR: ${checkout} is ${current}, expected ${ref}." >&2
+        exit 1
+    fi
+}
+
+restore_pinned_checkout \
+    "${PROJECT_DIR}/REINVENT4" \
+    "https://github.com/MolecularAI/REINVENT4.git" \
+    "${PROJECT_DIR}/services/reinvent-runner/REINVENT4_COMMIT" \
+    "reinvent"
+
+if ! git -C "${PROJECT_DIR}/REINVENT4" diff --quiet -- \
+    reinvent/runmodes/samplers/libinvent.py; then
+    echo "ERROR: REINVENT4 checkout is locally modified." >&2
+    exit 1
+fi
+
+restore_pinned_checkout \
+    "${PROJECT_DIR}/boltz2" \
+    "https://github.com/jwohlwend/boltz.git" \
+    "${PROJECT_DIR}/services/boltz2/UPSTREAM_COMMIT" \
+    "src/boltz"
+
+COMPOSE_PROJECT_NAME="cofolding-${SLURM_JOB_ID}"
+COMPOSE_ARGS=(
+    -p "${COMPOSE_PROJECT_NAME}"
+    -f "${PROJECT_DIR}/docker-compose.yml"
+)
+
+relay_pid=""
+if [[ "${REINVENT4_AGENT_BASE_URL}" =~ llm-api\.amd\.com:([0-9]+) ]]; then
+    tunnel_port="${BASH_REMATCH[1]}"
+    if ! python3 - "${tunnel_port}" <<'PY'
+import socket
+import sys
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3):
+    pass
+PY
+    then
+        echo "ERROR: no SSH reverse tunnel on 127.0.0.1:${tunnel_port}." >&2
+        exit 1
+    fi
+
+    bridge_ip="$(docker network inspect bridge \
+        --format '{{(index .IPAM.Config 0).Gateway}}')"
+    python3 "${PROJECT_DIR}/services/slurm/llm_tunnel_relay.py" \
+        --bind "${bridge_ip}" \
+        --port "${tunnel_port}" \
+        >"${DATA_DIR}/logs/llm_tunnel_relay.log" 2>&1 &
+    relay_pid="$!"
+    COMPOSE_ARGS+=(-f "${PROJECT_DIR}/docker-compose.tunnel.yml")
+fi
+
+cleanup() {
+    docker compose "${COMPOSE_ARGS[@]}" down --remove-orphans \
+        >/dev/null 2>&1 || true
+    if [ -n "${relay_pid}" ]; then
+        kill "${relay_pid}" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+echo "Building complete Cofolding Agent stack..."
+docker compose "${COMPOSE_ARGS[@]}" build
+
+echo "Starting all sidecars and interactive agent..."
+docker compose "${COMPOSE_ARGS[@]}" run --rm reinvent4-mcp "$@"

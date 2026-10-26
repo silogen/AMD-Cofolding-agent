@@ -37,6 +37,15 @@ SCORERS: dict[str, tuple[int, str]] = {
     "dd-agentic-interaction-profiler": (8083, "interaction-profiler"),
     "dd-agentic-admet": (8084, "admet-predictor"),
     "dd-agentic-retrodmta": (8085, "retrodmta-predictor"),
+    "dd-agentic-synthesis-planner": (8088, "synthesis-planner"),
+}
+
+# Called by the agents between campaigns rather than by the scorer pipeline
+# during one, so they carry no scoring ``service_url``. Same shape otherwise:
+# a Deployment, a ClusterIP Service, and a name the ConfigMap hands out.
+TOOL_SERVICES: dict[str, tuple[int, str]] = {
+    "dd-agentic-structure-prep": (8089, "structure-prep"),
+    "dd-agentic-annotation": (8090, "annotation"),
 }
 
 # What the ConfigMap actually dials per objective. Boltz goes through its
@@ -48,6 +57,7 @@ SCORER_ENDPOINTS: dict[str, tuple[str, int]] = {
     "interaction_profiler": ("dd-agentic-interaction-profiler", 8083),
     "admet": ("dd-agentic-admet", 8084),
     "retrodmta": ("dd-agentic-retrodmta", 8085),
+    "synthesis_planner": ("dd-agentic-synthesis-planner", 8088),
 }
 
 AGENT_DEPLOYMENT = "dd-agentic"
@@ -81,6 +91,12 @@ SHARED_VOLUME_DEPLOYMENTS = {
     # Reviews results and reads TTPs. Read-only, deliberately -- see
     # STRUCTURE_WRITERS below.
     CONDUCTOR_DEPLOYMENT,
+    # Writes the prepared structures and extracted ligand SDFs that Boltz and
+    # the profiler then open by the path it returned.
+    "dd-agentic-structure-prep",
+    # Caches UniProt/InterPro responses on the volume, so a restart does not
+    # re-fetch what the fleet already looked up.
+    "dd-agentic-annotation",
 }
 
 # The /shared users that must be able to *write* to it. The conductor is the
@@ -304,6 +320,103 @@ class TestScorerServices:
             named = {p["name"]: p["containerPort"] for p in container["ports"]}
             # targetPort is a name, so the container must publish it.
             assert named[ports[0]["targetPort"]] == port
+
+
+# ---------------------------------------------------------------------------
+# TestToolServices
+# ---------------------------------------------------------------------------
+
+
+class TestToolServices:
+    """structure-prep and the annotation cache: dialled by tool, not by scorer.
+
+    They reach the agents through ConfigMap env vars rather than a scoring
+    ``service_url``, which is the one thing that makes them easy to add to the
+    cluster and forget to wire up.
+    """
+
+    def test_each_has_its_own_deployment_and_service(self, deployments, services):
+        for name, (_, container) in TOOL_SERVICES.items():
+            assert name in deployments
+            assert services[name]["spec"]["type"] == "ClusterIP"
+            assert [c["name"] for c in _containers(deployments[name])] == [container]
+
+    def test_the_service_selects_its_own_pods_on_its_own_port(
+        self, deployments, services
+    ):
+        for name, (port, _) in TOOL_SERVICES.items():
+            service = services[name]
+            pod_labels = deployments[name]["spec"]["template"]["metadata"]["labels"]
+
+            assert service["spec"]["selector"].items() <= pod_labels.items()
+
+            ports = service["spec"]["ports"]
+            assert len(ports) == 1
+            assert ports[0]["port"] == port
+            named = {
+                p["name"]: p["containerPort"]
+                for p in _containers(deployments[name])[0]["ports"]
+            }
+            assert named[ports[0]["targetPort"]] == port
+
+    def test_they_need_no_gpu(self, deployments):
+        for name in TOOL_SERVICES:
+            assert _gpus(deployments[name]) == 0
+
+    def test_every_container_has_a_health_probe(self, deployments):
+        for name in TOOL_SERVICES:
+            container = _containers(deployments[name])[0]
+            for probe in ("readinessProbe", "livenessProbe"):
+                assert container[probe]["httpGet"]["path"] == "/health"
+
+    def test_the_agents_are_told_where_they_are(self, deployments, services):
+        """The env vars reinvent4_agent.mcp_client forwards to the MCP server.
+
+        Unset, the structure-prep tools fall back to the Compose hostname
+        ``http://structure-prep:8080``, which does not resolve in the cluster,
+        and the annotation fetchers go straight to UniProt instead of the
+        cache. Both fail as "the tool is broken" rather than "it is unwired".
+        """
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]["data"]
+        wiring = {
+            "SP_SERVICE_URL": "dd-agentic-structure-prep",
+            "ANNOTATION_SERVICE_URL": "dd-agentic-annotation",
+        }
+
+        for key, service_name in wiring.items():
+            port = services[service_name]["spec"]["ports"][0]["port"]
+            assert configmap[key] == f"http://{service_name}:{port}"
+
+        for name in (AGENT_DEPLOYMENT, SUPERVISOR_DEPLOYMENT, CONDUCTOR_DEPLOYMENT):
+            env = {
+                var["name"]: var
+                for var in _containers(deployments[name])[0]["env"]
+            }
+            for key in (*wiring, "IP_SHARED_DIR"):
+                assert key in env, f"{name} is missing {key}"
+                ref = env[key]["valueFrom"]["configMapKeyRef"]
+                assert ref["key"] == key
+
+    def test_the_profiler_reads_annotations_through_the_cache(self, deployments):
+        # It is on the RL hot path, so a per-complex UniProt lookup would be
+        # both slow and dependent on egress the cluster may not have.
+        env = {
+            var["name"]: var
+            for var in _containers(deployments["dd-agentic-interaction-profiler"])[0]["env"]
+        }
+
+        assert env["ANNOTATION_SERVICE_URL"]["valueFrom"]["configMapKeyRef"][
+            "key"
+        ] == "ANNOTATION_SERVICE_URL"
+
+    def test_the_shared_mount_path_matches_what_the_agents_are_told(
+        self, deployments
+    ):
+        # The tools resolve every returned structure path against
+        # IP_SHARED_DIR, and the pods hand each other absolute paths.
+        configmap = _by_kind("ConfigMap")["dd-agentic-config"]["data"]
+
+        assert configmap["IP_SHARED_DIR"] == "/shared"
 
 
 # ---------------------------------------------------------------------------

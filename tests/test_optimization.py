@@ -274,6 +274,36 @@ class TestTOMLGeneration:
         assert "[stage.scoring.component.CustomAlerts]" in toml
         assert 'params.smarts = ["[*;r8]", "[#8][#8]"]' in toml
 
+    def test_tanimoto_single_reference_keeps_endpoint_list(self):
+        scorer = {
+            "type": "geometric_mean",
+            "component": [
+                {
+                    "TanimotoSimilarity": {
+                        "endpoint": [{
+                            "name": "seed_similarity",
+                            "weight": 1.0,
+                            "params": {
+                                "smiles": ["CC(=O)NC1=CC=C(C=C1)O"],
+                                "radius": [2],
+                                "use_counts": [True],
+                                "use_features": [False],
+                            },
+                        }]
+                    }
+                }
+            ],
+        }
+        toml = generate_reinvent_toml(
+            scorer_config=scorer,
+            prior_file="/model/prior.model",
+        )
+
+        assert 'params.smiles = ["CC(=O)NC1=CC=C(C=C1)O"]' in toml
+        assert "params.radius = 2" in toml
+        assert "params.use_counts = true" in toml
+        assert "params.use_features = false" in toml
+
     def test_diversity_filter(self):
         toml = generate_reinvent_toml(
             scorer_config=MINIMAL_SCORER_CONFIG,
@@ -1062,9 +1092,34 @@ class TestJobManagerLifecycle:
         assert 'run_type = "staged_learning"' in toml_content
         assert "max_steps = 50" in toml_content
 
-    def test_max_concurrent_jobs_enforced(self, manager, tmp_path):
-        """Cannot exceed max_concurrent_jobs."""
+    def test_submit_toml_returns_real_paths_and_max_steps(self, manager):
         with patch.object(manager, "_start_process"):
+            result = manager.submit_toml(
+                'run_type = "staged_learning"\n',
+                job_name="generation-mol2mol",
+                extra_files={"seed.smi": "CCO\nCCN\n"},
+                max_steps=77,
+                model=".m2m_medium",
+            )
+
+        job_dir = Path(result["working_dir"])
+        assert result["job_id"]
+        assert result["model"] == ".m2m_medium"
+        assert result["max_steps"] == 77
+        assert result["csv_path"] == str(job_dir / "results_1.csv")
+        assert result["checkpoint_path"] == str(job_dir / "stage.chkpt")
+        assert (job_dir / "seed.smi").read_text() == "CCO\nCCN\n"
+
+    def test_submit_toml_is_refused_when_every_slot_is_taken(self, manager):
+        """The generation entry-point shares the slots, and waits its turn.
+
+        It was written to stop every running job first, like the RL path used
+        to. Left that way it would have been a hole in the slot limit: a
+        campaign could launch generation runs indefinitely and each would kill
+        the RL jobs the supervisors were monitoring.
+        """
+        with patch.object(manager, "_start_process"):
+            running = []
             for i in range(manager._config.jobs.max_concurrent_jobs):
                 result = manager.create_and_start(
                     ttp_id=f"ttp-{i}",
@@ -1073,17 +1128,20 @@ class TestJobManagerLifecycle:
                     model="/model/prior.model",
                 )
                 assert "error" not in result
-                # _start_process is mocked, so manually set state to RUNNING
                 manager._jobs[result["job_id"]].state = JobState.RUNNING
+                running.append(result["job_id"])
 
-            result = manager.create_and_start(
-                ttp_id="ttp-excess",
-                ttp_version=1,
-                scorer_config=MINIMAL_SCORER_CONFIG,
-                model="/model/prior.model",
+            result = manager.submit_toml(
+                'run_type = "staged_learning"\n',
+                max_steps=10,
             )
-            assert "error" in result
-            assert "Maximum concurrent jobs" in result["error"]
+
+        assert "error" in result
+        assert sorted(result["active_jobs"]) == sorted(running)
+        # The jobs it would once have stopped are untouched.
+        assert all(
+            manager._jobs[job_id].state == JobState.RUNNING for job_id in running
+        )
 
     def test_several_jobs_run_at_once(self, manager, tmp_path):
         """The point of the slot limit: concurrent jobs, up to the cap.
@@ -1304,6 +1362,81 @@ class TestJobManagerLifecycle:
         assert traj["n_molecules_total"] == 4
         assert traj["n_valid"] == 3
         assert traj["validity_rate"] == 0.75
+        assert status["metrics_available"] is True
+        assert status["csv_readiness"] == "ready"
+        assert status["last_csv_row"] == 3
+        assert "error" not in status
+
+    def test_get_status_before_csv_exists(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+
+        status = manager.get_status(result["job_id"])
+        assert status["metrics_available"] is False
+        assert status["csv_readiness"] == "missing"
+        assert status["data_policy"] == "metrics_withheld"
+        assert "trajectory" not in status
+        assert "error" not in status
+
+    def test_get_status_with_zero_byte_csv(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        Path(result["working_dir"]).joinpath("results_1.csv").touch()
+
+        status = manager.get_status(result["job_id"])
+        assert status["metrics_available"] is False
+        assert status["csv_readiness"] == "empty"
+        assert "no header or rows" in status["metrics_unavailable_reason"]
+
+    def test_get_status_with_header_only_csv(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        Path(result["working_dir"]).joinpath("results_1.csv").write_text(
+            "Step,SMILES,total_score\n"
+        )
+
+        status = manager.get_status(result["job_id"])
+        assert status["metrics_available"] is False
+        assert status["csv_readiness"] == "header_only"
+
+    def test_status_flags_inconsistent_aggregate(self, manager):
+        with patch.object(manager, "_start_process"):
+            result = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+        pd.DataFrame({
+            "Step": [0],
+            "SMILES": ["CCO"],
+            "SMILES_state": [1],
+            "total_score": [0.1],
+            "QED": [0.8],
+            "SAScore": [0.8],
+        }).to_csv(
+            Path(result["working_dir"]) / "results_1.csv", index=False
+        )
+
+        status = manager.get_status(result["job_id"])
+        aggregate = status["trajectory"]["diagnostics"]["aggregate_consistency"]
+        assert aggregate["matches_unweighted_aggregate"] is False
+        assert "warning" in aggregate
 
     def test_list_jobs(self, manager):
         with patch.object(manager, "_start_process"):
@@ -1453,7 +1586,9 @@ class TestJobManagerStop:
 
         assert job.state == JobState.STOPPED
         assert result["state"] == "stopped"
-        assert not result["error"]
+        # .get, not [...]: a job with nothing wrong carries no "error" key at
+        # all, so that the agent is not shown "error": null on every poll.
+        assert not result.get("error")
 
 
 # ---------------------------------------------------------------------------
@@ -1490,8 +1625,12 @@ class TestJobManagerTopCandidates:
         would read None as the step and shift every metadata value. The rows
         are dropped instead -- partial but accurate.
         """
+        # Real SMILES, because harvesting sanitizes each row and drops what
+        # RDKit cannot parse -- a placeholder would be filtered before the
+        # ragged-row handling under test here was ever reached.
+        worse, better, wide_row = "CO", "CCO", "CCCC"
         job_id = self._completed_job(manager, pd.DataFrame({
-            "SMILES": ["a", "b"],
+            "SMILES": [worse, better],
             "SMILES_state": [1, 1],
             "Score": [0.4, 0.9],
             "step": [1, 1],
@@ -1499,11 +1638,11 @@ class TestJobManagerTopCandidates:
         job = manager._jobs[job_id]
         # A second step that reports one extra metadata column.
         with open(job.csv_path, "a") as handle:
-            handle.write("c,1,0.7,extra_metadata,2\n")
+            handle.write(f"{wide_row},1,0.7,extra_metadata,2\n")
 
         candidates = manager.get_top_candidates(job_id, top_n=5)["candidates"]
 
-        assert [c["smiles"] for c in candidates] == ["b", "a"]
+        assert [c["smiles"] for c in candidates] == [better, worse]
         assert "error" not in manager.get_top_candidates(job_id, top_n=5)
 
     def test_reinvents_own_score_column_is_recognised(self, manager):
@@ -1514,8 +1653,9 @@ class TestJobManagerTopCandidates:
         first N in the CSV -- the earliest and therefore worst molecules --
         with no `total_score` on them at all.
         """
+        worst, best, middling = "CO", "CCO", "CCC"
         job_id = self._completed_job(manager, pd.DataFrame({
-            "SMILES": ["worst", "best", "middling"],
+            "SMILES": [worst, best, middling],
             "SMILES_state": [1, 1, 1],
             "Agent": [26.4, 31.1, 28.0],
             "Prior": [26.5, 31.1, 28.1],
@@ -1526,7 +1666,7 @@ class TestJobManagerTopCandidates:
 
         candidates = manager.get_top_candidates(job_id, top_n=3)["candidates"]
 
-        assert [c["smiles"] for c in candidates] == ["best", "middling", "worst"]
+        assert [c["smiles"] for c in candidates] == [best, middling, worst]
         assert candidates[0]["total_score"] == 0.93
 
     def test_the_bookkeeping_columns_are_not_objectives(self, manager):
@@ -1554,15 +1694,16 @@ class TestJobManagerTopCandidates:
 
     def test_the_older_total_score_column_still_works(self, manager):
         """Transfer-learning output and older CSVs use that name."""
+        low, high = "CO", "CCO"
         job_id = self._completed_job(manager, pd.DataFrame({
-            "SMILES": ["low", "high"],
+            "SMILES": [low, high],
             "SMILES_state": [1, 1],
             "total_score": [0.2, 0.8],
         }))
 
         candidates = manager.get_top_candidates(job_id, top_n=2)["candidates"]
 
-        assert [c["smiles"] for c in candidates] == ["high", "low"]
+        assert [c["smiles"] for c in candidates] == [high, low]
 
     def test_top_candidates(self, manager):
         with patch.object(manager, "_start_process"):
@@ -2232,22 +2373,6 @@ class TestJobManagerTL:
         assert (job_dir / "validation.smi").exists()
         toml_content = (job_dir / "config.toml").read_text()
         assert "validation_smiles_file" in toml_content
-
-    def test_tl_max_concurrent_enforced(self, manager):
-        with patch.object(manager, "_start_process"):
-            for i in range(manager._config.jobs.max_concurrent_jobs):
-                result = manager.create_and_start_tl(
-                    model="/model/prior.model",
-                    smiles=["CCO"],
-                )
-                assert "error" not in result
-                manager._jobs[result["job_id"]].state = JobState.RUNNING
-
-            result = manager.create_and_start_tl(
-                model="/model/prior.model",
-                smiles=["CCO"],
-            )
-            assert "error" in result
 
     def test_tl_job_to_dict(self, manager, tmp_path):
         with patch.object(manager, "_start_process"):

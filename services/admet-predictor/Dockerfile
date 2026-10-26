@@ -28,8 +28,16 @@ COPY services/admet-predictor/app.py /app/app.py
 COPY models/admet /app/models
 RUN pip install --no-cache-dir /app/admet-predictor
 
-# self-test (fails the build if models/deps are broken)
-RUN python -c "from admet_predictor import core as P; d=P.predict(['CC(=O)Oc1ccccc1C(=O)O']); assert d[0]['predictions']['logp']['mean'] is not None"
+# Self-test both independently selectable model stacks.
+RUN python -c "from admet_predictor import core as P; \
+d=P.predict(['CC(=O)Oc1ccccc1C(=O)O'], model_set='drug'); \
+a=P.predict(['CC(=O)Oc1ccccc1C(=O)O'], model_set='agro'); \
+assert d[0]['predictions']['logp']['mean'] is not None; \
+assert a[0]['predictions']['bcf']['mean'] is not None; \
+assert 'Chemprop-MTL' in d[0]['predictions']['ppb']['per_model']; \
+assert 'Chemprop-MTL' in a[0]['predictions']['boiling_point']['per_model']; \
+assert d[0]['predictions']['ppb']['response_domain']['available']; \
+assert a[0]['predictions']['boiling_point']['response_domain']['available']"
 
 EXPOSE 8084
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \

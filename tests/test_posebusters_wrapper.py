@@ -188,7 +188,7 @@ class TestScoreSingleMolecule:
         )
 
         assert score is None
-        assert checks == {}
+        assert "pose_status" in checks  # now always populated
 
     def test_exception_returns_none(self):
         buster = MagicMock()
@@ -199,7 +199,7 @@ class TestScoreSingleMolecule:
         )
 
         assert score is None
-        assert checks == {}
+        assert "pose_status" in checks  # service_error or declined
 
     def test_passes_mol_cond_and_mol_true(self):
         df = _make_bust_df({"bond_lengths": True})
@@ -256,9 +256,14 @@ class TestScoreMolecules:
             self.mock_extract = mock
             yield
 
-    def test_scores_multiple_molecules(self):
+    def test_scores_multiple_molecules(self, tmp_path):
         df1 = _make_bust_df({"bond_lengths": True, "sanitization": True})
         df2 = _make_bust_df({"bond_lengths": True, "sanitization": False})
+        protein = tmp_path / "protein.pdb"
+        mol_0 = tmp_path / "mol_0.pdb"
+        mol_1 = tmp_path / "mol_1.pdb"
+        for path in (protein, mol_0, mol_1):
+            path.touch()
 
         mock_buster = MagicMock()
         mock_buster.bust.side_effect = [df1, df2]
@@ -268,8 +273,8 @@ class TestScoreMolecules:
             smiles=["CCO", "c1ccccc1"],
             params={
                 "mode": "dock",
-                "protein_pdb_path": "/fake/protein.pdb",
-                "structure_paths": ["/fake/mol_0.pdb", "/fake/mol_1.pdb"],
+                "protein_pdb_path": str(protein),
+                "structure_paths": [str(mol_0), str(mol_1)],
             },
         )
 
@@ -277,9 +282,13 @@ class TestScoreMolecules:
         assert scores[0] == pytest.approx(1.0)
         assert scores[1] == pytest.approx(0.5)
 
-    def test_metadata_aligned_with_smiles(self):
+    def test_metadata_aligned_with_smiles(self, tmp_path):
         df1 = _make_bust_df({"bond_lengths": True, "clash": False})
         df2 = _make_bust_df({"bond_lengths": False, "clash": True})
+        mol_a = tmp_path / "a.pdb"
+        mol_b = tmp_path / "b.pdb"
+        mol_a.touch()
+        mol_b.touch()
 
         mock_buster = MagicMock()
         mock_buster.bust.side_effect = [df1, df2]
@@ -289,7 +298,7 @@ class TestScoreMolecules:
             smiles=["A", "B"],
             params={
                 "mode": "mol",
-                "structure_paths": ["/a.pdb", "/b.pdb"],
+                "structure_paths": [str(mol_a), str(mol_b)],
             },
         )
 
@@ -298,8 +307,12 @@ class TestScoreMolecules:
         assert metadata["n_checks_passed"] == [1, 1]
         assert metadata["n_checks_total"] == [2, 2]
 
-    def test_partial_failure(self):
+    def test_partial_failure(self, tmp_path):
         df_ok = _make_bust_df({"bond_lengths": True})
+        mol_a = tmp_path / "a.pdb"
+        mol_b = tmp_path / "b.pdb"
+        mol_a.touch()
+        mol_b.touch()
 
         mock_buster = MagicMock()
         mock_buster.bust.side_effect = [df_ok, pd.DataFrame()]
@@ -309,15 +322,20 @@ class TestScoreMolecules:
             smiles=["A", "B"],
             params={
                 "mode": "mol",
-                "structure_paths": ["/a.pdb", "/b.pdb"],
+                "structure_paths": [str(mol_a), str(mol_b)],
             },
         )
 
         assert scores[0] == pytest.approx(1.0)
         assert scores[1] is None
 
-    def test_reference_paths_forwarded(self):
+    def test_reference_paths_forwarded(self, tmp_path):
         df = _make_bust_df({"bond_lengths": True})
+        protein = tmp_path / "protein.pdb"
+        molecule = tmp_path / "mol.pdb"
+        reference = tmp_path / "ref.pdb"
+        for path in (protein, molecule, reference):
+            path.touch()
         mock_buster = MagicMock()
         mock_buster.bust.return_value = df
         self.mock_pb_cls.return_value = mock_buster
@@ -326,14 +344,14 @@ class TestScoreMolecules:
             smiles=["CCO"],
             params={
                 "mode": "redock",
-                "protein_pdb_path": "/protein.pdb",
-                "structure_paths": ["/mol.pdb"],
-                "reference_paths": ["/ref.pdb"],
+                "protein_pdb_path": str(protein),
+                "structure_paths": [str(molecule)],
+                "reference_paths": [str(reference)],
             },
         )
 
         call_kwargs = mock_buster.bust.call_args.kwargs
-        assert call_kwargs["mol_true"] == [Path("/ref.pdb")]
+        assert call_kwargs["mol_true"] == [reference]
 
     def test_extraction_failure_skips_molecule(self):
         """When _boltz_pdb_to_sdf raises, the molecule is skipped with None score."""

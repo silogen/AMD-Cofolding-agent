@@ -1,0 +1,26 @@
+diff --git a/reinvent/runmodes/samplers/libinvent.py b/reinvent/runmodes/samplers/libinvent.py
+index 3322fbc..8157376 100644
+--- a/reinvent/runmodes/samplers/libinvent.py
++++ b/reinvent/runmodes/samplers/libinvent.py
+@@ -113,6 +113,21 @@ class LibinventSampler(Sampler):
+                 scaffold, decorators, keep_labels_on_atoms=True
+             )
+ 
++            # Transformer LibInvent may generate N+1 R-groups for an N-attachment
++            # scaffold (e.g. 3 groups for 2-attachment points).  If assembly fails,
++            # retry with progressively fewer R-groups until it succeeds or all
++            # combinations are exhausted.  This makes transformer priors compatible
++            # with scaffolds they over-decorate.
++            if mol is None and decorators and "|" in decorators:
++                groups = decorators.split("|")
++                for n in range(len(groups) - 1, 0, -1):
++                    reduced = "|".join(groups[:n])
++                    mol = bond_maker.join_scaffolds_and_decorations(
++                        scaffold, reduced, keep_labels_on_atoms=True
++                    )
++                    if mol is not None:
++                        break
++
+             mols.append(mol)
+ 
+         return mols

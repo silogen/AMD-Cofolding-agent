@@ -1,416 +1,573 @@
 #!/usr/bin/env python3
-"""Standardized ADMET inference: SMILES in -> per-endpoint mean +/- std across the three
-deployment models (XGBoost, Chemprop-MTL, CheMeleon-MTL), all trained on the full ADME data.
+"""Manifest-driven dual-stack ADMET inference.
 
-Input SMILES are standardized with the SAME pipeline used for training
-(desalt -> stereo-preserving re-aromatization -> Normalizer -> canonical tautomer ->
-dimorphite pH 7.4 -> N-charge check).
-
-Usage:
-  python predict_admet.py --smiles "CC(=O)Oc1ccccc1C(=O)O" "CCN(CC)CC"
-  python predict_admet.py --csv input.csv --smiles-col smiles --out preds.json
-Env:
-  MODELS_DIR   directory holding the models (default: ./models)
-  CHEMPROP_BIN chemprop executable (default: chemprop on PATH)
+The runtime bundle contains ``models/admet/{drug,agro}/manifest.json``.  Both
+stacks preserve the historical per-molecule record shape while exposing their
+own endpoint list and model members.  ``pharma`` is accepted as an input alias
+for ``drug`` but is never emitted.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
-from concurrent.futures import ProcessPoolExecutor
+import pickle
 from pathlib import Path
+from typing import Any
 
 import numpy as np
-import pandas as pd
-import pickle
-from rdkit import Chem, RDLogger, DataStructs
-from rdkit.Chem import Descriptors
-from rdkit.ML.Descriptors.MoleculeDescriptors import MolecularDescriptorCalculator
+from rdkit import Chem, DataStructs, RDLogger
 from rdkit.Avalon import pyAvalonTools
 
 from admet_predictor.standardize import standardize_one
 
 RDLogger.DisableLog("rdApp.*")
 
-ENDPOINTS = ["logp", "logd", "aqueous_solubility", "kinetic_solubility",
-             "caco2_permeability", "efflux_mdck", "efflux_caco2"]
-
-# canonical unit + assay condition per endpoint (from the training annotations / aggregate_config)
-ENDPOINT_META = {
-    "logp":               {"unit": "logP (dimensionless)",
-                           "condition": "octanol/water partition coefficient, neutral species"},
-    "logd":               {"unit": "logD (dimensionless)",
-                           "condition": "octanol/water distribution coefficient at pH 7.4"},
-    "aqueous_solubility": {"unit": "log10(mol/L)",
-                           "condition": "thermodynamic aqueous solubility"},
-    "kinetic_solubility": {"unit": "log10(mol/L)",
-                           "condition": "kinetic solubility, DMSO stock spiked into aqueous buffer"},
-    "caco2_permeability": {"unit": "log10(cm/s)",
-                           "condition": "Caco-2 monolayer apparent permeability, apical->basolateral (A->B)"},
-    "efflux_mdck":        {"unit": "log10(efflux ratio)",
-                           "condition": "MDR1-MDCK monolayer, efflux ratio Papp(B-A)/Papp(A-B)"},
-    "efflux_caco2":       {"unit": "log10(efflux ratio)",
-                           "condition": "Caco-2 monolayer, efflux ratio Papp(B-A)/Papp(A-B)"},
-}
-AVALON_NBITS = 2048
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "models"))
-# frozen models, fixed molecules-per-pass: bounds memory regardless of total input size.
-# default 1000; raise via PRED_BATCH / --batch-size / API batch_size if you have headroom,
-# lower (e.g. 128) if memory is tight.
 BATCH_SIZE = int(os.environ.get("PRED_BATCH", "1000"))
-# CPU workers for RDKit standardization + featurization (single largest remaining cost).
-N_WORKERS = int(os.environ.get("PRED_WORKERS", str(min(32, (os.cpu_count() or 4)))))
-# chemprop graph-featurization workers (dataloader). 0 = in the main process.
 LOADER_WORKERS = int(os.environ.get("PRED_LOADER_WORKERS", "8"))
-_PMIN = 128  # only fan out to processes above this many molecules (pool overhead otherwise)
-# device for the GNN forward passes: auto | cpu | cuda  (falls back to cpu if no GPU present)
 PRED_DEVICE = os.environ.get("PRED_DEVICE", "auto").lower()
-_DEV = None
+DEFAULT_MODEL_SET = os.environ.get("ADMET_MODEL_SET", "drug").lower()
+ALIASES = {"pharma": "drug", "pharmaceutical": "drug", "agrochemical": "agro"}
 
-_DESC_NAMES = [n for n, _ in Descriptors._descList]
-_CALC = MolecularDescriptorCalculator(_DESC_NAMES)
-_POOL = None
+# Dense-matrix placeholder for rows whose standardization failed: only used to
+# keep the batch feature matrix/loader aligned; these rows are dropped (ok=False)
+# before any prediction is reported, so the placeholder's values never surface.
+_PLACEHOLDER_SMILES = "C"
+
+# Absolute plausibility limits. A member outside its endpoint's limits is
+# excluded from the consensus rather than clipped to the boundary.
+PHYSICAL_BOUNDS: dict[str, tuple[float, float]] = {
+    "logp": (-8.0, 14.0),
+    "logd": (-12.0, 12.0),
+    "aqueous_solubility": (-15.0, 2.0),
+    "kinetic_solubility": (-15.0, -2.0),
+    "caco2_permeability": (-12.0, -2.0),
+    "efflux_mdck": (-1.5, 2.5),
+    "efflux_caco2": (-1.5, 2.5),
+    "bcf": (-1.0, 8.0),
+    "boiling_point": (-200.0, 800.0),
+    "cyp1a2": (2.0, 12.0),
+    "cyp2c9": (2.0, 12.0),
+    "cyp2d6": (2.0, 12.0),
+    "cyp3a4": (2.0, 12.0),
+    "herg": (2.0, 12.0),
+    "igc50_daphnia": (-2.0, 12.0),
+    "ld50_bee": (-3.0, 9.0),
+    "ld50_mouse": (-2.0, 8.0),
+    "ld50_rat": (-2.0, 8.0),
+    "logkoc": (-1.0, 9.0),
+    "hlm_t12": (-4.0, 3.0),
+    "plasma_t12_human": (-4.0, 3.0),
+    "rlm_t12": (-4.0, 3.0),
+    "plasma_t12_rat": (-4.0, 3.0),
+    "ppb": (0.0, 100.0),
+    "vapor_pressure": (-30.0, 2.0),
+}
+
+_STATES: dict[str, dict[str, Any]] = {}
+_DEVICE: str | None = None
 
 
-def _device():
-    global _DEV
-    if _DEV is None:
+def normalize_model_set(model_set: str | None) -> str:
+    value = (model_set or DEFAULT_MODEL_SET).strip().lower()
+    value = ALIASES.get(value, value)
+    if value not in available_model_sets():
+        raise ValueError(
+            f"unknown ADMET model_set {model_set!r}; "
+            f"available: {available_model_sets()}"
+        )
+    return value
+
+
+def available_model_sets() -> list[str]:
+    if not MODELS_DIR.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in MODELS_DIR.iterdir()
+        if path.is_dir() and (path / "manifest.json").is_file()
+    )
+
+
+def _device() -> str:
+    global _DEVICE
+    if _DEVICE is None:
         import torch
+
         want_gpu = PRED_DEVICE in ("auto", "cuda", "gpu")
-        _DEV = "cuda" if (want_gpu and torch.cuda.is_available()) else "cpu"
-    return _DEV
+        _DEVICE = "cuda" if want_gpu and torch.cuda.is_available() else "cpu"
+    return _DEVICE
 
 
-def _to_dev(batch):
-    """Move a chemprop batch's graph + descriptor tensors to the active device."""
-    dev = _device()
-    if dev == "cpu":
-        return batch.bmg, batch.V_d, batch.X_d
-    batch.bmg.to(dev)                                   # BatchMolGraph.to is in-place (returns None)
-    vd = batch.V_d.to(dev) if batch.V_d is not None else None
-    xd = batch.X_d.to(dev) if batch.X_d is not None else None
-    return batch.bmg, vd, xd
+def _threshold_value(data: dict[str, Any], axis: str) -> float | None:
+    direct = data.get(f"{axis}_thr")
+    if direct is not None:
+        return float(direct)
+    nested = data.get("tanimoto" if axis == "avalon" else axis)
+    if isinstance(nested, dict) and nested.get("pass") is not None:
+        return float(nested["pass"])
+    return None
 
 
-def _pool():
-    global _POOL
-    if _POOL is None and N_WORKERS > 1:
-        _POOL = ProcessPoolExecutor(max_workers=N_WORKERS)
-    return _POOL
+def _load_state(model_set: str | None = None) -> dict[str, Any]:
+    key = normalize_model_set(model_set)
+    if key in _STATES:
+        return _STATES[key]
 
+    root = MODELS_DIR / key
+    manifest = json.loads((root / "manifest.json").read_text())
+    endpoints = list(manifest["endpoint_order"])
+    metadata = manifest["endpoints"]
 
-def _pmap(fn, items):
-    """Parallel map over a process pool for large inputs; serial for small ones."""
-    items = list(items)
-    if len(items) < _PMIN or N_WORKERS <= 1:
-        return [fn(x) for x in items]
-    pool = _pool()
-    if pool is None:
-        return [fn(x) for x in items]
-    chunk = max(1, len(items) // (N_WORKERS * 4))
-    return list(pool.map(fn, items, chunksize=chunk))
-
-# ---------------- GNN models: loaded ONCE and kept resident (no per-batch reloads) ----------------
-_GNN = {"cp": None, "ce": None, "featurizer": None, "loaded": {"cp": False, "ce": False}}
-_XGB = {}  # endpoint -> [loaded seed models]
-
-
-def _featurizer():
-    if _GNN["featurizer"] is None:
-        from chemprop.featurizers import SimpleMoleculeMolGraphFeaturizer
-        _GNN["featurizer"] = SimpleMoleculeMolGraphFeaturizer()
-    return _GNN["featurizer"]
-
-
-def _gnn(key, subdir):
-    """Lazy-load and cache an MPNN checkpoint (frozen, eval), placed on the active device."""
-    if not _GNN["loaded"][key]:
-        _GNN["loaded"][key] = True
-        pt = MODELS_DIR / subdir / "best.pt"
-        if pt.exists():
-            from chemprop import models
-            _GNN[key] = models.MPNN.load_from_file(str(pt), map_location="cpu").eval().to(_device())
-    return _GNN[key]
-
-
-def _make_loader(smiles):
-    """Build a chemprop dataloader over the standardized SMILES (reused for both models + encoding)."""
-    from chemprop.data import MoleculeDatapoint, MoleculeDataset, build_dataloader
-    dps = [MoleculeDatapoint.from_smi(str(s)) for s in smiles]
-    ds = MoleculeDataset(dps, featurizer=_featurizer())
-    return build_dataloader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=LOADER_WORKERS)
-
-# ---------------- applicability domain (double: structural Tanimoto + latent cosine) ----------------
-_AD_DIR = MODELS_DIR / "ad"
-_POP = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint16)
-_AD = {"bits": None, "bitsf": None, "card": None, "emb": None, "thr": None}
-if (_AD_DIR / "train_avalon_bits.npy").exists():
-    _AD["bits"] = np.load(_AD_DIR / "train_avalon_bits.npy")          # packed uint8 (N, 256)
-    _AD["card"] = _POP[_AD["bits"]].sum(1).astype(np.float32)         # per-train popcount (N,)
-    _AD["emb"] = np.load(_AD_DIR / "train_embeddings.npy")            # (N, D) L2-normalized
-    _AD["thr"] = json.load(open(_AD_DIR / "thresholds.json"))
-
-
-def _ad_trainf():
-    """Unpack the training bits to a float 0/1 matrix (N, 2048) once -> enables BLAS matmul."""
-    if _AD["bitsf"] is None:
-        _AD["bitsf"] = np.unpackbits(_AD["bits"], axis=1).astype(np.float32)
-    return _AD["bitsf"]
-
-
-def _ad_structural(Q, ok):
-    """max + top-5 mean Tanimoto (Avalon) to the training set, from a precomputed Avalon matrix.
-    Vectorized: intersection = Q . T^T (BLAS, multi-threaded); Tanimoto = inter / (|q|+|t|-inter)."""
-    n = Q.shape[0]
-    if _AD["bits"] is None:
-        return [(None, None)] * n
-    Tf = _ad_trainf()
-    tcard = _AD["card"]
-    qcard = Q.sum(1)
-    out = [(None, None)] * n
-    SUB = 256   # bound the (SUB, N_train) intermediate regardless of the request size
-    for c0 in range(0, n, SUB):
-        c1 = min(c0 + SUB, n)
-        inter = Q[c0:c1] @ Tf.T                                       # (b, N_train)
-        union = qcard[c0:c1, None] + tcard[None, :] - inter
-        sims = inter / np.maximum(union, 1.0)
-        mx = sims.max(1)
-        top5 = np.partition(sims, -5, axis=1)[:, -5:].mean(1)
-        for i in range(c1 - c0):
-            gi = c0 + i
-            if ok[gi]:
-                out[gi] = (float(mx[i]), float(top5[i]))
-    return out
-
-
-def _ad_latent(loader, n):
-    """max + top-5 mean cosine of the (in-process) Chemprop encoding to the training set."""
-    model = _gnn("cp", "chemprop_mtl")
-    if _AD["emb"] is None or model is None:
-        return [(None, None)] * n
-    import torch
-    encs = []
-    with torch.inference_mode():
-        for b in loader:
-            bmg, vd, xd = _to_dev(b)
-            encs.append(model.encoding(bmg, vd, xd, i=0).cpu().numpy())
-    E = np.vstack(encs)[:n].astype(np.float32)          # drop any padding rows
-    E = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-9)
-    res = []
-    for i in range(E.shape[0]):
-        cos = _AD["emb"] @ E[i]
-        top = np.sort(cos)[-5:]
-        res.append((float(cos.max()), float(top.mean())))
-    return res
-
-
-# ---------------- featurization (matches training: physchem + Avalon) ----------------
-def _feat_one(smi):
-    """Physchem descriptors + Avalon bits for one SMILES (top-level -> picklable for the pool)."""
-    m = Chem.MolFromSmiles(str(smi))
-    if m is None:
-        return None
-    phys = np.asarray(_CALC.CalcDescriptors(m), dtype=np.float32)
-    arr = np.zeros((AVALON_NBITS,), dtype=np.float32)
-    DataStructs.ConvertToNumpyArray(pyAvalonTools.GetAvalonFP(m, AVALON_NBITS), arr)
-    return phys, arr
-
-
-def _featurize(smiles):
-    """Parallel physchem+Avalon. Returns (X for XGB, Avalon float matrix for AD, ok mask)."""
-    n = len(smiles)
-    nphys = len(_DESC_NAMES)
-    X = np.full((n, nphys + AVALON_NBITS), np.nan, dtype=np.float32)
-    Q = np.zeros((n, AVALON_NBITS), dtype=np.float32)
-    ok = np.zeros(n, dtype=bool)
-    for i, r in enumerate(_pmap(_feat_one, smiles)):
-        if r is None:
+    xgb_models: dict[str, Any] = {}
+    pattern = manifest["models"]["xgboost"]["path_pattern"]
+    pickle_key = manifest["models"]["xgboost"].get("pickle_key")
+    feature_contract: tuple[int, tuple[str, ...]] | None = None
+    for endpoint in endpoints:
+        path = root / pattern.format(endpoint=endpoint)
+        if not path.is_file():
             continue
-        phys, arr = r
-        X[i, :nphys] = phys
-        X[i, nphys:] = arr
-        Q[i] = arr
-        ok[i] = True
-    X[~np.isfinite(X)] = np.nan
-    return X, Q, ok
-
-
-# ---------------- per-method prediction ----------------
-def _predict_xgb(X):
-    """Mean over the XGBoost seed models per endpoint (models cached in memory). (n, n_endpoints)."""
-    preds = np.full((X.shape[0], len(ENDPOINTS)), np.nan)
-    for j, ep in enumerate(ENDPOINTS):
-        if ep not in _XGB:
-            _XGB[ep] = [pickle.load(open(s, "rb"))
-                        for s in sorted((MODELS_DIR / "xgb" / ep).glob("seed*.pkl"))]
-        if not _XGB[ep]:
+        with open(path, "rb") as handle:
+            artifact = pickle.load(handle)
+        model = artifact.get(pickle_key) if pickle_key and isinstance(artifact, dict) else artifact
+        if model is None or not hasattr(model, "predict"):
             continue
-        preds[:, j] = np.mean([mdl.predict(X) for mdl in _XGB[ep]], axis=0)
-    return preds
+        xgb_models[endpoint] = model
+        if isinstance(artifact, dict):
+            avalon_bits = int(artifact.get("avalon_bits", 2048))
+            n_features = int(getattr(model, "n_features_in_", avalon_bits))
+            if n_features < avalon_bits:
+                raise ValueError(
+                    f"{key}/{endpoint} expects {n_features} features, "
+                    f"fewer than its {avalon_bits}-bit Avalon fingerprint"
+                )
+            # Some historical artifacts recorded the intended descriptor list
+            # even though the trained estimator used Avalon bits only. Trust
+            # the serialized estimator's feature count.
+            n_descriptors = n_features - avalon_bits
+            contract = (
+                avalon_bits,
+                tuple(artifact.get("desc_cols", [])[:n_descriptors]),
+            )
+            if feature_contract is None:
+                feature_contract = contract
+            elif feature_contract != contract:
+                raise ValueError(f"inconsistent XGBoost feature contract in {key}")
 
+    chemprop_model = None
+    chemprop_scalers = None
+    chemprop = manifest["models"].get("chemprop")
+    if chemprop:
+        model_path = root / chemprop["path"]
+        scaler_path = root / chemprop["scalers"]
+        if model_path.is_file() and scaler_path.is_file():
+            try:
+                from chemprop.models import MPNN
 
-def _predict_gnn(model, loader, n):
-    """In-process MPNN prediction; output columns are already in ENDPOINTS order."""
-    if model is None:
-        return None
-    import torch
-    outs = []
-    with torch.inference_mode():
-        for b in loader:
-            bmg, vd, xd = _to_dev(b)
-            outs.append(model(bmg, vd, xd).cpu().numpy())
-    P = np.vstack(outs)[:n]                             # drop any padding rows
-    out = np.full((n, len(ENDPOINTS)), np.nan)
-    out[:, :min(P.shape[1], len(ENDPOINTS))] = P[:, :len(ENDPOINTS)]
-    return out
+                chemprop_model = MPNN.load_from_checkpoint(
+                    str(model_path), map_location="cpu"
+                ).eval().to(_device())
+                chemprop_scalers = json.loads(scaler_path.read_text())
+                if list(chemprop_scalers["endpoints"]) != endpoints:
+                    raise ValueError(
+                        f"Chemprop task order does not match {key} manifest"
+                    )
+            except Exception as exc:  # keep XGBoost fallback available
+                print(f"[admet] {key} Chemprop unavailable: {exc}", flush=True)
+                chemprop_model = None
+                chemprop_scalers = None
 
+    thresholds: dict[str, Any] = {}
+    train_fps: list[Any] = []
+    ad = manifest.get("applicability_domain") or {}
+    threshold_path = root / ad.get("thresholds", "")
+    fps_path = root / ad.get("training_fingerprints", "")
+    if threshold_path.is_file():
+        thresholds = json.loads(threshold_path.read_text())
+    if fps_path.is_file():
+        with open(fps_path, "rb") as handle:
+            train_data = pickle.load(handle)
+        train_fps = [fp for fp in train_data.get("fps", []) if fp is not None]
 
-_MODEL_NAMES = ["XGBoost", "Chemprop-MTL", "CheMeleon-MTL"]
-
-
-def condense(records, fmt="records"):
-    """Reshape verbose per-molecule records into a smaller payload.
-    fmt: 'records' (default, unchanged) | 'compact' (metadata once + arrays) | 'table' (columns+rows)."""
-    if fmt == "records":
-        return records
-    eps = ENDPOINTS
-    units = {ep: ENDPOINT_META[ep]["unit"] for ep in eps}
-    conditions = {ep: ENDPOINT_META[ep]["condition"] for ep in eps}
-    if fmt == "compact":
-        mols = []
-        for r in records:
-            m = {"input_smiles": r["input_smiles"], "standardized_smiles": r.get("standardized_smiles"),
-                 "ok": r["ok"]}
-            if r.get("ok"):
-                p = r["predictions"]
-                m["mean"] = [p[ep]["mean"] for ep in eps]
-                m["std"] = [p[ep]["std"] for ep in eps]
-                ad = r.get("applicability_domain")
-                if ad:
-                    m["ad_pass"] = ad.get("AD Pass")
-            else:
-                m["error"] = r.get("error")
-            mols.append(m)
-        return {"endpoints": eps, "units": units, "conditions": conditions,
-                "models": _MODEL_NAMES, "molecules": mols}
-    if fmt == "table":
-        cols = (["input_smiles", "standardized_smiles", "ok"]
-                + [f"{ep}_mean" for ep in eps] + [f"{ep}_std" for ep in eps] + ["ad_pass"])
-        rows = []
-        for r in records:
-            p = r.get("predictions", {})
-            rows.append([r["input_smiles"], r.get("standardized_smiles"), r["ok"]]
-                        + [p.get(ep, {}).get("mean") for ep in eps]
-                        + [p.get(ep, {}).get("std") for ep in eps]
-                        + [r.get("applicability_domain", {}).get("AD Pass")])
-        return {"columns": cols, "rows": rows, "endpoints": eps, "units": units}
-    raise ValueError(f"unknown format '{fmt}' (use records|compact|table)")
-
-
-# ---------------- main ----------------
-def predict(smiles_list, batch_size=BATCH_SIZE, fmt="records"):
-    """Frozen-model inference over the input in fixed-size passes (bounds memory).
-    fmt controls the output shape (records|compact|table); see condense()."""
-    smiles_list = list(smiles_list)
-    if batch_size is None or batch_size <= 0:
-        batch_size = len(smiles_list) or 1
-    results = []
-    for c0 in range(0, len(smiles_list), batch_size):
-        results.extend(_predict_batch(smiles_list[c0:c0 + batch_size]))
-    return condense(results, fmt)
-
-
-def _predict_batch(smiles_list):
-    std = _pmap(standardize_one, smiles_list)
-    std_smiles = [r["std_smiles"] if r["ok"] and r["std_smiles"] else None for r in std]
-    valid = [s if s else "C" for s in std_smiles]   # placeholder for failed parses
-
-    n = len(valid)
-    # chemprop's build_dataloader drops a trailing batch of size 1 (batch-norm guard),
-    # which would misalign outputs when n % BATCH_SIZE == 1; pad then slice back to n.
-    padded = list(valid)
-    while len(padded) < 2 or len(padded) % BATCH_SIZE == 1:
-        padded.append(padded[-1])
-    loader = _make_loader(padded)                      # featurize once, reuse for both models + encoding
-    X, Q, ok = _featurize(valid)                       # one parallel pass -> XGB + AD structural
-    xgb = _predict_xgb(X)
-    cp = _predict_gnn(_gnn("cp", "chemprop_mtl"), loader, n)
-    ce = _predict_gnn(_gnn("ce", "chemeleon_mtl"), loader, n)
-    ad_s = _ad_structural(Q, ok)
-    ad_l = _ad_latent(loader, n)
-
-    results = []
-    for i, smi in enumerate(smiles_list):
-        rec = {"input_smiles": smi, "standardized_smiles": std_smiles[i],
-               "ok": std_smiles[i] is not None, "predictions": {}}
-        if std_smiles[i] is None:
-            rec["error"] = "standardization/parse failed"
-            results.append(rec)
-            continue
-        # applicability domain (two orthogonal signals; pass = within domain on that axis)
-        thr = _AD["thr"]
-        s_nn, s_top = ad_s[i]
-        l_nn, l_top = ad_l[i]
-        if thr and (s_nn is not None or l_nn is not None):
-            ad = {}
-            passes = []
-            if s_nn is not None:
-                p = bool(s_nn >= thr["tanimoto"]["pass"])
-                passes.append(p)
-                ad["AD Tanimoto"] = {"score": round(s_nn, 4), "top5_mean": round(s_top, 4),
-                                     "threshold": thr["tanimoto"]["pass"], "pass": p}
-            if l_nn is not None:
-                p = bool(l_nn >= thr["cosine"]["pass"])
-                passes.append(p)
-                ad["AD Property profile FFN"] = {"score": round(l_nn, 4), "top5_mean": round(l_top, 4),
-                                                 "threshold": thr["cosine"]["pass"], "pass": p}
-            ad["AD Pass"] = bool(all(passes)) if passes else None
-            rec["applicability_domain"] = ad
-        for j, ep in enumerate(ENDPOINTS):
-            vals = {}
-            if not np.isnan(xgb[i, j]):
-                vals["XGBoost"] = float(xgb[i, j])
-            if cp is not None and not np.isnan(cp[i, j]):
-                vals["Chemprop-MTL"] = float(cp[i, j])
-            if ce is not None and not np.isnan(ce[i, j]):
-                vals["CheMeleon-MTL"] = float(ce[i, j])
-            arr = np.array(list(vals.values()), dtype=float)
-            rec["predictions"][ep] = {
-                "mean": round(float(arr.mean()), 4) if len(arr) else None,
-                "std": round(float(arr.std(ddof=0)), 4) if len(arr) else None,
-                "unit": ENDPOINT_META[ep]["unit"],
-                "condition": ENDPOINT_META[ep]["condition"],
-                "n_models": int(len(arr)),
-                "per_model": {k: round(v, 4) for k, v in vals.items()},
+    training_ranges: dict[str, dict[str, float]] = {}
+    response_domain = manifest.get("response_domain") or {}
+    ranges_name = response_domain.get("training_ranges")
+    if ranges_name:
+        ranges_path = root / ranges_name
+        if ranges_path.is_file():
+            loaded_ranges = json.loads(ranges_path.read_text())
+            training_ranges = {
+                endpoint: stats
+                for endpoint, stats in loaded_ranges.items()
+                if endpoint in endpoints and isinstance(stats, dict)
             }
-        results.append(rec)
+
+    state = {
+        "name": key,
+        "root": root,
+        "manifest": manifest,
+        "endpoints": endpoints,
+        "metadata": metadata,
+        "xgb_models": xgb_models,
+        "feature_contract": feature_contract or (2048, ()),
+        "chemprop_model": chemprop_model,
+        "chemprop_scalers": chemprop_scalers,
+        "thresholds": thresholds,
+        "train_fps": train_fps,
+        "training_ranges": training_ranges,
+    }
+    _STATES[key] = state
+    return state
+
+
+def get_manifest(model_set: str | None = None) -> dict[str, Any]:
+    return _load_state(model_set)["manifest"]
+
+
+def get_endpoints(model_set: str | None = None) -> list[str]:
+    return list(_load_state(model_set)["endpoints"])
+
+
+def get_endpoint_meta(model_set: str | None = None) -> dict[str, dict[str, Any]]:
+    return dict(_load_state(model_set)["metadata"])
+
+
+def _avalon_matrix(smiles: list[str], n_bits: int, n_descriptors: int) -> np.ndarray:
+    """Reproduce the deployed XGBoost training representation.
+
+    The current training/export pipeline used Avalon bits followed by zero-filled
+    descriptor columns.  Keep that exact contract until the models are retrained
+    with calculated descriptors.
+    """
+    matrix = np.zeros((len(smiles), n_bits + n_descriptors), dtype=np.float32)
+    for index, smiles_value in enumerate(smiles):
+        mol = Chem.MolFromSmiles(str(smiles_value))
+        if mol is None:
+            continue
+        fp = pyAvalonTools.GetAvalonFP(mol, nBits=n_bits)
+        arr = np.zeros(n_bits, dtype=np.int8)
+        DataStructs.ConvertToNumpyArray(fp, arr)
+        matrix[index, :n_bits] = arr
+    return matrix
+
+
+def _make_loader(smiles: list[str], batch_size: int):
+    from chemprop.data import MoleculeDatapoint, MoleculeDataset, build_dataloader
+    from chemprop.featurizers import SimpleMoleculeMolGraphFeaturizer
+
+    points = [MoleculeDatapoint.from_smi(str(value)) for value in smiles]
+    dataset = MoleculeDataset(points, featurizer=SimpleMoleculeMolGraphFeaturizer())
+    return build_dataloader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=LOADER_WORKERS
+    )
+
+
+def _predict_chemprop(state: dict[str, Any], smiles: list[str], batch_size: int):
+    model = state["chemprop_model"]
+    scalers = state["chemprop_scalers"]
+    if model is None or scalers is None:
+        return None
+
+    import torch
+
+    padded = list(smiles)
+    while len(padded) < 2 or len(padded) % batch_size == 1:
+        padded.append(padded[-1])
+    outputs = []
+    with torch.inference_mode():
+        for batch in _make_loader(padded, batch_size):
+            batch.bmg.to(_device())
+            vertex = batch.V_d.to(_device()) if batch.V_d is not None else None
+            extra = batch.X_d.to(_device()) if batch.X_d is not None else None
+            outputs.append(model(batch.bmg, vertex, extra).detach().cpu().numpy())
+    predictions = np.concatenate(outputs, axis=0)[: len(smiles)]
+    expected_shape = (len(smiles), len(state["endpoints"]))
+    if predictions.shape != expected_shape:
+        raise ValueError(
+            f"Chemprop returned shape {predictions.shape}, expected {expected_shape}"
+        )
+    # Chemprop v2 regression checkpoints contain an UnscaleTransform. In eval
+    # mode model(...) therefore already returns values in endpoint units.
+    # The standalone scaler file remains useful for task-order validation only.
+    return predictions
+
+
+def _endpoint_bounds(
+    state: dict[str, Any], endpoint: str
+) -> tuple[float, float] | None:
+    configured = state["metadata"].get(endpoint, {}).get("physical_bounds")
+    if isinstance(configured, dict):
+        lower = configured.get("lower")
+        upper = configured.get("upper")
+        if lower is not None and upper is not None:
+            return float(lower), float(upper)
+    if isinstance(configured, (list, tuple)) and len(configured) == 2:
+        return float(configured[0]), float(configured[1])
+    return PHYSICAL_BOUNDS.get(endpoint)
+
+
+def _summarize_endpoint(
+    state: dict[str, Any],
+    endpoint: str,
+    raw_members: dict[str, float],
+) -> dict[str, Any]:
+    bounds = _endpoint_bounds(state, endpoint)
+    accepted: dict[str, float] = {}
+    excluded: dict[str, dict[str, Any]] = {}
+    bounds_payload = (
+        {"lower": bounds[0], "upper": bounds[1]} if bounds is not None else None
+    )
+
+    for name, raw_value in raw_members.items():
+        value = float(raw_value)
+        if not np.isfinite(value):
+            excluded[name] = {"value": None, "reason": "non_finite"}
+        elif bounds is not None and not bounds[0] <= value <= bounds[1]:
+            excluded[name] = {
+                "value": round(value, 4),
+                "reason": "outside_physical_bounds",
+                "bounds": bounds_payload,
+            }
+        else:
+            accepted[name] = value
+
+    values = np.asarray(list(accepted.values()), dtype=float)
+    mean = float(values.mean()) if len(values) else None
+    # std is only a consensus signal with >= 2 accepted members. With a single
+    # member numpy returns 0.0, which reads as "models agreed perfectly" when it
+    # actually means "one model, no consensus" — report None instead so callers
+    # (and n_models) aren't misled.
+    std = float(values.std(ddof=0)) if len(values) >= 2 else None
+
+    range_info = state.get("training_ranges", {}).get(endpoint)
+    response_domain: dict[str, Any] = {
+        "method": "training_p01_p99",
+        "available": False,
+        "pass": None,
+    }
+    out_of_training_range: bool | None = None
+    if range_info and range_info.get("p01") is not None and range_info.get("p99") is not None:
+        lower = float(range_info["p01"])
+        upper = float(range_info["p99"])
+        response_pass = bool(mean is not None and lower <= mean <= upper)
+        response_domain = {
+            "method": "training_p01_p99",
+            "available": True,
+            "lower": round(lower, 4),
+            "upper": round(upper, 4),
+            "training_min": round(float(range_info["min"]), 4),
+            "training_max": round(float(range_info["max"]), 4),
+            "n_train": int(range_info["n"]),
+            "pass": response_pass if mean is not None else None,
+        }
+        out_of_training_range = not response_pass if mean is not None else None
+
+    metadata = state["metadata"].get(endpoint, {})
+    return {
+        "mean": round(mean, 4) if mean is not None else None,
+        "std": round(std, 4) if std is not None else None,
+        "unit": metadata.get("unit"),
+        "condition": metadata.get("condition"),
+        "n_models": len(accepted),
+        "n_models_total": len(raw_members),
+        "per_model": {name: round(value, 4) for name, value in accepted.items()},
+        "excluded_models": excluded,
+        "physical_bounds": bounds_payload,
+        "response_domain": response_domain,
+        "out_of_training_range": out_of_training_range,
+    }
+
+
+def _ad_scores(state: dict[str, Any], smiles: list[str]):
+    threshold = _threshold_value(state["thresholds"], "avalon")
+    train_fps = state["train_fps"]
+    if threshold is None or not train_fps:
+        return [(None, None)] * len(smiles)
+    if len(train_fps) > 10000:
+        rng = np.random.default_rng(42)
+        indices = sorted(rng.choice(len(train_fps), size=10000, replace=False))
+        train_fps = [train_fps[index] for index in indices]
+    results = []
+    n_bits = int(state["thresholds"].get("avalon_bits", 2048))
+    for value in smiles:
+        mol = Chem.MolFromSmiles(str(value))
+        if mol is None:
+            results.append((None, False))
+            continue
+        fp = pyAvalonTools.GetAvalonFP(mol, nBits=n_bits)
+        similarities = DataStructs.BulkTanimotoSimilarity(fp, train_fps)
+        score = float(max(similarities)) if similarities else 0.0
+        results.append((score, bool(score >= threshold)))
     return results
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--smiles", nargs="*", default=[])
-    ap.add_argument("--csv")
-    ap.add_argument("--smiles-col", default="smiles")
-    ap.add_argument("--out")
-    ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
-                    help="molecules per frozen pass (default env PRED_BATCH or 1000)")
-    ap.add_argument("--format", default="records", choices=["records", "compact", "table"],
-                    help="output shape: records (verbose) | compact (metadata once + arrays) | table")
-    a = ap.parse_args()
-    smiles = list(a.smiles)
-    if a.csv:
-        smiles += pd.read_csv(a.csv)[a.smiles_col].astype(str).tolist()
-    if not smiles:
-        ap.error("provide --smiles or --csv")
-    res = predict(smiles, batch_size=a.batch_size, fmt=a.format)
-    txt = json.dumps(res, indent=2)
-    if a.out:
-        Path(a.out).write_text(txt)
-        print(f"wrote {a.out}")
-    else:
-        print(txt)
+def condense(records: list[dict[str, Any]], model_set: str, fmt: str = "records"):
+    if fmt == "records":
+        return records
+    state = _load_state(model_set)
+    endpoints = state["endpoints"]
+    units = {ep: state["metadata"].get(ep, {}).get("unit") for ep in endpoints}
+    conditions = {
+        ep: state["metadata"].get(ep, {}).get("condition") for ep in endpoints
+    }
+    if fmt == "compact":
+        molecules = []
+        for record in records:
+            item = {
+                "input_smiles": record["input_smiles"],
+                "standardized_smiles": record.get("standardized_smiles"),
+                "ok": record["ok"],
+            }
+            if record.get("ok"):
+                item["mean"] = [record["predictions"][ep]["mean"] for ep in endpoints]
+                item["std"] = [record["predictions"][ep]["std"] for ep in endpoints]
+                item["response_ad_pass"] = [
+                    record["predictions"][ep]["response_domain"]["pass"]
+                    for ep in endpoints
+                ]
+                item["ad_pass"] = record.get("applicability_domain", {}).get("AD Pass")
+            else:
+                item["error"] = record.get("error")
+            molecules.append(item)
+        return {
+            "model_set": model_set,
+            "endpoints": endpoints,
+            "units": units,
+            "conditions": conditions,
+            "molecules": molecules,
+        }
+    if fmt == "table":
+        columns = ["input_smiles", "standardized_smiles", "ok"]
+        columns += [f"{ep}_mean" for ep in endpoints]
+        columns += [f"{ep}_std" for ep in endpoints]
+        columns += [f"{ep}_response_ad_pass" for ep in endpoints]
+        columns += ["ad_pass"]
+        rows = []
+        for record in records:
+            predictions = record.get("predictions", {})
+            rows.append(
+                [record["input_smiles"], record.get("standardized_smiles"), record["ok"]]
+                + [predictions.get(ep, {}).get("mean") for ep in endpoints]
+                + [predictions.get(ep, {}).get("std") for ep in endpoints]
+                + [
+                    predictions.get(ep, {}).get("response_domain", {}).get("pass")
+                    for ep in endpoints
+                ]
+                + [record.get("applicability_domain", {}).get("AD Pass")]
+            )
+        return {
+            "model_set": model_set,
+            "columns": columns,
+            "rows": rows,
+            "endpoints": endpoints,
+            "units": units,
+        }
+    raise ValueError(f"unknown format {fmt!r} (use records|compact|table)")
+
+
+def predict(
+    smiles_list,
+    model_set: str = "drug",
+    batch_size: int = BATCH_SIZE,
+    fmt: str = "records",
+):
+    model_set = normalize_model_set(model_set)
+    state = _load_state(model_set)
+    values = list(smiles_list)
+    if not values:
+        return condense([], model_set, fmt)
+    batch_size = batch_size if batch_size and batch_size > 0 else len(values)
+    records = []
+    for start in range(0, len(values), batch_size):
+        records.extend(_predict_batch(state, values[start : start + batch_size], batch_size))
+    return condense(records, model_set, fmt)
+
+
+def _predict_batch(state: dict[str, Any], smiles_list: list[str], batch_size: int):
+    standardized = [standardize_one(value) for value in smiles_list]
+    # A row is usable only if standardization succeeded AND produced a non-empty
+    # SMILES. An ok-but-empty std_smiles would otherwise slip through (``"" or "C"``
+    # → methane) and be reported with methane's ADMET values as if they were the
+    # molecule's. Mark such rows failed instead.
+    ok_flags = [
+        bool(item.get("ok")) and bool((item.get("std_smiles") or "").strip())
+        for item in standardized
+    ]
+    std_smiles = [
+        (item["std_smiles"] if ok else None)
+        for item, ok in zip(standardized, ok_flags)
+    ]
+    # Placeholder only keeps the batch feature matrix dense for failed rows; those
+    # rows are dropped (ok=False) before any prediction is reported.
+    valid = [smi if smi else _PLACEHOLDER_SMILES for smi in std_smiles]
+    n_bits, desc_cols = state["feature_contract"]
+    features = _avalon_matrix(valid, n_bits, len(desc_cols))
+
+    xgb_predictions: dict[str, np.ndarray] = {}
+    for endpoint, model in state["xgb_models"].items():
+        xgb_predictions[endpoint] = model.predict(features)
+    chemprop_predictions = _predict_chemprop(state, valid, batch_size)
+    ad = _ad_scores(state, valid)
+
+    records = []
+    for row_index, input_smiles in enumerate(smiles_list):
+        record: dict[str, Any] = {
+            "input_smiles": input_smiles,
+            "standardized_smiles": std_smiles[row_index],
+            "ok": ok_flags[row_index],
+            "model_set": state["name"],
+            "predictions": {},
+        }
+        if not record["ok"]:
+            record["error"] = standardized[row_index].get("error", "standardization failed")
+            records.append(record)
+            continue
+
+        ad_score, ad_pass = ad[row_index]
+        record["applicability_domain"] = {
+            "AD Tanimoto": {
+                "score": round(ad_score, 4) if ad_score is not None else None,
+                "threshold": _threshold_value(state["thresholds"], "avalon"),
+                "pass": ad_pass,
+            },
+            "AD Pass": ad_pass,
+            "axes_available": ["tanimoto"],
+        }
+
+        for endpoint_index, endpoint in enumerate(state["endpoints"]):
+            raw_members: dict[str, float] = {}
+            if endpoint in xgb_predictions:
+                raw_members["XGBoost"] = float(xgb_predictions[endpoint][row_index])
+            if chemprop_predictions is not None:
+                raw_members["Chemprop-MTL"] = float(
+                    chemprop_predictions[row_index, endpoint_index]
+                )
+            record["predictions"][endpoint] = _summarize_endpoint(
+                state, endpoint, raw_members
+            )
+        records.append(record)
+    return records
+
+
+# Backward-compatible aliases for callers that inspect the default stack.
+try:
+    ENDPOINTS = get_endpoints(DEFAULT_MODEL_SET)
+    ENDPOINT_META = get_endpoint_meta(DEFAULT_MODEL_SET)
+except Exception:
+    ENDPOINTS = []
+    ENDPOINT_META = {}
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Predict ADMET properties")
+    parser.add_argument("--smiles", nargs="+", required=True)
+    parser.add_argument("--model-set", default="drug", choices=["drug", "agro", "pharma"])
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--format", default="records", choices=["records", "compact", "table"])
+    arguments = parser.parse_args()
+    print(json.dumps(predict(arguments.smiles, arguments.model_set, arguments.batch_size, arguments.format), indent=2))
 
 
 if __name__ == "__main__":

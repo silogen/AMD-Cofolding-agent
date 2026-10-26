@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-synthesis-planner
+  labels:
+    app.kubernetes.io/name: dd-agentic-synthesis-planner
+    app.kubernetes.io/component: scorer
+spec:
+  # CPU only and no /shared mount: the request carries the SMILES and the
+  # response carries the synthesizability score, so nothing is handed over by
+  # path. Replicas therefore need no coordination -- a plain ClusterIP
+  # round-robin is enough, unlike Boltz which needs the proxy to place batches.
+  #
+  # Two, because an MCTS search is the one CPU scorer that is not cheap: at the
+  # RL iteration_limit of 25 it costs 0.3-0.8 s per molecule, so a 16-molecule
+  # batch is several seconds of pure compute rather than milliseconds. The
+  # service serializes to PLANNER_MAX_CONCURRENCY internally, so a second
+  # replica is how concurrent RL jobs stop queueing behind each other.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-synthesis-planner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-synthesis-planner
+        app.kubernetes.io/component: scorer
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: synthesis-planner
+          image: synthesis-planner:local
+          imagePullPolicy: IfNotPresent
+          # args, not command: the micromamba ENTRYPOINT activates the conda
+          # environment before exec'ing this, and aizynthfinder is installed
+          # into it.
+          args:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8088"
+          ports:
+            - name: synth-http
+              containerPort: 8088
+          env:
+            # One search at a time per replica. The MCTS is single-threaded and
+            # memory-resident, so the second concurrent search on one replica
+            # buys throughput only by taking it from the first; concurrency is
+            # expressed in replicas above instead.
+            - name: PLANNER_MAX_CONCURRENCY
+              value: "1"
+            # An RL batch is 16 molecules and arrives as one /score call, so
+            # the synchronous path has to accept the whole batch rather than
+            # bounce it to the job API the agent tools use.
+            - name: SYNC_BATCH_LIMIT
+              value: "16"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          # The expansion policy is a 91 MB ONNX model loaded on first use, so
+          # the first request is far slower than the steady state.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: synth-http
+            periodSeconds: 10
+            failureThreshold: 18
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: synth-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: synth-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            # The building-block catalog, which is 1-10 GB and so is staged on
+            # the volume rather than baked into the image. Read-only, and the
+            # service starts without it: availability checks then answer
+            # "unknown" and route leaves carry in_stock=None instead of
+            # failing. Deliberately not subPath "shared" -- this pod hands no
+            # structures to anyone and should stay free of that contract.
+            - name: data
+              mountPath: /app/models/stock
+              subPath: aizynth-stock
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-synthesis-planner
+  labels:
+    app.kubernetes.io/name: dd-agentic-synthesis-planner
+    app.kubernetes.io/component: scorer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-synthesis-planner
+  ports:
+    - name: synth-http
+      port: 8088
+      targetPort: synth-http

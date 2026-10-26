@@ -24,7 +24,7 @@ from reinvent4_agent.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 20
+MAX_TOOL_ROUNDS = 200
 
 
 @runtime_checkable
@@ -87,6 +87,7 @@ class Agent:
         self._chat_lock = asyncio.Lock()
         self._monitor_task: asyncio.Task[None] | None = None
         self._monitor_running = False
+        self._tool_in_flight = False  # True while a blocking tool call is executing
         self._seen_alerts: set[tuple[str, str]] = set()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -221,6 +222,7 @@ class Agent:
 
             t0 = time.monotonic()
             try:
+                self._tool_in_flight = True
                 resolved = self.mcp.resolve_tool_name(tc.name)
                 # Resolve against the full catalog, then refuse anything
                 # outside this agent's allow-list. An alias can name a
@@ -327,6 +329,8 @@ class Agent:
                     content=error_msg,
                     is_error=True,
                 ))
+            finally:
+                self._tool_in_flight = False
 
         return results
 
@@ -386,6 +390,11 @@ class Agent:
 
     async def _check_alerts(self) -> None:
         """Fetch alerts and dispatch actions based on severity."""
+        # Skip alert processing entirely when a long-running tool call is in
+        # flight — firing self.chat() now would inject a user message into an
+        # incomplete tool_use/tool_result sequence, which Anthropic rejects.
+        if self._tool_in_flight:
+            return
         async with self._chat_lock:
             alerts_json = await self.mcp.call_tool("get_job_alerts", {})
 

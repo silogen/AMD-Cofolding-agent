@@ -1,0 +1,50 @@
+{
+  "query_id": "e7f8a9b0-0017-4e6f-8901-234567890123",
+  "result_type": "entry",
+  "total_count": 2156,
+  "result_list": [
+    {"identifier": "AF_AFP68871F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP02768F1", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0001", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ9Y2X3F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFO95905F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP15923F1", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0002", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP21802F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ13131F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFO14929F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP62979F1", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0003", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ9UKT9F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP27487F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFO00584F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP04637F1", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0004", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ9NZN3F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP07550F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP06213F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ9Y4H2F1", "score": 1.0, "services": null},
+    {"identifier": "MA_MABAKCEPC0005", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP21180F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFQ9NQC7F1", "score": 1.0, "services": null},
+    {"identifier": "AF_AFP68402F1", "score": 1.0, "services": null}
+  ],
+  "facets": [
+    {
+      "name": "ContentType",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "Computational", "count": 2156}
+      ]
+    },
+    {
+      "name": "Method",
+      "aggregation_type": "terms",
+      "buckets": [
+        {"key": "ALPHAFOLD AI", "count": 1934},
+        {"key": "ROSETTAFOLD AI", "count": 143},
+        {"key": "OTHER AI", "count": 79}
+      ]
+    }
+  ]
+}

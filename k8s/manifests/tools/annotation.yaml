@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-agentic-annotation
+  labels:
+    app.kubernetes.io/name: dd-agentic-annotation
+    app.kubernetes.io/component: tool-service
+spec:
+  # A caching proxy in front of UniProt and InterPro. One replica, because the
+  # cache is a directory on the volume: a second would serve from the same
+  # files but duplicate every upstream miss.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dd-agentic-annotation
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dd-agentic-annotation
+        app.kubernetes.io/component: tool-service
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: annotation
+          image: annotation:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - uvicorn
+            - app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8090"
+          ports:
+            - name: annot-http
+              containerPort: 8090
+          env:
+            # On the volume rather than in the pod: a restart would otherwise
+            # re-fetch every annotation the fleet had already looked up, and
+            # the cluster may have no route to UniProt at all.
+            - name: ANNOTATION_CACHE_DIR
+              value: /shared/annotations
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: annot-http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: annot-http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /shared
+              subPath: shared
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dd-agentic-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-agentic-annotation
+  labels:
+    app.kubernetes.io/name: dd-agentic-annotation
+    app.kubernetes.io/component: tool-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dd-agentic-annotation
+  ports:
+    - name: annot-http
+      port: 8090
+      targetPort: annot-http

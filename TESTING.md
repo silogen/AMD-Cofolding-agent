@@ -6,11 +6,11 @@ This document lists all tests that can be run against the current codebase (Phas
 
 ```bash
 cd examples/dd_agentic
-pip install pytest numpy pydantic PyYAML pandas fastapi httpx requests
+pip install pytest numpy pydantic PyYAML pandas fastapi httpx requests rdkit gemmi
 python -m pytest tests/ -v
 ```
 
-All unit tests mock REINVENT4 imports and external services, so they run anywhere with Python 3.10+ and the packages above.
+All unit tests mock REINVENT4 imports and external services, so they run anywhere with Python 3.10+ and the packages above. `rdkit` and `gemmi` are not mocked: candidate harvesting sanitizes every SMILES it returns, and the structure-prep numbering, construct and alignment stages are thin wrappers over gemmi, so tests for those import the real libraries.
 
 ---
 

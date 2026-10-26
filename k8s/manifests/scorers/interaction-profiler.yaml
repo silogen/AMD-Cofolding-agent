@@ -34,6 +34,16 @@ spec:
           ports:
             - name: profile-http
               containerPort: 8083
+          env:
+            # Residue annotations come from the cache rather than from UniProt
+            # directly: this pod is on the RL hot path, and an upstream lookup
+            # per profiled complex would be both slow and dependent on egress
+            # the cluster may not have.
+            - name: ANNOTATION_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dd-agentic-config
+                  key: ANNOTATION_SERVICE_URL
           resources:
             requests:
               cpu: "1"
