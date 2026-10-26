@@ -143,10 +143,11 @@ const csvCell = (value: unknown): string => {
 };
 
 /** Candidates as CSV, one column per score component and metric any of them has. */
-export function candidatesToCsv(candidates: Candidate[]): string {
+export function candidatesToCsv(candidates: Candidate[], props?: (smiles: string) => MolProps | undefined): string {
   const components = [...new Set(candidates.flatMap((c) => Object.keys(c.components)))];
   const metrics = Object.keys(METRIC_LABELS) as (keyof StructureMetrics)[];
-  const header = ["smiles", "name", "origin", "score", ...components, ...metrics, "gate", "structure"];
+  const descriptors = props ? DESCRIPTOR_COLUMNS : [];
+  const header = ["smiles", "name", "origin", "score", ...components, ...metrics, ...descriptors.map((d) => d.label), "gate", "structure"];
   const lines = candidates.map((c) =>
     [
       c.smiles,
@@ -155,6 +156,10 @@ export function candidatesToCsv(candidates: Candidate[]): string {
       c.score,
       ...components.map((key) => c.components[key]),
       ...metrics.map((key) => c.metrics?.[key]),
+      ...descriptors.map((d) => {
+        const value = descriptorValue(props?.(c.smiles), d.key);
+        return value === undefined ? undefined : Number(value.toFixed(d.digits));
+      }),
       c.gate.status,
       c.structurePath,
     ]
@@ -162,6 +167,74 @@ export function candidatesToCsv(candidates: Candidate[]): string {
       .join(","),
   );
   return [header.join(","), ...lines].join("\n");
+}
+
+/** Descriptors computed in the browser with RDKit, keyed as in DESCRIPTOR_COLUMNS. */
+export interface MolProps {
+  mw: number;
+  clogp: number;
+  tpsa: number;
+  hbd: number;
+  hba: number;
+  rotb: number;
+  ro5: number;
+}
+
+/** Descriptor columns as {key, label, digits}; keys are "desc:<field of MolProps>". */
+export const DESCRIPTOR_COLUMNS: { key: `desc:${keyof MolProps}`; label: string; digits: number }[] = [
+  { key: "desc:mw", label: "MW", digits: 1 },
+  { key: "desc:clogp", label: "cLogP", digits: 2 },
+  { key: "desc:tpsa", label: "TPSA", digits: 1 },
+  { key: "desc:hbd", label: "HBD", digits: 0 },
+  { key: "desc:hba", label: "HBA", digits: 0 },
+  { key: "desc:rotb", label: "RotB", digits: 0 },
+  { key: "desc:ro5", label: "Ro5", digits: 0 },
+];
+
+/** Lipinski rule-of-five violations: MW > 500, cLogP > 5, HBD > 5, HBA > 10. */
+export function ro5Violations(p: Pick<MolProps, "mw" | "clogp" | "hbd" | "hba">): number {
+  return [p.mw > 500, p.clogp > 5, p.hbd > 5, p.hba > 10].filter(Boolean).length;
+}
+
+/** A descriptor value by "desc:<field>" key, or undefined. */
+export function descriptorValue(props: MolProps | undefined, key: string): number | undefined {
+  if (!props || !key.startsWith("desc:")) return undefined;
+  const value = props[key.slice(5) as keyof MolProps];
+  return isNumber(value) ? value : undefined;
+}
+
+const sdfField = (name: string, value: unknown) =>
+  value === undefined || value === null || value === "" ? "" : `>  <${name}>\n${String(value)}\n\n`;
+
+/**
+ * Candidates as an SD file. *molblock* turns a SMILES into a V2000 block
+ * (RDKit's get_molblock); molecules it cannot parse are skipped.
+ */
+export function candidatesToSdf(
+  candidates: Candidate[],
+  molblock: (smiles: string) => string | null,
+  props: (smiles: string) => MolProps | undefined = () => undefined,
+): string {
+  const records: string[] = [];
+  for (const c of candidates) {
+    const block = molblock(c.smiles);
+    if (!block) continue;
+    const lines = block.replace(/\r\n/g, "\n").replace(/\n*$/, "").split("\n");
+    if (c.name) lines[0] = c.name;
+    const p = props(c.smiles);
+    const fields = [
+      sdfField("SMILES", c.smiles),
+      sdfField("name", c.name),
+      sdfField("origin", c.origin),
+      sdfField("score", c.score),
+      ...Object.entries(c.components).map(([key, value]) => sdfField(key, value)),
+      ...DESCRIPTOR_COLUMNS.map((d) => sdfField(d.label, descriptorValue(p, d.key))),
+      sdfField("gate", c.gate.status),
+      sdfField("structure", c.structurePath),
+    ].join("");
+    records.push(`${lines.join("\n")}\n${fields}$$$$`);
+  }
+  return records.length ? `${records.join("\n")}\n` : "";
 }
 
 /** How many molecules a cofolding request names at most; each one is a Boltz run. */

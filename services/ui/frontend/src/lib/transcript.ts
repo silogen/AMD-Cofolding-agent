@@ -71,11 +71,7 @@ export function applyEvent(state: Transcript, event: ConversationEvent): Transcr
       return withBlock(next, at, event.seq, { kind: "text", id: `m-${event.seq}`, content: event.content });
 
     case "monitor_alert":
-      return withBlock(next, at, event.seq, {
-        kind: "text",
-        id: `ma-${event.seq}`,
-        content: `**Monitor alert**\n\n\`\`\`json\n${JSON.stringify(event.alert, null, 2)}\n\`\`\``,
-      });
+      return withBlock(next, at, event.seq, { kind: "alert", id: `ma-${event.seq}`, alert: event.alert });
 
     case "cancelled":
       return withBlock(next, at, event.seq, { kind: "cancelled", id: `c-${event.seq}` });

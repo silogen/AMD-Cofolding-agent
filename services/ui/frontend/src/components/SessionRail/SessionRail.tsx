@@ -3,6 +3,7 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import type { SessionSummary } from "../../types/api";
+import type { AgentInfo } from "../../hooks/useSession";
 import { download, sessionEvents } from "../../lib/api";
 import { sessionToMarkdown, slug } from "../../lib/exportSession";
 
@@ -10,11 +11,12 @@ interface Props {
   sessions: SessionSummary[];
   activeId: string | null;
   error: string | null;
+  agent: AgentInfo | null;
   onSelect: (id: string) => void;
   onNew: () => void;
   onRename: (id: string, title: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
-  onClose?: () => void;
+  onClose: () => void;
 }
 
 /** Day buckets, newest first. */
@@ -53,7 +55,7 @@ function timeLabel(iso: string): string {
  * list is a place to come back to, not a history to scroll: grouped by day,
  * searchable, and each entry can be renamed, exported or deleted.
  */
-export function SessionRail({ sessions, activeId, error, onSelect, onNew, onRename, onDelete, onClose }: Props) {
+export function SessionRail({ sessions, activeId, error, agent, onSelect, onNew, onRename, onDelete, onClose }: Props) {
   const [query, setQuery] = useState("");
 
   const groups = useMemo(() => {
@@ -63,12 +65,32 @@ export function SessionRail({ sessions, activeId, error, onSelect, onNew, onRena
   }, [sessions, query]);
 
   return (
-    <nav aria-label="Conversations" className="border-subtle bg-sunken flex h-full w-64 shrink-0 flex-col border-r">
-      <div className="flex items-center gap-2 px-3 pt-3 pb-2">
+    <nav aria-label="Conversations" className="border-subtle bg-sunken flex h-full w-60 shrink-0 flex-col border-r">
+      <div className="flex h-14 shrink-0 items-center justify-between px-4">
+        <span className="flex items-center gap-2" title="AI Cofolding Drug Design Agent">
+          <AmdLogo />
+          <span className="text-faint text-[10px] leading-tight font-semibold tracking-wide uppercase">
+            Cofolding
+            <br />
+            agent
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Hide conversations"
+          title="Hide conversations"
+          className="text-muted hover:text-body grid size-8 cursor-pointer place-items-center rounded-lg text-sm"
+        >
+          ‹
+        </button>
+      </div>
+
+      <div className="px-3 pb-2">
         <button
           type="button"
           onClick={onNew}
-          className="flex min-h-9 flex-1 cursor-pointer items-center gap-2 rounded-lg px-3 text-xs font-semibold text-white hover:opacity-90"
+          className="flex min-h-9 w-full cursor-pointer items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold text-white hover:opacity-90"
           style={{ background: "var(--color-accent)" }}
         >
           <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
@@ -76,16 +98,6 @@ export function SessionRail({ sessions, activeId, error, onSelect, onNew, onRena
           </svg>
           New conversation
         </button>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Hide conversations"
-            className="text-muted hover:text-body grid size-9 cursor-pointer place-items-center rounded-lg text-base"
-          >
-            ×
-          </button>
-        )}
       </div>
 
       <div className="px-3 pb-2">
@@ -124,7 +136,35 @@ export function SessionRail({ sessions, activeId, error, onSelect, onNew, onRena
           </section>
         ))}
       </div>
+
+      <footer className="border-subtle text-faint flex shrink-0 flex-col gap-0.5 border-t px-4 py-3 text-[10px]">
+        {agent ? (
+          <>
+            <span className="text-muted truncate font-mono text-[11px]" title={agent.model}>
+              {agent.model.split("/").pop()}
+            </span>
+            <span>
+              {agent.reasoningEffort ? `effort ${agent.reasoningEffort} · ` : ""}
+              <span title={agent.tools.join(", ")}>{agent.tools.length} MCP tools</span> · {agent.backend}
+            </span>
+          </>
+        ) : (
+          <span>Starting the agent…</span>
+        )}
+      </footer>
     </nav>
+  );
+}
+
+/** The AMD wordmark with its arrow, drawn in the current text colour. */
+function AmdLogo() {
+  return (
+    <svg viewBox="0 0 120 30" className="text-body h-[18px] w-auto" aria-label="AMD" role="img">
+      <text x="0" y="25" fill="currentColor" fontFamily="Arial, Helvetica, sans-serif" fontWeight="700" fontSize="30" letterSpacing="-1">
+        AMD
+      </text>
+      <path d="M92 3h25v25l-7.5-7.5V10.5H99.5Z M92 13.5l6-6v13h13l-6 6H92Z" fill="currentColor" />
+    </svg>
   );
 }
 
@@ -210,8 +250,13 @@ function SessionItem({
           active ? "bg-raised shadow-card font-semibold" : "hover:bg-inset"
         }`}
       >
-        {active && <span aria-hidden="true" className="h-4 w-0.5 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />}
-        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {active && <span aria-hidden="true" className="h-7 w-0.5 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate">{title}</span>
+          <span className="text-faint block text-[10px] font-normal">
+            {session.turns} turn{session.turns === 1 ? "" : "s"}
+          </span>
+        </span>
         {session.busy ? (
           <span
             title="Working"
@@ -220,7 +265,7 @@ function SessionItem({
             style={{ background: "var(--color-accent)" }}
           />
         ) : (
-          <span className="text-faint shrink-0 text-[10px] font-normal">{timeLabel(session.updated)}</span>
+          <span className="text-faint shrink-0 self-start pt-0.5 text-[10px] font-normal">{timeLabel(session.updated)}</span>
         )}
       </button>
 

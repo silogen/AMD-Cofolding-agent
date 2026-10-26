@@ -1,6 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+import { useState, type ReactNode } from "react";
 import type { InteractionsPanel, MoleculePanel, Panel, PropertiesPanel, StructurePanel, TablePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { StructureCard } from "../StructureCard/StructureCard";
@@ -48,16 +49,45 @@ export function PanelGrid({ panels, theme, openStructurePath, onOpenMolecule, on
       ))}
 
       {molecules.length > 0 && (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {molecules.map((panel) => (
-            <MoleculeCard key={panel.smiles} panel={panel} theme={theme} onOpen={onOpenMolecule} />
-          ))}
-        </div>
+        <Folded label={`${molecules.length} molecule${molecules.length === 1 ? "" : "s"}`}>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {molecules.map((panel) => (
+              <MoleculeCard key={panel.smiles} panel={panel} theme={theme} onOpen={onOpenMolecule} />
+            ))}
+          </div>
+        </Folded>
       )}
 
-      {tables.map((panel, index) => (
-        <DataTable key={index} panel={panel} />
-      ))}
+      {tables.length > 0 && (
+        <Folded label={`${tables.length} table${tables.length === 1 ? "" : "s"}`}>
+          <div className="space-y-3">
+            {tables.map((panel, index) => (
+              <DataTable key={index} panel={panel} />
+            ))}
+          </div>
+        </Folded>
+      )}
+    </div>
+  );
+}
+
+/** Results that the workbench also lists, one click away instead of in the answer's way. */
+function Folded({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="text-muted hover:text-body flex cursor-pointer items-center gap-1.5 text-[11px] font-medium touch:min-h-11"
+      >
+        <span aria-hidden="true" className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>
+          ›
+        </span>
+        {label}
+      </button>
+      {open && <div className="mt-2">{children}</div>}
     </div>
   );
 }

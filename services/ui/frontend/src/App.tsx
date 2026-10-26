@@ -12,11 +12,13 @@ import { Composer, type ComposerHandle } from "./components/Composer/Composer";
 import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
 import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
 import type { SessionSummary, StructurePanel } from "./types/api";
-import { collectArtifacts, sameFile } from "./lib/artifacts";
+import { collectArtifacts, runOf, sameFile, structureTitle } from "./lib/artifacts";
 import { availableCommands, VIEW_PREFIX } from "./lib/commands";
 import { onOpenRequest, sendToViewer } from "./lib/viewerBus";
+import { onWorkbenchRequest } from "./lib/workbenchBus";
 import { parseViewerCommand, VIEWER_HELP, type ViewerAction } from "./lib/viewerCommands";
 import { download, sessionEvents } from "./lib/api";
+import { extractTargetFacts, toolEvents, type TargetFacts } from "./lib/ttp";
 import { sessionToMarkdown, slug } from "./lib/exportSession";
 
 /** The conversation in the address, so a reload or a shared link reopens it. */
@@ -26,6 +28,14 @@ function sessionFromHash(): string | null {
 }
 
 const wide = () => window.matchMedia("(min-width: 1024px)").matches;
+
+/** How the header names the target: "BRD4", else the TTP id, else the sequence length. */
+function targetLabel(facts: TargetFacts): string | null {
+  if (facts.gene) return facts.gene;
+  if (facts.name) return facts.name.length > 24 ? `${facts.name.slice(0, 23)}…` : facts.name;
+  if (facts.ttpId) return facts.ttpId;
+  return facts.sequenceLength ? `${facts.sequenceLength} aa protein` : null;
+}
 
 /** A structure file from the shared volume that no step of this conversation produced. */
 function structureAt(path: string): StructurePanel {
@@ -64,6 +74,8 @@ export default function App() {
   const [workbenchOpen, setWorkbenchOpen] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [tab, setTab] = useState<WorkbenchTab>("structure");
+  /** Bumped on every request to show a tab, so one the user closed opens again. */
+  const [openSeq, setOpenSeq] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const composerRef = useRef<ComposerHandle>(null);
@@ -73,6 +85,7 @@ export default function App() {
   const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
   const [hints, setHints] = useState<{ id: number; message: string }[]>([]);
   const activeStructure = picked ?? artifacts.structures[0]?.item ?? null;
+  const target = useMemo(() => targetLabel(extractTargetFacts(toolEvents(artifacts.steps))), [artifacts.steps]);
 
   const hint = useCallback((message: string) => setHints((list) => [...list.slice(-2), { id: Date.now(), message }]), []);
   const dismissHint = useCallback((id: number) => setHints((list) => list.filter((entry) => entry.id !== id)), []);
@@ -101,9 +114,12 @@ export default function App() {
 
   const showWorkbench = useCallback((next: WorkbenchTab) => {
     setTab(next);
+    setOpenSeq((value) => value + 1);
     setWorkbenchOpen(true);
     if (!wide()) setSheetOpen(true);
   }, []);
+
+  useEffect(() => onWorkbenchRequest(showWorkbench), [showWorkbench]);
 
   // Anything that asks the viewer for something brings it up, on the structure it names.
   useEffect(
@@ -164,8 +180,14 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
       const key = event.key.toLowerCase();
+      // Ctrl+N belongs to the browser, so a new conversation is Alt+N.
+      if (event.altKey && !event.ctrlKey && !event.metaKey && key === "n") {
+        event.preventDefault();
+        open(null);
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
       if (key === "k") setPaletteOpen((value) => !value);
       else if (key === "b") setWorkbenchOpen((value) => !value);
       else if (key === "j") toggle();
@@ -174,11 +196,11 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggle]);
+  }, [toggle, open]);
 
   const paletteItems = useMemo<PaletteItem[]>(() => {
     const items: PaletteItem[] = [
-      { id: "new", group: "Conversation", label: "New conversation", run: () => open(null) },
+      { id: "new", group: "Conversation", label: "New conversation", hint: "Alt+N", run: () => open(null) },
       ...(busy ? [{ id: "stop", group: "Conversation", label: "Stop the agent", run: chat.cancel }] : []),
       ...(session
         ? [
@@ -187,8 +209,23 @@ export default function App() {
           ]
         : []),
       { id: "tab-structure", group: "Workbench", label: "Show the structure", run: () => showWorkbench("structure") },
+      { id: "tab-candidates", group: "Workbench", label: "Show candidates", run: () => showWorkbench("candidates") },
       { id: "tab-molecules", group: "Workbench", label: "Show molecules", run: () => showWorkbench("molecules") },
       { id: "tab-properties", group: "Workbench", label: "Show predicted properties", run: () => showWorkbench("properties") },
+      { id: "tab-jobs", group: "Workbench", label: "Show REINVENT jobs", hint: "/jobs", run: () => showWorkbench("jobs") },
+      { id: "tab-ttp", group: "Workbench", label: "Show the target product profile", run: () => showWorkbench("ttp") },
+      { id: "tab-target", group: "Workbench", label: "Show the target", run: () => showWorkbench("target") },
+      { id: "tab-assets", group: "Workbench", label: "Show shared assets", hint: "/shared", run: () => showWorkbench("assets") },
+      ...artifacts.structures.map(({ item }) => ({
+        id: `st-${item.path}`,
+        group: "Structures",
+        label: structureTitle(item),
+        hint: runOf(item.path) ?? item.tool,
+        run: () => {
+          setPicked(item);
+          showWorkbench("structure");
+        },
+      })),
       ...(artifacts.structures.length
         ? [
             { id: "v-ligand", group: "Viewer", label: "Focus the ligand", hint: "/view ligand", run: () => view({ kind: "ligand" }) },
@@ -228,10 +265,11 @@ export default function App() {
       })),
     ];
     return items;
-  }, [open, busy, chat.cancel, session, exportCurrent, showWorkbench, artifacts.structures.length, view, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
+  }, [open, busy, chat.cancel, session, exportCurrent, showWorkbench, artifacts.structures, view, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
 
   const workbenchProps = {
     tab,
+    openSeq,
     onTabChange: setTab,
     artifacts,
     theme,
@@ -248,6 +286,7 @@ export default function App() {
       sessions={sessions.sessions}
       activeId={session?.id ?? null}
       error={sessions.error}
+      agent={agent}
       onSelect={(id) => open(id)}
       onNew={() => open(null)}
       onRename={sessions.rename}
@@ -255,34 +294,12 @@ export default function App() {
         await sessions.remove(id);
         if (id === session?.id) open(null);
       }}
-      onClose={wide() ? undefined : () => setRailOpen(false)}
+      onClose={() => setRailOpen(false)}
     />
   );
 
   return (
     <div className="bg-page flex h-full flex-col">
-      <Header
-        theme={theme}
-        onToggleTheme={toggle}
-        connection={connection}
-        agent={agent}
-        gatewayError={chat.gatewayError}
-        title={session?.title ?? ""}
-        busy={busy}
-        onReconnect={chat.reconnect}
-        railOpen={railOpen}
-        onToggleRail={() => setRailOpen((value) => !value)}
-        workbenchOpen={wide() ? workbenchOpen : sheetOpen}
-        onToggleWorkbench={() => (wide() ? setWorkbenchOpen((value) => !value) : setSheetOpen((value) => !value))}
-        onOpenPalette={() => setPaletteOpen(true)}
-      />
-
-      {chat.gatewayError && (
-        <p role="alert" className="border-subtle border-b px-4 py-1.5 text-center text-xs" style={{ background: "var(--color-accent-soft)" }}>
-          {chat.gatewayError}
-        </p>
-      )}
-
       <div className="relative flex min-h-0 flex-1">
         {railOpen && (
           <>
@@ -295,6 +312,28 @@ export default function App() {
         )}
 
         <main className="flex min-w-0 flex-1 flex-col">
+          <Header
+            theme={theme}
+            onToggleTheme={toggle}
+            connection={connection}
+            agent={agent}
+            gatewayError={chat.gatewayError}
+            title={session?.title ?? ""}
+            target={target}
+            onShowTarget={() => showWorkbench("target")}
+            busy={busy}
+            onReconnect={chat.reconnect}
+            railOpen={railOpen}
+            onToggleRail={() => setRailOpen((value) => !value)}
+            workbenchOpen={wide() ? workbenchOpen : sheetOpen}
+            onToggleWorkbench={() => (wide() ? setWorkbenchOpen((value) => !value) : setSheetOpen((value) => !value))}
+            onOpenPalette={() => setPaletteOpen(true)}
+          />
+          {chat.gatewayError && (
+            <p role="alert" className="border-subtle border-b px-4 py-1.5 text-center text-xs" style={{ background: "var(--color-accent-soft)" }}>
+              {chat.gatewayError}
+            </p>
+          )}
           <div className="relative flex min-h-0 flex-1 flex-col">
             <Transcript
               turns={transcript.turns}

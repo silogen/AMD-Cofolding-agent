@@ -124,6 +124,6 @@ describe("applyEvents", () => {
     const state = applyEvents(EMPTY_TRANSCRIPT, events({ type: "monitor_alert", alert: { job: "ab12" } }));
     const agent = state.turns[0] as AgentTurn;
     expect(agent.done).toBe(true);
-    expect(agent.blocks[0].kind).toBe("text");
+    expect(agent.blocks[0].kind).toBe("alert");
   });
 });

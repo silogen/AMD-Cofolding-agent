@@ -23,7 +23,20 @@ export const CONTACT_TYPES: Record<string, { label: string; color: string }> = {
 };
 
 export const contactLabel = (type: string) => CONTACT_TYPES[type]?.label ?? type.replace(/_/g, " ");
-export const contactColor = (type: string) => CONTACT_TYPES[type]?.color ?? "#888888";
+/** Light-theme overrides: the dark-theme gold and yellow wash out on white. */
+const LIGHT_COLORS: Record<string, string> = {
+  hydrophobic: "#a38a3e",
+  metal: "#d6a300",
+};
+
+const currentTheme = (): "dark" | "light" =>
+  typeof document !== "undefined" && !document.documentElement.classList.contains("dark") ? "light" : "dark";
+
+/** The colour of an interaction type; *theme* defaults to the one on the document. */
+export function contactColor(type: string, theme: "dark" | "light" = currentTheme()): string {
+  if (theme === "light" && LIGHT_COLORS[type]) return LIGHT_COLORS[type];
+  return CONTACT_TYPES[type]?.color ?? "#888888";
+}
 
 /** Types most worth reading first: specific interactions before generic contacts. */
 const ORDER = ["covalent", "ionic", "hbond", "halogen_bond", "pi_stacking", "pi_cation", "cation_pi", "metal", "water_bridge"];

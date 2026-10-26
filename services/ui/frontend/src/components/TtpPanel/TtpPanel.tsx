@@ -23,6 +23,10 @@ import {
   targetRange,
   transformParams,
   ttpUpdates,
+  objectiveSource,
+  ttpCreated,
+  ttpGeneration,
+  weightRange,
   weightShares,
   type Objective,
   type ToolEvent,
@@ -129,6 +133,9 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
   const outdated = dirty && mine !== null && mine.base.version < base.version;
   const diff = changes(base, draft);
   const shares = weightShares(draft);
+  const range = weightRange(base);
+  const created = ttpCreated(base);
+  const generation = ttpGeneration(base);
 
   const edit = (next: Ttp) => {
     const value = makeDraft(mine?.base ?? base, next, base);
@@ -186,6 +193,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
           </span>
           <span className="min-w-0 truncate text-xs font-semibold">{base.name}</span>
           <span className="text-faint font-mono text-[10px]">{base.id}</span>
+          {created && <span className="text-faint text-[10px]">· Created {created}</span>}
           {!onServer && (
             <span className="text-faint text-[10px]" title={remote?.error ?? undefined}>
               · from this session, not in the TTP store
@@ -210,6 +218,22 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
             </p>
           )}
         </div>
+
+        {generation.length > 0 && (
+          <section className="bg-raised border-subtle shadow-card rounded-xl border px-3 py-2">
+            <h3 className="text-muted mb-1 text-[11px] font-medium">Generation</h3>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+              {generation.map((row) => (
+                <div key={row.label} className="contents">
+                  <dt className="text-faint">{row.label}</dt>
+                  <dd className="truncate font-mono" title={row.value}>
+                    {row.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        )}
 
         {outdated && (
           <p className="bg-sunken border-subtle rounded-lg border px-3 py-2 text-[11px]">
@@ -244,6 +268,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
                       objective={objective}
                       original={original}
                       share={shares.get(objective.name) ?? 0}
+                      range={range}
                       changed={diff.changed.includes(objective.name)}
                       onChange={(patch) => edit(patchObjective(draft, section, index, patch))}
                       onRemove={items.length > 1 || section === "pre_scoring" ? () => edit(removeObjective(draft, section, index)) : undefined}
@@ -374,6 +399,7 @@ function ObjectiveRow({
   objective,
   original,
   share,
+  range: weights,
   changed,
   onChange,
   onRemove,
@@ -381,6 +407,7 @@ function ObjectiveRow({
   objective: Objective;
   original: Objective | undefined;
   share: number;
+  range: { min: number; max: number; step: number };
   changed: boolean;
   onChange: (patch: Partial<Objective>) => void;
   onRemove?: () => void;
@@ -392,7 +419,8 @@ function ObjectiveRow({
   const what = [objective.type, objective.component ?? objective.service, endpointOf(objective), objective.depends_on && `after ${objective.depends_on}`]
     .filter(Boolean)
     .join(" · ");
-  const maxWeight = Math.max(2, Math.ceil((original?.weight ?? objective.weight) * 2));
+  const source = objectiveSource(objective);
+  const sourceColour = source === "native" ? "var(--color-ok)" : source === "service" ? "var(--color-structure)" : "var(--color-molecule)";
 
   const setTransform = (next: Transform | null) => onChange({ transform: next });
 
@@ -410,6 +438,13 @@ function ObjectiveRow({
           </p>
           <p className="text-faint truncate text-[10px]">{what}</p>
         </div>
+        <span
+          className="shrink-0 rounded-full border px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide"
+          style={{ color: sourceColour, borderColor: sourceColour }}
+          title={source === "native" ? "REINVENT4 built-in component" : source === "service" ? "Configured scoring service" : "Custom REST endpoint"}
+        >
+          {source}
+        </span>
         {range && (
           <span className="text-muted shrink-0 font-mono text-[10px] tabular-nums" title="Target window">
             {range}
@@ -434,9 +469,9 @@ function ObjectiveRow({
         <span className="text-faint w-10 shrink-0 text-[10px]">weight</span>
         <input
           type="range"
-          min={0.05}
-          max={maxWeight}
-          step={0.05}
+          min={weights.min}
+          max={weights.max}
+          step={weights.step}
           value={objective.weight}
           onChange={(event) => onChange({ weight: Number(event.target.value) })}
           aria-label={`${objective.name} weight`}
@@ -447,6 +482,12 @@ function ObjectiveRow({
           <span className="block h-full rounded-full" style={{ width: `${Math.max(4, share * 100)}%`, background: "var(--color-table)" }} />
         </span>
       </div>
+      {transform && !open && (
+        <div className="flex items-center gap-2 px-3 pb-2">
+          <span className="text-faint w-10 shrink-0 text-[10px]">curve</span>
+          <TransformCurve transform={transform} width={220} height={36} />
+        </div>
+      )}
       {open && (
         <div className="border-subtle bg-sunken flex flex-wrap items-start gap-3 border-t px-3 py-2">
           <div className="min-w-0 flex-1 space-y-1.5">

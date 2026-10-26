@@ -9,6 +9,9 @@ import {
   buildCandidates,
   candidateValue,
   candidatesToCsv,
+  candidatesToSdf,
+  descriptorValue,
+  ro5Violations,
   cofoldPrompt,
   MAX_COFOLD,
   numericColumns,
@@ -135,5 +138,34 @@ describe("exports", () => {
     expect(prompt).toContain("- CCC");
     expect(prompt).not.toContain("CCN");
     expect(prompt).toContain("3 were selected");
+  });
+});
+
+describe("descriptors", () => {
+  const props = { mw: 520, clogp: 5.5, tpsa: 80, hbd: 2, hba: 11, rotb: 4, ro5: 0 };
+  it("counts rule-of-five violations", () => {
+    expect(ro5Violations(props)).toBe(3);
+    expect(ro5Violations({ mw: 300, clogp: 2, hbd: 1, hba: 4 })).toBe(0);
+  });
+  it("reads a descriptor by key", () => {
+    expect(descriptorValue(props, "desc:tpsa")).toBe(80);
+    expect(descriptorValue(props, "score")).toBeUndefined();
+    expect(descriptorValue(undefined, "desc:mw")).toBeUndefined();
+  });
+  it("writes descriptors to CSV when given", () => {
+    const [c] = buildCandidates({ ...empty(), molecules: [molecule("CCO", "ethanol")] });
+    const csv = candidatesToCsv([c], () => props).split("\n");
+    expect(csv[0]).toContain("MW,cLogP,TPSA,HBD,HBA,RotB,Ro5");
+    expect(csv[1]).toContain("520,5.5,80,2,11,4,0");
+    expect(candidatesToCsv([c]).split("\n")[0]).not.toContain("MW");
+  });
+  it("writes an SD file, named, with properties, skipping unparsable molecules", () => {
+    const candidates = buildCandidates({ ...empty(), molecules: [molecule("CCO", "ethanol"), molecule("bad")] });
+    const sdf = candidatesToSdf(candidates, (s) => (s === "CCO" ? "\n  RDKit\n\n  3  2  0  0  0  0  0  0  0  0999 V2000\nM  END\n" : null), () => props);
+    expect(sdf.startsWith("ethanol\n")).toBe(true);
+    expect(sdf).toContain(">  <SMILES>\nCCO\n\n");
+    expect(sdf).toContain(">  <MW>\n520\n\n");
+    expect(sdf.match(/\$\$\$\$/g)).toHaveLength(1);
+    expect(candidatesToSdf([], () => null)).toBe("");
   });
 });

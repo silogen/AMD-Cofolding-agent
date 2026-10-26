@@ -201,5 +201,26 @@ export function groupAssets(assets: Asset[], query = ""): { kind: AssetKind; lab
   })).filter((group) => group.assets.length > 0);
 }
 
+/** The top-level folder of a path, as "/name", or "/" for a file at the volume root. */
+export function topFolder(path: string): string {
+  const rel = sharedRelative(path) ?? path.replace(/\\/g, "/").replace(/^\/+/, "");
+  const parts = rel.split("/").filter(Boolean);
+  return parts.length > 1 ? `/${parts[0]}` : "/";
+}
+
+/** Assets grouped by top-level folder, folders sorted, paths sorted within each. */
+export function groupByFolder(assets: Asset[], query = ""): { folder: string; assets: Asset[] }[] {
+  const needle = query.trim().toLowerCase();
+  const shown = needle ? assets.filter((a) => a.path.toLowerCase().includes(needle)) : assets;
+  const byFolder = new Map<string, Asset[]>();
+  for (const asset of shown) {
+    const folder = topFolder(asset.path);
+    byFolder.set(folder, [...(byFolder.get(folder) ?? []), asset]);
+  }
+  return [...byFolder.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([folder, list]) => ({ folder, assets: list.sort((a, b) => a.path.localeCompare(b.path)) }));
+}
+
 /** Viewer-openable: a structure the gateway can serve from the shared volume. */
 export const canOpen = (asset: Asset) => (asset.kind === "structure" || asset.kind === "cofold") && sharedRelative(asset.path) !== null;

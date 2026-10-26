@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { assetKind, assetUrl, canOpen, groupAssets, mergeAssets, parseSharedAssets, servedPath, sessionAssets, sharedRelative } from "./assets";
+import { assetKind, assetUrl, canOpen, groupAssets, groupByFolder, topFolder, mergeAssets, parseSharedAssets, servedPath, sessionAssets, sharedRelative } from "./assets";
 
 const listing = {
   shared_dir: "/shared",
@@ -88,5 +88,18 @@ describe("session files", () => {
       ["smiles", 1],
     ]);
     expect(groupAssets(all, "brd4").flatMap((g) => g.assets.map((a) => a.name))).toEqual(["brd4.pdb", "brd4_bd1.a3m"]);
+  });
+});
+
+describe("groupByFolder", () => {
+  it("groups by top-level folder, sorted", () => {
+    const assets = parseSharedAssets(listing);
+    const groups = groupByFolder(assets);
+    expect(groups.map((g) => g.folder)).toEqual(["/msa", "/predictions", "/targets"]);
+    expect(groupByFolder(assets, "brd4").map((g) => g.folder)).toEqual(["/msa", "/targets"]);
+  });
+  it("puts root files under /", () => {
+    expect(topFolder("x.pdb")).toBe("/");
+    expect(topFolder("/shared/structures/a/b.pdb")).toBe("/structures");
   });
 });

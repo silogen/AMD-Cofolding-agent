@@ -275,7 +275,8 @@ export type TurnBlock =
     }
   | { kind: "text"; id: string; content: string }
   | { kind: "error"; id: string; message: string }
-  | { kind: "cancelled"; id: string };
+  | { kind: "cancelled"; id: string }
+  | { kind: "alert"; id: string; alert: Record<string, unknown> };
 
 export interface UserTurn {
   role: "user";

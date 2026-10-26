@@ -3,7 +3,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { callTool } from "../../lib/api";
-import { canOpen, groupAssets, mergeAssets, parseSharedAssets, sessionAssets, sharedRelative, type Asset, type SharedAssetsListing } from "../../lib/assets";
+import { ASSET_GROUPS, canOpen, groupByFolder, mergeAssets, parseSharedAssets, sessionAssets, sharedRelative, type Asset, type SharedAssetsListing } from "../../lib/assets";
 import { parseResult, type ToolEvent } from "../../lib/ttp";
 import { CopyButton } from "../CopyButton/CopyButton";
 
@@ -55,7 +55,7 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
 
   const fromSession = useMemo(() => sessionAssets(events), [events]);
   const all = useMemo(() => mergeAssets(listing.state === "ready" ? listing.assets : [], fromSession), [listing, fromSession]);
-  const groups = useMemo(() => groupAssets(all, query), [all, query]);
+  const groups = useMemo(() => groupByFolder(all, query), [all, query]);
 
   const refresh = () => {
     setListing({ state: "loading" });
@@ -68,8 +68,8 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
         <div className="min-w-0 flex-1">
           <h2 className="text-xs font-semibold">Shared assets</h2>
           <p className="text-faint truncate font-mono text-[10px]">
-            {listing.state === "ready" ? (listing.sharedDir ?? "/shared") : "/shared"} · {all.length} file{all.length === 1 ? "" : "s"}
-            {fromSession.length > 0 && ` · ${fromSession.length} from this session`}
+            {listing.state === "ready" ? (listing.sharedDir ?? "/shared") : "/shared"} {"\u00b7"} {all.length} file{all.length === 1 ? "" : "s"}
+            {fromSession.length > 0 && ` \u00b7 ${fromSession.length} from this session`}
           </p>
         </div>
         <button
@@ -78,7 +78,7 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
           disabled={listing.state === "loading"}
           className="bg-inset text-muted hover:text-body shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium disabled:cursor-default disabled:opacity-50 touch:min-h-11"
         >
-          {listing.state === "loading" ? "Loading…" : "Refresh"}
+          {listing.state === "loading" ? "Loading\u2026" : "Refresh"}
         </button>
       </div>
       <div className="border-subtle shrink-0 border-b px-3 py-2">
@@ -99,19 +99,39 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
           </p>
         )}
         {listing.state === "ready" && listing.note && <p className="text-muted bg-sunken border-subtle rounded-lg border px-3 py-2 text-[11px]">{listing.note}</p>}
+        <p className="text-faint flex items-start gap-1.5 px-1 text-[10px] leading-snug">
+          <span aria-hidden="true" style={{ color: "var(--color-structure)" }}>{"\u24d8"}</span>
+          Paths are part of the service contract and cannot be fabricated by the UI. Insert one into the prompt to ground the agent.
+        </p>
         {groups.map((group) => (
-          <details key={group.kind} open className="bg-raised border-subtle shadow-card overflow-hidden rounded-xl border">
-            <summary className="border-subtle flex cursor-pointer list-none items-center gap-2 border-b px-3 py-2">
-              <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ background: group.colour }} />
-              <span className="text-xs font-semibold">{group.label}</span>
-              <span className="text-faint ml-auto text-[11px]">{group.assets.length}</span>
-            </summary>
-            <ul>
-              {group.assets.map((asset) => (
-                <AssetRow key={asset.path} asset={asset} onOpenStructure={onOpenStructure} onInsert={onInsert} />
-              ))}
-            </ul>
-          </details>
+          <section key={group.folder}>
+            <h3 className="text-muted mb-1 px-1 font-mono text-[11px] font-semibold">
+              {group.folder} <span className="text-faint font-normal">{"\u00b7"} {group.assets.length}</span>
+            </h3>
+            <div className="bg-raised border-subtle shadow-card overflow-x-auto rounded-xl border">
+              <table className="w-full min-w-[34rem] table-fixed border-collapse text-[11px]">
+                <colgroup>
+                  <col />
+                  <col className="w-52" />
+                  <col className="w-28" />
+                  <col className="w-40" />
+                </colgroup>
+                <thead>
+                  <tr className="text-faint border-subtle border-b text-left text-[10px] uppercase tracking-wide">
+                    <th className="px-3 py-1.5 font-medium">Path</th>
+                    <th className="px-2 py-1.5 font-medium">Type</th>
+                    <th className="px-2 py-1.5 font-medium">Producer</th>
+                    <th className="px-2 py-1.5 text-right font-medium">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.assets.map((asset) => (
+                    <AssetRow key={asset.path} asset={asset} onOpenStructure={onOpenStructure} onInsert={onInsert} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
         ))}
         {listing.state !== "loading" && groups.length === 0 && (
           <p className="text-muted px-6 py-10 text-center text-xs">
@@ -125,43 +145,52 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
 
 function AssetRow({ asset, onOpenStructure, onInsert }: { asset: Asset; onOpenStructure: (path: string) => void; onInsert: (text: string) => void }) {
   const openable = canOpen(asset);
+  const kind = ASSET_GROUPS.find((g) => g.kind === asset.kind);
   return (
-    <li className="border-subtle flex items-center gap-2 border-b px-3 py-1.5 text-[11px] last:border-b-0">
-      <div className="min-w-0 flex-1">
-        <p className="truncate font-mono font-semibold" title={asset.path}>
-          {asset.name}
-        </p>
-        <p className="text-faint flex gap-2 truncate font-mono text-[10px]">
-          <span className="truncate">{asset.dir || "/"}</span>
-          {asset.queryLength !== null && <span className="shrink-0">query {asset.queryLength} aa</span>}
-          {asset.source === "session" && <span className="shrink-0">· {asset.tool}</span>}
-        </p>
-      </div>
-      <span className="text-faint shrink-0 text-[10px] uppercase">{asset.ext}</span>
-      {openable && (
+    <tr className="border-subtle border-b last:border-b-0">
+      <td className="px-3 py-1.5">
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 flex-1 truncate font-mono" title={asset.path} dir="rtl">
+            &lrm;
+            {asset.path}
+          </span>
+          <CopyButton value={asset.path} label="Copy" />
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-2 py-1.5">
+        <span className="inline-flex items-center gap-1.5">
+          <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: kind?.colour }} />
+          <span className="text-muted">{kind?.label ?? asset.kind}</span>
+          <span className="text-faint font-mono text-[10px] uppercase">{asset.ext}</span>
+          {asset.queryLength !== null && <span className="text-faint font-mono text-[10px]">{"\u00b7"} {asset.queryLength} aa</span>}
+        </span>
+      </td>
+      <td className="text-muted whitespace-nowrap px-2 py-1.5 font-mono text-[10px]">{asset.source === "session" ? asset.tool : "shared volume"}</td>
+      <td className="whitespace-nowrap px-2 py-1 text-right">
+        {openable && (
+          <button
+            type="button"
+            onClick={() => onOpenStructure(sharedRelative(asset.path) ?? asset.path)}
+            className="cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold text-white transition-opacity hover:opacity-90 touch:min-h-11"
+            style={{ background: "var(--color-accent)" }}
+          >
+            Open
+          </button>
+        )}
         <button
           type="button"
-          onClick={() => onOpenStructure(sharedRelative(asset.path) ?? asset.path)}
-          className="shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold text-white transition-opacity hover:opacity-90 touch:min-h-11"
-          style={{ background: "var(--color-accent)" }}
+          onClick={() => onInsert(asset.path)}
+          title="Insert the path into the prompt"
+          className="text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11"
         >
-          View
+          Insert
         </button>
-      )}
-      <button
-        type="button"
-        onClick={() => onInsert(asset.path)}
-        title="Insert the path into the prompt"
-        className="text-muted hover:text-body hover:bg-inset shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11"
-      >
-        Insert
-      </button>
-      {asset.url && (
-        <a href={asset.url} download={asset.name} className="text-muted hover:text-body shrink-0 rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11">
-          Download
-        </a>
-      )}
-      <CopyButton value={asset.path} label="Copy" />
-    </li>
+        {asset.url && (
+          <a href={asset.url} download={asset.name} className="text-muted hover:text-body rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11">
+            Download
+          </a>
+        )}
+      </td>
+    </tr>
   );
 }

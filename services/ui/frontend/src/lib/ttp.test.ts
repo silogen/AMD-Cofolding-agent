@@ -22,6 +22,10 @@ import {
   transformCurve,
   ttpUpdates,
   weightShares,
+  weightRange,
+  objectiveSource,
+  ttpCreated,
+  ttpGeneration,
   type ToolEvent,
   type Ttp,
 } from "./ttp";
@@ -253,5 +257,36 @@ describe("extractTargetFacts", () => {
 
   it("is empty for a session without a target", () => {
     expect(extractTargetFacts([{ type: "tool_call", name: "list_jobs", arguments: {} }]).sources).toEqual([]);
+  });
+});
+
+describe("TTP display helpers", () => {
+  const make = (weights: number[], extra: Record<string, unknown> = {}): Ttp =>
+    ({
+      id: "t",
+      name: "t",
+      version: 1,
+      scoring: { objectives: weights.map((weight, i) => ({ name: `o${i}`, type: "native", component: "QED", weight })) },
+      ...extra,
+    }) as Ttp;
+
+  it("uses a 0-1 weight range unless a weight exceeds 1", () => {
+    expect(weightRange(make([0.3, 1]))).toEqual({ min: 0, max: 1, step: 0.01 });
+    expect(weightRange(make([0.3, 2.5]))).toEqual({ min: 0, max: 5, step: 0.05 });
+  });
+  it("labels objectives native, service or external", () => {
+    expect(objectiveSource({ type: "native" })).toBe("native");
+    expect(objectiveSource({ type: "external", service: "boltz" })).toBe("service");
+    expect(objectiveSource({ type: "external", service: "my_api" })).toBe("external");
+  });
+  it("reads created and generation only when present", () => {
+    expect(ttpCreated(make([1]))).toBeNull();
+    expect(ttpCreated(make([1], { created_at: "2026-10-26" }))).toBe("2026-10-26");
+    expect(ttpGeneration(make([1]))).toEqual([]);
+    expect(ttpGeneration(make([1], { generation: { mode: "libinvent", libinvent_input: { scaffold: "c1ccccc1[*]" }, seeds: ["CCO", "CCN"] } }))).toEqual([
+      { label: "Mode", value: "libinvent" },
+      { label: "Scaffold", value: "c1ccccc1[*]" },
+      { label: "Seeds", value: "CCO, CCN" },
+    ]);
   });
 });

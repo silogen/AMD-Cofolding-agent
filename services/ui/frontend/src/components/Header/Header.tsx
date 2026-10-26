@@ -13,6 +13,9 @@ interface Props {
   agent: AgentInfo | null;
   gatewayError: string | null;
   title: string;
+  /** The protein this conversation works on, once a tool has named it. */
+  target: string | null;
+  onShowTarget: () => void;
   busy: boolean;
   onReconnect: () => void;
   railOpen: boolean;
@@ -29,11 +32,11 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   error: "Disconnected",
 };
 
-/** The model name without its organisation prefix: "Qwen3.8-27B", not "Qwen/Qwen3.8-27B". */
-function shortModel(model: string): string {
-  return model.split("/").pop() ?? model;
-}
-
+/**
+ * The head of the chat column: which conversation this is, on which target,
+ * and whether the agent can be reached. The product name and the model live
+ * in the conversation rail, so this line stays about the work.
+ */
 export function Header({
   theme,
   onToggleTheme,
@@ -41,6 +44,8 @@ export function Header({
   agent,
   gatewayError,
   title,
+  target,
+  onShowTarget,
   busy,
   onReconnect,
   railOpen,
@@ -53,74 +58,73 @@ export function Header({
   const status = gatewayError ?? (agent ? null : "Starting the agent…");
 
   return (
-    <header className="border-subtle bg-raised flex shrink-0 items-center gap-3 border-b px-3 py-2">
-      <IconButton label={railOpen ? "Hide conversations" : "Show conversations"} pressed={railOpen} onClick={onToggleRail}>
-        <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-          <rect x="3" y="4" width="18" height="16" rx="2" />
-          <path d="M9 4v16" />
-        </svg>
-      </IconButton>
+    <header className="border-subtle flex h-14 shrink-0 items-center gap-3 border-b px-4">
+      {!railOpen && (
+        <IconButton label="Show conversations" onClick={onToggleRail}>
+          <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M9 4v16" />
+          </svg>
+        </IconButton>
+      )}
 
-      <div className="flex min-w-0 items-center gap-2">
-        <span aria-hidden="true" className="h-5 w-1 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />
-        <div className="min-w-0">
-          <h1 className="truncate text-sm font-semibold">
-            <span className="hidden md:inline">AI Cofolding Drug Design Agent</span>
-            <span className="md:hidden">Cofolding Agent</span>
-          </h1>
-          <p className="text-faint truncate text-[11px]" title={title}>
-            {title || "New conversation"}
-            {busy && <span style={{ color: "var(--color-accent)" }}> · working</span>}
-          </p>
+      <div className="min-w-0 flex-1">
+        <h1 className="truncate text-sm font-bold" title={title}>
+          {title || "New conversation"}
+        </h1>
+        <div className="mt-0.5 flex items-center gap-2 text-[11px]">
+          {target ? (
+            <button
+              type="button"
+              onClick={onShowTarget}
+              title="Show the target"
+              className="border-subtle text-muted hover:text-body cursor-pointer rounded-full border px-2 font-semibold"
+            >
+              {target}
+            </button>
+          ) : (
+            <span className="text-faint">No target yet</span>
+          )}
+          {busy && <span style={{ color: "var(--color-accent)" }}>working…</span>}
         </div>
       </div>
 
-      <div className="ml-auto flex items-center gap-1 sm:gap-2">
-        {agent && (
-          <div className="text-muted hidden items-center gap-1.5 text-[11px] xl:flex">
-            <Chip title={`${agent.backend} backend`}>{shortModel(agent.model)}</Chip>
-            {agent.reasoningEffort && <Chip title="Reasoning effort">effort {agent.reasoningEffort}</Chip>}
-            <Chip title={agent.tools.join(", ")}>{agent.tools.length} tools</Chip>
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={onOpenPalette}
-          title="Commands (Ctrl+K)"
-          className="bg-inset text-muted hover:text-body hidden cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-[11px] font-medium sm:flex"
-        >
-          Commands
-          <kbd className="border-subtle rounded border px-1 font-mono text-[10px]">Ctrl K</kbd>
-        </button>
-
+      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <button
           type="button"
           onClick={healthy ? undefined : onReconnect}
           disabled={healthy}
           title={status ?? (healthy ? "Connected to the agent" : "Try to reconnect")}
           aria-label={CONNECTION_LABEL[connection]}
-          className="bg-inset flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium disabled:cursor-default touch:min-h-11 touch:min-w-11 touch:justify-center"
+          className="text-muted flex items-center gap-1.5 px-1 text-[11px] disabled:cursor-default touch:min-h-11 touch:min-w-11 touch:justify-center"
         >
           <span
             aria-hidden="true"
             className={`size-1.5 rounded-full ${connection === "connecting" || connection === "closed" ? "animate-pulse" : ""}`}
             style={{ background: healthy && !gatewayError ? "var(--color-ok)" : "var(--color-accent)" }}
           />
-          <span className="hidden sm:inline">{CONNECTION_LABEL[connection]}</span>
+          <span className="hidden sm:inline">{CONNECTION_LABEL[connection].toLowerCase()}</span>
         </button>
 
-        <IconButton
-          label={workbenchOpen ? "Hide the workbench" : "Show the workbench"}
-          shortcut="Ctrl+B"
-          pressed={workbenchOpen}
-          onClick={onToggleWorkbench}
+        <button
+          type="button"
+          onClick={onOpenPalette}
+          title="Commands (Ctrl+K)"
+          className="text-muted hover:text-body hidden cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[11px] sm:flex"
         >
-          <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M15 4v16" />
-          </svg>
-        </IconButton>
+          <kbd className="border-subtle rounded border px-1 font-mono text-[10px]">Ctrl K</kbd>
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleWorkbench}
+          aria-pressed={workbenchOpen}
+          title={`${workbenchOpen ? "Hide" : "Show"} the workbench (Ctrl+B)`}
+          aria-label={workbenchOpen ? "Hide the workbench" : "Show the workbench"}
+          className={`cursor-pointer rounded-md px-2.5 py-1 text-xs font-semibold ${workbenchOpen ? "text-body bg-inset" : "text-muted hover:text-body"}`}
+        >
+          Workbench
+        </button>
 
         <IconButton label={theme === "dark" ? "Switch to the light theme" : "Switch to the dark theme"} shortcut="Ctrl+J" onClick={onToggleTheme}>
           {theme === "dark" ? <SunIcon /> : <MoonIcon />}
@@ -130,35 +134,14 @@ export function Header({
   );
 }
 
-function Chip({ children, title }: { children: ReactNode; title?: string }) {
-  return (
-    <span title={title} className="bg-inset rounded-full px-2 py-0.5 font-mono">
-      {children}
-    </span>
-  );
-}
-
-function IconButton({
-  label,
-  shortcut,
-  pressed,
-  onClick,
-  children,
-}: {
-  label: string;
-  shortcut?: string;
-  pressed?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
+function IconButton({ label, shortcut, onClick, children }: { label: string; shortcut?: string; onClick: () => void; children: ReactNode }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label={label}
-      aria-pressed={pressed}
       title={shortcut ? `${label} (${shortcut})` : label}
-      className="bg-inset text-muted hover:text-body grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg touch:size-11"
+      className="text-muted hover:text-body hover:bg-inset grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg touch:size-11"
     >
       {children}
     </button>

@@ -1,10 +1,10 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useState, type AnchorHTMLAttributes } from "react";
+import { useEffect, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AgentTurn, Panel, TurnBlock } from "../../types/api";
+import type { AgentTurn, Panel, StructurePanel, TurnBlock } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { toolSteps } from "../../lib/transcript";
 import { clock, duration, summarise } from "../../lib/format";
@@ -12,8 +12,14 @@ import { panelKey } from "../../lib/artifacts";
 import { suggestFollowups } from "../../lib/followups";
 import { remarkResidueLinks, residueFromHref } from "../../lib/residueLinks";
 import { sendToViewer } from "../../lib/viewerBus";
+import { openWorkbench } from "../../lib/workbenchBus";
+import { answerTitle, artifactLinks, remarkCallouts, withoutLeadingHeading, type ArtifactLink, type CalloutTone } from "../../lib/answer";
+import { gate } from "../../lib/gate";
 import { PanelGrid } from "../PanelGrid/PanelGrid";
 import { CopyButton } from "../CopyButton/CopyButton";
+import { Callout } from "../Callout/Callout";
+import { AlertCard } from "../AlertCard/AlertCard";
+import { ArtifactButton } from "./ArtifactButton";
 
 type ToolStep = Extract<TurnBlock, { kind: "tool" }>;
 
@@ -58,33 +64,28 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
   const lastThinking = [...turn.blocks].reverse().find((block) => block.kind === "thinking");
   const failedSteps = steps.filter((step) => step.result?.isError).length;
   const answered = turn.done && turn.blocks.some((block) => block.kind === "text") && !turn.blocks.some((block) => block.kind === "cancelled");
-  const followups = onFollowup && answered ? suggestFollowups(panels, steps.map((step) => step.name)) : [];
+  const tools = steps.map((step) => step.name);
+  const followups = onFollowup && answered ? suggestFollowups(panels, tools) : [];
+  const texts = turn.blocks.flatMap((block) => (block.kind === "text" ? [block.content] : []));
+  const onlyAlerts = turn.blocks.length > 0 && turn.blocks.every((block) => block.kind === "alert");
+  const title = onlyAlerts ? "Monitor alert" : running && texts.length === 0 && steps.length === 0 ? "Working…" : answerTitle(texts, tools);
+  const firstText = turn.blocks.find((block) => block.kind === "text");
+  const links = turn.done ? artifactLinks(panels, tools) : [];
+  const failedGate = uniqueStructures(panels).filter((panel) => gate(panel.metrics).status === "fail");
+  const thoughts = turn.blocks.flatMap((block) => (block.kind === "thinking" ? [block] : []));
 
   return (
     <article className="flex flex-col gap-3" aria-busy={running}>
-      <div className="text-faint flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-        <span className="text-body flex items-center gap-1.5 font-semibold">
-          <span aria-hidden="true" className="size-2 rounded-sm" style={{ background: "var(--color-accent)" }} />
-          Agent
-        </span>
-        <span>{clock(turn.at)}</span>
-        <span title="Elapsed">{duration(elapsed)}</span>
-        {steps.length > 0 && (
-          <span>
-            {steps.length} step{steps.length === 1 ? "" : "s"}
-            {failedSteps > 0 && <span style={{ color: "var(--color-accent)" }}> · {failedSteps} failed</span>}
-          </span>
-        )}
-        {turn.tokens && (
-          <span title="Tokens used by the conversation so far">
-            {turn.tokens.input.toLocaleString()} in · {turn.tokens.output.toLocaleString()} out
-          </span>
-        )}
-      </div>
-
-      {steps.length > 0 && <StepLog steps={steps} running={running} now={now} />}
+      <header className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-faint text-[9.5px] font-bold tracking-[0.09em] uppercase">Agent</span>
+        <h3 className="text-body truncate text-[0.9375rem] leading-snug font-bold" title={title}>
+          {title}
+        </h3>
+      </header>
 
       {running && <LiveStatus steps={steps} thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null} now={now} />}
+
+      {running && steps.length > 0 && <StepLog steps={steps} running={running} now={now} />}
 
       {panels.length > 0 && (
         <TurnResults
@@ -96,10 +97,20 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
         />
       )}
 
+      {failedGate.length > 0 && <GateCallout structures={failedGate} />}
+
       {turn.blocks.map((block) => {
         switch (block.kind) {
           case "text":
-            return <AnswerBlock key={block.id} content={block.content} linkResidues={linkResidues} />;
+            return (
+              <AnswerBlock
+                key={block.id}
+                content={block === firstText ? withoutLeadingHeading(block.content, title) : block.content}
+                linkResidues={linkResidues}
+              />
+            );
+          case "alert":
+            return <AlertCard key={block.id} alert={block.alert} />;
           case "error":
             return <ErrorBlock key={block.id} message={block.message} />;
           case "cancelled":
@@ -108,12 +119,12 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
                 Stopped. Jobs the agent already launched keep running; stop them from the Jobs tab.
               </p>
             );
-          case "thinking":
-            return running ? null : <ThinkingBlock key={block.id} content={block.content} />;
           default:
             return null;
         }
       })}
+
+      {links.length > 0 && <ArtifactLinks links={links} />}
 
       {followups.length > 0 && onFollowup && (
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -130,7 +141,119 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
           ))}
         </div>
       )}
+
+      {!running && (steps.length > 0 || thoughts.length > 0) && (
+        <TurnTrace
+          steps={steps}
+          thoughts={thoughts.map((block) => block.content)}
+          failed={failedSteps}
+          meta={[
+            clock(turn.at),
+            duration(elapsed),
+            turn.tokens ? `${turn.tokens.input.toLocaleString()} in · ${turn.tokens.output.toLocaleString()} out` : null,
+          ]}
+          now={now}
+        />
+      )}
     </article>
+  );
+}
+
+function uniqueStructures(panels: Panel[]): StructurePanel[] {
+  const seen = new Set<string>();
+  return panels.filter((panel): panel is StructurePanel => {
+    if (panel.kind !== "structure" || seen.has(panel.path)) return false;
+    seen.add(panel.path);
+    return true;
+  });
+}
+
+/** Poses whose affinity should not be quoted. */
+function GateCallout({ structures }: { structures: StructurePanel[] }) {
+  const one = structures.length === 1 ? structures[0] : null;
+  return (
+    <Callout tone="warn" title={one ? `${one.label || one.name} fails the confidence gate` : `${structures.length} poses fail the confidence gate`}>
+      <p>
+        {one
+          ? `${gate(one.metrics).reasons.join("; ")}. Treat its affinity as unreliable.`
+          : "Their affinities are not reliable; check the pose quality before comparing them."}
+      </p>
+    </Callout>
+  );
+}
+
+function ArtifactLinks({ links }: { links: ArtifactLink[] }) {
+  const open = (link: ArtifactLink) => {
+    if (link.target.kind === "viewer") sendToViewer(link.target.request);
+    else openWorkbench(link.target.tab);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+      {links.map((link) => (
+        <ArtifactButton key={link.label} label={link.label} onClick={() => open(link)} />
+      ))}
+    </div>
+  );
+}
+
+/** A finished turn's steps and reasoning, folded into one line under the answer. */
+function TurnTrace({
+  steps,
+  thoughts,
+  failed,
+  meta,
+  now,
+}: {
+  steps: ToolStep[];
+  thoughts: string[];
+  failed: number;
+  meta: (string | null)[];
+  now: number;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="text-[11px]">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="text-faint hover:text-muted flex max-w-full cursor-pointer flex-wrap items-center gap-x-1.5 text-left touch:min-h-11"
+      >
+        <span aria-hidden="true" className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>
+          ›
+        </span>
+        {steps.length > 0 && (
+          <span className="text-muted font-medium">
+            {steps.length} step{steps.length === 1 ? "" : "s"}
+          </span>
+        )}
+        {failed > 0 && <span style={{ color: "var(--color-accent)" }}>· {failed} failed</span>}
+        {thoughts.length > 0 && <span>· reasoning available</span>}
+        {meta.filter(Boolean).map((item, index) => (
+          <span key={index}>· {item}</span>
+        ))}
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-col gap-2">
+          {steps.length > 0 && <StepList steps={steps} now={now} />}
+          {thoughts.map((content, index) => (
+            <p key={index} className="text-muted border-subtle border-l-2 py-0.5 pl-3 text-xs whitespace-pre-wrap">
+              {content}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepList({ steps, now }: { steps: ToolStep[]; now: number }) {
+  return (
+    <ol className="bg-sunken border-subtle overflow-hidden rounded-lg border">
+      {steps.map((step, index) => (
+        <StepRow key={step.id} step={step} index={index + 1} now={now} />
+      ))}
+    </ol>
   );
 }
 
@@ -320,9 +443,18 @@ function AnswerLink({ href, title, children }: AnchorHTMLAttributes<HTMLAnchorEl
   );
 }
 
-const PLAIN_PLUGINS = [remarkGfm];
-const LINKED_PLUGINS = [remarkGfm, remarkResidueLinks];
-const COMPONENTS = { a: AnswerLink };
+/** Blockquotes, which remarkCallouts has typed, as callouts. */
+function AnswerQuote({ children, ...props }: HTMLAttributes<HTMLQuoteElement> & { "data-tone"?: CalloutTone; "data-title"?: string }) {
+  return (
+    <Callout tone={props["data-tone"] ?? "info"} title={props["data-title"]}>
+      {children}
+    </Callout>
+  );
+}
+
+const PLAIN_PLUGINS = [remarkGfm, remarkCallouts];
+const LINKED_PLUGINS = [remarkGfm, remarkCallouts, remarkResidueLinks];
+const COMPONENTS = { a: AnswerLink, blockquote: AnswerQuote };
 
 function AnswerBlock({ content, linkResidues }: { content: string; linkResidues: boolean }) {
   return (
@@ -371,23 +503,6 @@ export function ErrorBlock({ message }: { message: string }) {
           {lines.slice(1).join("\n").trim()}
         </pre>
       )}
-    </div>
-  );
-}
-
-function ThinkingBlock({ content }: { content: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="text-xs">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="text-faint hover:text-muted cursor-pointer font-medium touch:-my-1 touch:min-h-11"
-      >
-        {open ? "Hide reasoning" : "Show reasoning"}
-      </button>
-      {open && <p className="text-muted border-subtle mt-1.5 border-l-2 py-0.5 pl-3 whitespace-pre-wrap">{content}</p>}
     </div>
   );
 }

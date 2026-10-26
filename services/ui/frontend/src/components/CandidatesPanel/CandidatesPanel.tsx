@@ -2,17 +2,24 @@
 // SPDX-License-Identifier: MIT
 
 import { useMemo, useState } from "react";
+import { useRDKit } from "../../hooks/useRDKit";
 import type { Artifacts } from "../../lib/artifacts";
 import {
   admetPrompt,
   buildCandidates,
   type Candidate,
   candidatesToCsv,
+  candidatesToSdf,
   candidateValue,
   cofoldPrompt,
+  DESCRIPTOR_COLUMNS,
+  descriptorValue,
   MAX_COFOLD,
+  type MolProps,
   numericColumns,
+  ro5Violations,
 } from "../../lib/candidates";
+import { descriptors, withMol } from "../../lib/rdkit";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { CandidateDetail } from "./CandidateDetail";
 import { CandidateScatter } from "./CandidateScatter";
@@ -27,27 +34,30 @@ interface Props {
   onAsk: (prompt: string) => void;
 }
 
-/** "name", "origin", "gate", or a numeric column key as in candidateValue. */
+/** "name", "origin", "gate", a numeric column key as in candidateValue, or "desc:<field>". */
 type SortKey = string;
 interface Sort {
   key: SortKey;
   dir: 1 | -1;
 }
 
-/** Component columns shown in the table; the rest are in the drawer and the scatter plot. */
+/** A toggleable table column. */
+interface Column {
+  key: string;
+  label: string;
+  kind: "score" | "number" | "descriptor" | "origin" | "gate";
+  digits?: number;
+  /** Shown until the user changes it in the Columns menu. */
+  defaultOn: boolean;
+}
+
+/** Component columns shown by default; the rest can be turned on in the Columns menu. */
 const TABLE_COMPONENTS = 4;
 const GATE_RANK = { pass: 2, unknown: 1, fail: 0 } as const;
 
 const control = "bg-sunken border-subtle rounded-md border px-2 py-1 text-xs";
 const button =
   "border-subtle hover:bg-sunken inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium";
-
-function sortValue(c: Candidate, key: SortKey): string | number | undefined {
-  if (key === "name") return c.name ?? c.smiles;
-  if (key === "origin") return c.origin;
-  if (key === "gate") return GATE_RANK[c.gate.status];
-  return candidateValue(c, key);
-}
 
 function download(name: string, text: string, type: string) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -61,30 +71,67 @@ function download(name: string, text: string, type: string) {
 /**
  * Every molecule the conversation produced, in one sortable, filterable list:
  * table rows with a SMILES, drawn molecules and cofolded ligands merged by
- * SMILES, with a scatter view and a detail drawer.
+ * SMILES, with a scatter view and a detail pane below the table. Descriptors
+ * are computed in the browser with RDKit.
  */
 export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStructure, onAsk }: Props) {
+  const { rdkit } = useRDKit();
   const candidates = useMemo(() => buildCandidates(artifacts), [artifacts]);
+  const props = useMemo(() => {
+    const out = new Map<string, MolProps>();
+    if (!rdkit) return out;
+    for (const c of candidates) {
+      const d = descriptors(rdkit, c.smiles);
+      if (d) out.set(c.smiles, { mw: d.mw, clogp: d.clogp, tpsa: d.tpsa, hbd: d.hbd, hba: d.hba, rotb: d.rotb, ro5: ro5Violations(d) });
+    }
+    return out;
+  }, [rdkit, candidates]);
   const columns = useMemo(() => numericColumns(candidates), [candidates]);
   const origins = useMemo(() => [...new Set(candidates.map((c) => c.origin))], [candidates]);
-  const tableColumns = columns.filter((c) => c.key !== "score").slice(0, TABLE_COMPONENTS);
   const hasScore = columns.some((c) => c.key === "score");
+
+  const allColumns = useMemo<Column[]>(() => {
+    const out: Column[] = [];
+    if (hasScore) out.push({ key: "score", label: "Score", kind: "score", defaultOn: true });
+    columns
+      .filter((c) => c.key !== "score")
+      .forEach((c, i) => out.push({ key: c.key, label: c.label, kind: "number", defaultOn: i < TABLE_COMPONENTS }));
+    if (props.size > 0) {
+      for (const d of DESCRIPTOR_COLUMNS) out.push({ key: d.key, label: d.label, kind: "descriptor", digits: d.digits, defaultOn: d.key !== "desc:rotb" });
+    }
+    out.push({ key: "origin", label: "Origin", kind: "origin", defaultOn: true });
+    out.push({ key: "gate", label: "Gate", kind: "gate", defaultOn: true });
+    return out;
+  }, [columns, hasScore, props]);
 
   const [query, setQuery] = useState("");
   const [origin, setOrigin] = useState("");
   const [minScore, setMinScore] = useState("");
   const [gateOnly, setGateOnly] = useState(false);
   const [view, setView] = useState<"table" | "scatter">("table");
+  const [dense, setDense] = useState(false);
   const [sort, setSort] = useState<Sort>({ key: "score", dir: -1 });
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  /** undefined until the user picks or closes: the drawer then shows the first row. */
+  /** Columns the user turned on or off; the rest follow Column.defaultOn. */
+  const [shown, setShown] = useState<Record<string, boolean>>({});
+  /** undefined until the user picks or closes: the pane then shows the first row. */
   const [detailKey, setDetailKey] = useState<string | null | undefined>(undefined);
   const [axes, setAxes] = useState<{ x: string; y: string } | null>(null);
   const [copied, setCopied] = useState(false);
 
+  const visible = allColumns.filter((c) => shown[c.key] ?? c.defaultOn);
+  const propsOf = (smiles: string) => props.get(smiles);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const min = minScore.trim() === "" ? null : Number(minScore);
+    const sortValue = (c: Candidate): string | number | undefined => {
+      if (sort.key === "name") return c.name ?? c.smiles;
+      if (sort.key === "origin") return c.origin;
+      if (sort.key === "gate") return GATE_RANK[c.gate.status];
+      if (sort.key.startsWith("desc:")) return descriptorValue(props.get(c.smiles), sort.key);
+      return candidateValue(c, sort.key);
+    };
     const rows = candidates.filter(
       (c) =>
         (!q || [c.smiles, c.name ?? "", c.origins.join(" ")].join(" ").toLowerCase().includes(q)) &&
@@ -93,15 +140,15 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
         (!gateOnly || c.gate.status === "pass"),
     );
     return rows.sort((a, b) => {
-      const va = sortValue(a, sort.key);
-      const vb = sortValue(b, sort.key);
+      const va = sortValue(a);
+      const vb = sortValue(b);
       // Missing values go last whichever way the column is sorted.
       if (va === undefined) return vb === undefined ? 0 : 1;
       if (vb === undefined) return -1;
       if (typeof va === "number" && typeof vb === "number") return (va - vb) * sort.dir;
       return String(va).localeCompare(String(vb)) * sort.dir;
     });
-  }, [candidates, query, origin, minScore, gateOnly, sort]);
+  }, [candidates, props, query, origin, minScore, gateOnly, sort]);
 
   const chosen = candidates.filter((c) => selected.has(c.smiles));
   const detailSmiles = detailKey === undefined ? (filtered[0]?.smiles ?? null) : detailKey;
@@ -150,6 +197,12 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
     });
   }
 
+  function exportSdf() {
+    if (!rdkit) return;
+    const sdf = candidatesToSdf(chosen, (smiles) => withMol(rdkit, smiles, (mol) => mol.get_molblock()), propsOf);
+    download("candidates.sdf", sdf, "chemical/x-mdl-sdfile");
+  }
+
   if (candidates.length === 0) {
     return (
       <div className="text-muted grid h-full place-items-center p-6 text-center text-xs">
@@ -161,6 +214,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
     );
   }
 
+  const cellY = dense ? "py-0.5" : "py-1";
   const header = (key: SortKey, label: string, align: "left" | "right" = "left") => {
     const active = sort.key === key;
     return (
@@ -186,8 +240,48 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
     );
   };
 
+  const cell = (c: Candidate, col: Column) => {
+    const base = `border-subtle border-b px-2 ${cellY}`;
+    if (col.kind === "score") {
+      return (
+        <td key={col.key} className={`${base} text-right whitespace-nowrap`}>
+          <ScoreBar value={c.score} />
+        </td>
+      );
+    }
+    if (col.kind === "origin") {
+      return (
+        <td key={col.key} className={base}>
+          <span className="bg-inset text-muted rounded-full px-1.5 py-px text-[10px] whitespace-nowrap">{c.origin}</span>
+        </td>
+      );
+    }
+    if (col.kind === "gate") {
+      return (
+        <td key={col.key} className={base}>
+          <GateBadge gate={c.gate} />
+        </td>
+      );
+    }
+    const value = col.kind === "descriptor" ? descriptorValue(props.get(c.smiles), col.key) : candidateValue(c, col.key);
+    const warn = col.key === "desc:ro5" && value !== undefined && value > 1;
+    return (
+      <td
+        key={col.key}
+        className={`${base} text-right font-mono whitespace-nowrap tabular-nums`}
+        style={warn ? { color: "var(--color-warn)" } : undefined}
+      >
+        {value === undefined ? (
+          <span className="text-faint">—</span>
+        ) : (
+          value.toFixed(col.digits ?? (Number.isInteger(value) ? 0 : 2))
+        )}
+      </td>
+    );
+  };
+
   return (
-    <div className="bg-raised flex h-full min-h-0 flex-col lg:flex-row">
+    <div className="bg-raised flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="border-subtle flex flex-wrap items-center gap-2 border-b px-3 py-2">
           <input
@@ -222,7 +316,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
             aria-pressed={gateOnly}
             onClick={() => setGateOnly((v) => !v)}
             className={button}
-            style={gateOnly ? { borderColor: "#3ccf91", color: "#3ccf91" } : undefined}
+            style={gateOnly ? { borderColor: "var(--color-ok)", color: "var(--color-ok)" } : undefined}
           >
             Gate only
           </button>
@@ -239,13 +333,54 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
               </button>
             ))}
           </div>
+          <details className="relative">
+            <summary className={`${button} list-none`} aria-label="Choose visible columns">
+              Columns
+            </summary>
+            <div className="bg-raised border-subtle shadow-card absolute right-0 z-20 mt-1 max-h-72 w-48 overflow-y-auto rounded-lg border p-1.5 text-[11px]">
+              {allColumns.map((col) => (
+                <label key={col.key} className="hover:bg-sunken flex cursor-pointer items-center gap-2 rounded px-1.5 py-1">
+                  <input
+                    type="checkbox"
+                    checked={shown[col.key] ?? col.defaultOn}
+                    onChange={(e) => setShown((previous) => ({ ...previous, [col.key]: e.target.checked }))}
+                    className="cursor-pointer"
+                  />
+                  <span className="truncate">{col.label}</span>
+                  {col.kind === "descriptor" && <span className="text-faint ml-auto text-[9px]">RDKit</span>}
+                </label>
+              ))}
+            </div>
+          </details>
+          <button
+            type="button"
+            aria-pressed={dense}
+            onClick={() => setDense((v) => !v)}
+            title="Compact density"
+            className={`${button} ${dense ? "bg-inset" : ""}`}
+          >
+            ≡
+          </button>
         </div>
 
         {chosen.length > 0 && (
           <div className="border-subtle bg-sunken flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-[11px]">
             <span className="font-semibold">{chosen.length} selected</span>
-            <button type="button" className={button} onClick={() => download("candidates.csv", candidatesToCsv(chosen), "text/csv")}>
+            <button
+              type="button"
+              className={button}
+              onClick={() => download("candidates.csv", candidatesToCsv(chosen, props.size ? propsOf : undefined), "text/csv")}
+            >
               ⇩ CSV
+            </button>
+            <button
+              type="button"
+              className={button}
+              onClick={exportSdf}
+              disabled={!rdkit}
+              title={rdkit ? "2D molblocks from RDKit, with scores and descriptors as SD fields" : "RDKit is loading"}
+            >
+              ⇩ SDF
             </button>
             <button type="button" className={button} onClick={copySmiles}>
               {copied ? "Copied" : "Copy SMILES"}
@@ -285,7 +420,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
               onPick={setDetailKey}
             />
           ) : (
-            <table className="w-full border-collapse text-xs">
+            <table className={`w-full border-collapse ${dense ? "text-[11px]" : "text-xs"}`}>
               <thead className="bg-sunken sticky top-0 z-10">
                 <tr>
                   <th scope="col" className="border-subtle w-8 border-b px-2 py-2">
@@ -301,10 +436,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                     2D
                   </th>
                   {header("name", "Name")}
-                  {hasScore && header("score", "Score", "right")}
-                  {tableColumns.map((c) => header(c.key, c.label, "right"))}
-                  {header("origin", "Origin")}
-                  {header("gate", "Gate")}
+                  {visible.map((c) => header(c.key, c.label, c.kind === "origin" || c.kind === "gate" ? "left" : "right"))}
                 </tr>
               </thead>
               <tbody>
@@ -317,7 +449,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                       className={`hover:bg-sunken cursor-pointer ${selected.has(c.smiles) ? "bg-sunken" : ""}`}
                       style={isDetail ? { boxShadow: "inset 3px 0 0 var(--color-accent)" } : undefined}
                     >
-                      <td className="border-subtle border-b px-2 py-1" onClick={(e) => e.stopPropagation()}>
+                      <td className={`border-subtle border-b px-2 ${cellY}`} onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           aria-label={`Select ${c.name ?? c.smiles}`}
@@ -326,34 +458,23 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                           className="cursor-pointer"
                         />
                       </td>
-                      <td className="border-subtle border-b px-2 py-1">
-                        <MolDepiction smiles={c.smiles} theme={theme} width={120} height={80} label={c.name} className="h-10 w-14" />
+                      <td className={`border-subtle border-b px-2 ${cellY}`}>
+                        <MolDepiction
+                          smiles={c.smiles}
+                          theme={theme}
+                          width={120}
+                          height={80}
+                          label={c.name}
+                          className={dense ? "h-7 w-10" : "h-10 w-14"}
+                        />
                       </td>
-                      <td className="border-subtle max-w-[14rem] border-b px-2 py-1">
+                      <td className={`border-subtle max-w-[14rem] border-b px-2 ${cellY}`}>
                         {c.name && <span className="block truncate font-medium">{c.name}</span>}
                         <span className="text-muted block truncate font-mono text-[10px]" title={c.smiles}>
                           {c.smiles}
                         </span>
                       </td>
-                      {hasScore && (
-                        <td className="border-subtle border-b px-2 py-1 text-right whitespace-nowrap">
-                          <ScoreBar value={c.score} />
-                        </td>
-                      )}
-                      {tableColumns.map((col) => {
-                        const value = candidateValue(c, col.key);
-                        return (
-                          <td key={col.key} className="border-subtle border-b px-2 py-1 text-right font-mono whitespace-nowrap tabular-nums">
-                            {value === undefined ? <span className="text-faint">—</span> : value.toFixed(Number.isInteger(value) ? 0 : 2)}
-                          </td>
-                        );
-                      })}
-                      <td className="border-subtle border-b px-2 py-1">
-                        <span className="bg-inset text-muted rounded-full px-1.5 py-px text-[10px] whitespace-nowrap">{c.origin}</span>
-                      </td>
-                      <td className="border-subtle border-b px-2 py-1">
-                        <GateBadge gate={c.gate} />
-                      </td>
+                      {visible.map((col) => cell(c, col))}
                     </tr>
                   );
                 })}
@@ -367,9 +488,10 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
       </div>
 
       {detail && (
-        <div className="border-subtle flex max-h-[50%] min-h-0 shrink-0 flex-col border-t lg:max-h-none lg:w-80 lg:border-t-0 lg:border-l">
+        <div className="border-subtle flex max-h-[42%] min-h-40 shrink-0 flex-col border-t">
           <CandidateDetail
             candidate={detail}
+            props={props.get(detail.smiles)}
             theme={theme}
             onClose={() => setDetailKey(null)}
             onOpenMolecule={onOpenMolecule}

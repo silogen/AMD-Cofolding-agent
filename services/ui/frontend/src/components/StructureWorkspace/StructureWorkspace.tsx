@@ -22,6 +22,7 @@ import { onViewerRequest } from "../../lib/viewerBus";
 import { contactColor, contactLabel, residuesOf, sortedTypes } from "../../lib/contacts";
 import { affinityConcentration, affinityText, gate, pIC50, type Gate } from "../../lib/gate";
 import { clock } from "../../lib/format";
+import { poseKey, poseSiblings, stepPose, STRUCTURE_KINDS, structureKind } from "../../lib/poses";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { CopyButton } from "../CopyButton/CopyButton";
 
@@ -91,10 +92,50 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   const backgroundValue = BACKGROUNDS[background ?? (theme === "dark" ? "black" : "white")];
   const lightCanvas = backgroundValue === BACKGROUNDS.white || backgroundValue === BACKGROUNDS.light;
 
+  const allPaths = useMemo(() => structures.map(({ item }) => item.path), [structures]);
+  const poses = useMemo(() => poseSiblings(allPaths, active.path), [allPaths, active.path]);
+  const poseIndex = poses.paths.indexOf(active.path);
+  /** One entry per molecule, for the structure selector when poses are grouped. */
+  const molecules = useMemo(() => {
+    const seen = new Map<string, StructurePanel>();
+    for (const { item } of structures) {
+      const { key } = poseKey(item.path);
+      if (!seen.has(key)) seen.set(key, item);
+    }
+    return [...seen.entries()].map(([key, item]) => ({ key, item }));
+  }, [structures]);
+  const activeMolecule = poseKey(active.path).key;
+  const kind = structureKind(active.path, Boolean(active.metrics));
+
   const pathRef = useRef(active.path);
+  const profileRef = useRef(profile);
   useEffect(() => {
     pathRef.current = active.path;
-  }, [active.path]);
+    profileRef.current = profile;
+  }, [active.path, profile]);
+
+  const stepPoseBy = (step: number) => {
+    const target = stepPose(poses.paths, active.path, step);
+    const next = target ? structures.find(({ item }) => item.path === target) : undefined;
+    if (next && next.item.path !== active.path) onSelect(next.item);
+  };
+
+  /** A residue clicked in 3D: select its contacts in the drawer. */
+  const onResiduePicked = (pick: (Picked & { path: string }) | null) => {
+    setPicked(pick);
+    const current = profileRef.current;
+    if (!pick || pick.resnum === null || !current) return;
+    const first = current.contacts.findIndex((c) => c.resnum === pick.resnum && (!pick.chain || !c.chain || c.chain === pick.chain));
+    if (first < 0) return;
+    setSelected({ path: pick.path, index: first });
+    setTypeFilter(null);
+    setDrawerTab("contacts");
+    setDetailsOpen(true);
+  };
+  const onResiduePickedRef = useRef(onResiduePicked);
+  useEffect(() => {
+    onResiduePickedRef.current = onResiduePicked;
+  });
 
   // One viewer for the life of the workspace; structures load into it.
   useEffect(() => {
@@ -110,7 +151,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         }
         created = view;
         viewRef.current = view;
-        view.onPick((pick) => setPicked(pick && pick.resnum !== null ? { ...pick, path: pathRef.current } : null));
+        view.onPick((pick) => onResiduePickedRef.current(pick && pick.resnum !== null ? { ...pick, path: pathRef.current } : null));
         setViewReady(true);
       })
       .catch((reason: unknown) => {
@@ -332,16 +373,43 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             {title}
           </h3>
           {run && <span className="text-faint shrink-0 font-mono text-[11px]">{run}</span>}
-          {active.metrics && <Badge tone="structure">Predicted</Badge>}
+          {kind && (
+            <span
+              className="shrink-0 rounded-full border px-1.5 py-px text-[10px] font-semibold whitespace-nowrap"
+              style={{ color: STRUCTURE_KINDS[kind].color, borderColor: STRUCTURE_KINDS[kind].color }}
+              title={STRUCTURE_KINDS[kind].hint}
+            >
+              {STRUCTURE_KINDS[kind].label}
+            </span>
+          )}
           <GatePill verdict={verdict} />
         </div>
-        {structures.length > 1 && (
-          <div className="border-subtle flex shrink-0 items-center rounded-md border">
-            <HeadButton label="‹" title="Previous structure" onClick={() => execute({ kind: "structure", step: -1 })} />
+        {poses.grouped && molecules.length > 1 && (
+          <select
+            value={activeMolecule}
+            onChange={(event) => {
+              const next = molecules.find((m) => m.key === event.target.value);
+              if (next) onSelect(next.item);
+            }}
+            aria-label="Structure"
+            title="Switch to another molecule or structure"
+            className="bg-sunken border-subtle text-muted max-w-40 shrink-0 rounded-md border px-1 py-0.5 text-[11px]"
+          >
+            {molecules.map((m, i) => (
+              <option key={m.key} value={m.key}>
+                Structure {i + 1} of {molecules.length} · {m.key.slice(m.key.lastIndexOf("/") + 1)}
+              </option>
+            ))}
+          </select>
+        )}
+        {poses.paths.length > 1 && (
+          <div className="border-subtle flex shrink-0 items-center rounded-md border" title={poses.grouped ? "Samples of this molecule" : "Structures in the conversation"}>
+            <HeadButton label="‹" title={poses.grouped ? "Previous pose" : "Previous structure"} onClick={() => stepPoseBy(-1)} />
             <span className="text-faint min-w-9 text-center font-mono text-[11px]">
-              {index + 1}/{structures.length}
+              {poses.grouped ? "pose " : ""}
+              {(poseIndex < 0 ? index : poseIndex) + 1}/{poses.paths.length}
             </span>
-            <HeadButton label="›" title="Next structure" onClick={() => execute({ kind: "structure", step: 1 })} />
+            <HeadButton label="›" title={poses.grouped ? "Next pose" : "Next structure"} onClick={() => stepPoseBy(1)} />
           </div>
         )}
         <a href={active.url} download={active.name} className="text-muted hover:text-body hover:bg-inset rounded-md px-2 py-1 text-[11px]">
@@ -417,7 +485,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             {pickedContacts.length > 0 && (
               <span className="flex items-center gap-1">
                 {[...new Set(pickedContacts.map((c) => c.type))].map((type) => (
-                  <span key={type} className="size-2 rounded-full" title={contactLabel(type)} style={{ background: contactColor(type) }} />
+                  <span key={type} className="size-2 rounded-full" title={contactLabel(type)} style={{ background: contactColor(type, theme) }} />
                 ))}
                 <span className="text-muted">{pickedContacts.length} contact{pickedContacts.length === 1 ? "" : "s"}</span>
               </span>
@@ -512,6 +580,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
                 query={query}
                 onQuery={setQuery}
                 selected={selectedHere}
+                picked={pickedHere && pickedHere.resnum !== null ? { chain: pickedHere.chain, resnum: pickedHere.resnum } : null}
                 onSelect={(contact) => {
                   if (!profile) return;
                   setSelected({ path: active.path, index: profile.contacts.indexOf(contact) });
@@ -762,6 +831,7 @@ function ContactsTab({
   query,
   onQuery,
   selected,
+  picked,
   onSelect,
   onProfile,
 }: {
@@ -773,9 +843,18 @@ function ContactsTab({
   query: string;
   onQuery: (text: string) => void;
   selected: Contact | null;
+  /** The residue clicked in 3D; its contacts are highlighted and scrolled to. */
+  picked: { chain: string | null; resnum: number } | null;
   onSelect: (contact: Contact) => void;
   onProfile: () => void;
 }) {
+  const listRef = useRef<HTMLUListElement>(null);
+  const pickedKey = picked ? `${picked.chain}:${picked.resnum}` : null;
+  useEffect(() => {
+    if (!pickedKey) return;
+    listRef.current?.querySelector('[data-picked="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [pickedKey, selected]);
+
   if (!profile) {
     return (
       <div className="text-muted space-y-2 py-4 text-center text-xs">
@@ -817,26 +896,34 @@ function ContactsTab({
               title={`Show ${contactLabel(type).toLowerCase()} contacts on the structure`}
               className={`flex cursor-pointer items-center gap-1 rounded-full border px-1.5 py-px text-[10px] ${typeFilter === type ? "border-strong bg-inset text-body" : "border-subtle text-muted hover:text-body"}`}
             >
-              <span className="size-1.5 rounded-full" style={{ background: contactColor(type) }} />
+              <span className="size-1.5 rounded-full" style={{ background: contactColor(type, theme) }} />
               {contactLabel(type)}
               <b className="font-semibold">{profile.counts[type]}</b>
             </button>
           ))}
         </div>
-        <ul className="space-y-px">
+        <ul ref={listRef} className="space-y-px">
           {rows.map((contact, index) => {
             const isSelected = selected === contact;
+            const isPicked =
+              picked !== null && contact.resnum === picked.resnum && (!picked.chain || !contact.chain || contact.chain === picked.chain);
             return (
-              <li key={index}>
+              <li key={index} data-picked={isPicked || undefined}>
                 <button
                   type="button"
                   onClick={() => onSelect(contact)}
+                  aria-current={isSelected || undefined}
                   className={`grid w-full cursor-pointer grid-cols-[minmax(7rem,1fr)_4.5rem_minmax(6rem,1.3fr)] items-center gap-2 rounded border px-1.5 py-1 text-left text-[11px] ${
-                    isSelected ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "hover:bg-sunken border-transparent"
+                    isSelected || isPicked ? "border-[var(--color-accent)]" : "hover:bg-sunken border-transparent"
                   }`}
+                  style={
+                    isSelected || isPicked
+                      ? { background: `color-mix(in oklch, var(--color-accent) ${isSelected ? 8 : 4}%, transparent)` }
+                      : undefined
+                  }
                 >
                   <span className="flex min-w-0 items-center gap-1.5 truncate">
-                    <span className="size-1.5 shrink-0 rounded-full" style={{ background: contactColor(contact.type) }} />
+                    <span className="size-1.5 shrink-0 rounded-full" style={{ background: contactColor(contact.type, theme) }} />
                     {contactLabel(contact.type)}
                   </span>
                   <strong className="font-mono">

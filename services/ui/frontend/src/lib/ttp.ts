@@ -348,6 +348,53 @@ export function weightShares(ttp: Ttp): Map<string, number> {
   return new Map(all.map((o) => [o.name, Math.max(0, o.weight) / total]));
 }
 
+/**
+ * The weight slider range: 0-1 in steps of 0.01 when every weight is at most
+ * 1, otherwise wide enough for the largest weight.
+ */
+export function weightRange(ttp: Ttp): { min: number; max: number; step: number } {
+  const all = [...objectivesOf(ttp, "pre_scoring"), ...objectivesOf(ttp, "scoring")];
+  const largest = all.reduce((m, o) => Math.max(m, o.weight), 0);
+  if (largest <= 1) return { min: 0, max: 1, step: 0.01 };
+  return { min: 0, max: Math.max(2, Math.ceil(largest * 2)), step: 0.05 };
+}
+
+/** First-class services from KNOWN_EXTERNAL_SERVICES in reinvent4_mcp/ttp/schema.py. */
+export const KNOWN_SERVICES = new Set(["boltz", "posebusters", "admet", "retrodmta", "interaction_profiler"]);
+
+/** "native" REINVENT4 component, a configured "service", or a custom "external" REST endpoint. */
+export function objectiveSource(o: Pick<Objective, "type" | "service">): "native" | "service" | "external" {
+  if (o.type === "native") return "native";
+  return o.service && KNOWN_SERVICES.has(o.service) ? "service" : "external";
+}
+
+/** When the TTP was created, if the payload says so. */
+export function ttpCreated(ttp: Ttp): string | null {
+  const record = ttp as unknown as Record<string, unknown>;
+  for (const key of ["created", "created_at"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+/** Generation settings (mode, model, scaffold, seeds), if the payload has any. */
+export function ttpGeneration(ttp: Ttp): { label: string; value: string }[] {
+  const generation = (ttp as unknown as Record<string, unknown>).generation;
+  if (!isRecord(generation)) return [];
+  const libinvent = isRecord(generation.libinvent_input) ? generation.libinvent_input : {};
+  const seeds = generation.seeds ?? generation.seed_smiles;
+  const rows: [string, unknown][] = [
+    ["Mode", generation.mode],
+    ["Model", generation.model],
+    ["Scaffold", generation.scaffold ?? libinvent.scaffold],
+    ["Seeds", Array.isArray(seeds) ? seeds.join(", ") : seeds],
+  ];
+  return rows
+    .filter(([, value]) => (typeof value === "string" && value.trim()) || typeof value === "number")
+    .map(([label, value]) => ({ label, value: String(value) }));
+}
+
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
 /** Names of the objectives that differ between two versions, and any that were removed. */

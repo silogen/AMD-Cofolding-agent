@@ -1,13 +1,24 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
-import { runOf, structureTitle, type Artifacts } from "../../lib/artifacts";
+import { structureTitle, type Artifacts } from "../../lib/artifacts";
 import { clock, duration } from "../../lib/format";
 import { descriptors } from "../../lib/rdkit";
-import { gate } from "../../lib/gate";
+import {
+  DOCK_DEFAULT_WIDTH,
+  DOCK_MAX_FRACTION,
+  DOCK_MIN_WIDTH,
+  clampWidth,
+  closeTab,
+  loadTabs,
+  loadWidth,
+  openTab,
+  saveTabs,
+  saveWidth,
+} from "../../lib/dock";
 import { endpointLabel, formatValue, serviceName } from "../../lib/properties";
 import { sendToViewer } from "../../lib/viewerBus";
 import { StructureWorkspace } from "../StructureWorkspace/StructureWorkspace";
@@ -52,11 +63,13 @@ interface Props {
   /** Put a prompt in the composer. */
   onAsk: (text: string) => void;
   onClose: () => void;
+  /** Bump to re-open `tab` even when it did not change (e.g. after its dock tab was closed). */
+  openSeq?: number;
 }
 
 const TABS: { id: WorkbenchTab; label: string; colour: string }[] = [
   { id: "structure", label: "Structure", colour: "var(--color-structure)" },
-  { id: "candidates", label: "Candidates", colour: "var(--color-molecule)" },
+  { id: "candidates", label: "Top candidates", colour: "var(--color-molecule)" },
   { id: "molecules", label: "Molecules", colour: "var(--color-molecule)" },
   { id: "properties", label: "Properties", colour: "var(--color-table)" },
   { id: "jobs", label: "Jobs", colour: "var(--color-structure)" },
@@ -66,6 +79,7 @@ const TABS: { id: WorkbenchTab; label: string; colour: string }[] = [
   { id: "tables", label: "Tables", colour: "var(--color-table)" },
   { id: "activity", label: "Activity", colour: "var(--color-accent)" },
 ];
+const TAB_IDS = TABS.map((entry) => entry.id);
 
 /**
  * Everything the conversation produced, in one place: the complexes, the
@@ -73,7 +87,7 @@ const TABS: { id: WorkbenchTab; label: string; colour: string }[] = [
  * what happened; the workbench is where the results are worked with.
  */
 export function Workbench(props: Props) {
-  const { layout, tab, onTabChange, artifacts, onClose } = props;
+  const { layout, tab, onTabChange, artifacts, onClose, sessionId, openSeq } = props;
   const isSheet = layout === "sheet";
 
   useEffect(() => {
@@ -104,59 +118,189 @@ export function Workbench(props: Props) {
     activity: artifacts.steps.length,
   };
 
+  const labelOf = (id: WorkbenchTab) =>
+    id === "structure" && props.activeStructure ? structureTitle(props.activeStructure) : TABS.find((entry) => entry.id === id)!.label;
+
+  // Open tabs, editor-style. Synced from the `tab` prop during render (no effect).
+  const [openIds, setOpenIds] = useState<WorkbenchTab[]>(() => openTab(loadTabs(sessionId, TAB_IDS) ?? [], tab));
+  const [seen, setSeen] = useState({ sessionId, tab, openSeq });
+  if (seen.sessionId !== sessionId) {
+    setSeen({ sessionId, tab, openSeq });
+    setOpenIds(openTab(loadTabs(sessionId, TAB_IDS) ?? [], tab));
+  } else if (seen.tab !== tab || seen.openSeq !== openSeq) {
+    setSeen({ sessionId, tab, openSeq });
+    setOpenIds((current) => openTab(current, tab));
+  }
+  useEffect(() => saveTabs(sessionId, openIds), [sessionId, openIds]);
+
+  const active = openIds.includes(tab) ? tab : null;
+  const close = (id: WorkbenchTab) => {
+    const next = closeTab(openIds, id, active);
+    setOpenIds(next.tabs);
+    if (next.active && next.active !== tab) onTabChange(next.active);
+  };
+  const open = (id: WorkbenchTab) => {
+    setOpenIds((current) => openTab(current, id));
+    onTabChange(id);
+  };
+
+  const [menu, setMenu] = useState(false);
+  const [width, setWidth] = useState<number | null>(() => loadWidth());
+  const [expanded, setExpanded] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
   const shell = isSheet
     ? "fixed inset-0 z-50 flex flex-col bg-raised"
-    : "flex w-[28rem] xl:w-[38rem] 2xl:w-[46rem] shrink-0 flex-col border-l border-subtle bg-raised";
+    : "relative flex shrink-0 flex-col border-l border-subtle bg-raised";
+  const style: CSSProperties | undefined = isSheet
+    ? undefined
+    : {
+        width: expanded ? `${DOCK_MAX_FRACTION * 100}vw` : width ? `${width}px` : DOCK_DEFAULT_WIDTH,
+        minWidth: DOCK_MIN_WIDTH,
+        maxWidth: `${DOCK_MAX_FRACTION * 100}vw`,
+      };
 
   return (
-    <aside className={shell} role={isSheet ? "dialog" : undefined} aria-modal={isSheet || undefined} aria-label="Workbench">
-      <div className="border-subtle flex shrink-0 items-center gap-1 border-b px-2 pt-2">
-        <div role="tablist" aria-label="Workbench" className="flex min-w-0 flex-1 gap-0.5 overflow-x-auto">
-          {TABS.map((entry) => {
-            const selected = entry.id === tab;
+    <aside className={shell} style={style} role={isSheet ? "dialog" : undefined} aria-modal={isSheet || undefined} aria-label="Workbench">
+      {!isSheet && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the workbench"
+          title="Drag to resize"
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setDragging(true);
+          }}
+          onPointerMove={(event) => {
+            if (!dragging) return;
+            setExpanded(false);
+            setWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth));
+          }}
+          onPointerUp={(event) => {
+            if (!dragging) return;
+            setDragging(false);
+            saveWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth));
+          }}
+          className={`absolute inset-y-0 -left-[3px] z-20 w-1.5 cursor-col-resize transition-colors hover:bg-[var(--color-accent)] ${
+            dragging ? "bg-[var(--color-accent)]" : ""
+          }`}
+        />
+      )}
+      <div className="border-subtle bg-sunken flex shrink-0 items-stretch gap-1 border-b pr-1">
+        <div role="tablist" aria-label="Workbench" className="flex min-w-0 flex-1 overflow-x-auto">
+          {openIds.map((id) => {
+            const selected = id === active;
+            const colour = TABS.find((entry) => entry.id === id)!.colour;
             return (
-              <button
-                key={entry.id}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                onClick={() => onTabChange(entry.id)}
-                className={`-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium whitespace-nowrap ${
-                  selected ? "text-body" : "text-muted hover:text-body border-transparent"
+              <div
+                key={id}
+                className={`border-subtle group flex shrink-0 items-center border-r border-b-2 ${
+                  selected ? "bg-raised text-body" : "text-muted hover:text-body border-b-transparent"
                 }`}
-                style={selected ? { borderColor: "var(--color-accent)" } : undefined}
+                style={selected ? { borderBottomColor: "var(--color-accent)" } : undefined}
               >
-                <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: entry.colour }} />
-                {entry.label}
-                {counts[entry.id] > 0 && <span className="bg-inset text-faint rounded-full px-1.5 text-[10px]">{counts[entry.id]}</span>}
-              </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  onClick={() => onTabChange(id)}
+                  className="flex max-w-56 cursor-pointer items-center gap-1.5 py-2 pr-1 pl-3 text-xs font-medium whitespace-nowrap"
+                >
+                  <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} />
+                  <span className="truncate">{labelOf(id)}</span>
+                  {counts[id] > 0 && <span className="bg-inset text-faint rounded-full px-1.5 text-[10px]">{counts[id]}</span>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => close(id)}
+                  aria-label={`Close ${labelOf(id)}`}
+                  title="Close tab"
+                  className={`hover:bg-inset mr-1.5 grid size-5 cursor-pointer place-items-center rounded text-sm leading-none ${
+                    selected ? "" : "opacity-60 group-hover:opacity-100"
+                  }`}
+                >
+                  ×
+                </button>
+              </div>
             );
           })}
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close the workbench"
-          title="Close the workbench"
-          className="text-muted hover:text-body mb-1 grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-base touch:size-11"
-        >
-          ×
-        </button>
+        <div className="relative flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => setMenu((value) => !value)}
+            aria-haspopup="menu"
+            aria-expanded={menu}
+            aria-label="Open a panel"
+            title="Open a panel"
+            className="text-muted hover:text-body hover:bg-inset grid size-7 cursor-pointer place-items-center rounded-md text-base touch:size-11"
+          >
+            +
+          </button>
+          {menu && (
+            <>
+              <button type="button" aria-label="Close menu" tabIndex={-1} className="fixed inset-0 z-30 cursor-default" onClick={() => setMenu(false)} />
+              <ul role="menu" className="bg-raised border-subtle absolute top-full right-0 z-40 mt-1 w-52 rounded-lg border py-1 shadow-lg">
+                {TABS.map((entry) => (
+                  <li key={entry.id} role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenu(false);
+                        open(entry.id);
+                      }}
+                      className="hover:bg-inset flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs"
+                    >
+                      <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: entry.colour }} />
+                      <span className="flex-1">{entry.label}</span>
+                      {openIds.includes(entry.id) && <span className="text-faint text-[10px]">open</span>}
+                      {counts[entry.id] > 0 && <span className="bg-inset text-faint rounded-full px-1.5 text-[10px]">{counts[entry.id]}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {!isSheet && (
+            <button
+              type="button"
+              onClick={() => setExpanded((value) => !value)}
+              aria-pressed={expanded}
+              aria-label={expanded ? "Restore the workbench width" : "Expand the workbench"}
+              title={expanded ? "Restore" : "Expand"}
+              className="text-muted hover:text-body hover:bg-inset grid size-7 cursor-pointer place-items-center rounded-md text-sm"
+            >
+              {expanded ? "⇥" : "⇤"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close the workbench"
+            title="Close the workbench"
+            className="text-muted hover:text-body hover:bg-inset grid size-7 cursor-pointer place-items-center rounded-md text-base touch:size-11"
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {tab === "structure" && <StructureTab {...props} />}
-        {tab === "candidates" && <CandidatesTab {...props} />}
-        {tab === "molecules" && <MoleculesTab {...props} />}
-        {tab === "properties" && <PropertiesTab {...props} />}
-        {tab === "jobs" && (
+        {active === null && <DockEmpty />}
+        {active === "structure" && <StructureTab {...props} />}
+        {active === "candidates" && <CandidatesTab {...props} />}
+        {active === "molecules" && <MoleculesTab {...props} />}
+        {active === "properties" && <PropertiesTab {...props} />}
+        {active === "jobs" && (
           <div className="h-full min-h-0">
             <JobsPanel sessionId={props.sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={(smiles) => openMolecule(props, smiles)} />
           </div>
         )}
-        {(tab === "ttp" || tab === "target" || tab === "assets") && <ContextTab {...props} />}
-        {tab === "tables" && <TablesTab {...props} />}
-        {tab === "activity" && <ActivityTab {...props} />}
+        {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
+        {active === "tables" && <TablesTab {...props} />}
+        {active === "activity" && <ActivityTab {...props} />}
       </div>
     </aside>
   );
@@ -208,47 +352,14 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
     return <Empty>No structure yet. When the agent cofolds a complex with Boltz-2, it appears here.</Empty>;
   }
   return (
-    <>
-      {list.length > 1 && (
-        <div role="listbox" aria-label="Structures" className="border-subtle flex shrink-0 gap-1 overflow-x-auto border-b px-2 py-1.5">
-          {list.map(({ item, at }) => {
-            const status = gate(item.metrics).status;
-            const current = activeStructure.path === item.path;
-            return (
-              <button
-                key={item.path}
-                type="button"
-                role="option"
-                aria-selected={current}
-                onClick={() => onSelectStructure(item)}
-                title={`${item.path} · ${clock(at)}`}
-                className={`flex max-w-48 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] ${
-                  current ? "border-[var(--color-accent)] font-semibold" : "border-subtle text-muted hover:text-body"
-                }`}
-              >
-                <span
-                  aria-label={`gate ${status}`}
-                  className="size-1.5 shrink-0 rounded-full"
-                  style={{
-                    background: status === "pass" ? "var(--color-ok)" : status === "fail" ? "var(--color-accent)" : "var(--text-faint)",
-                  }}
-                />
-                <span className="truncate">{structureTitle(item)}</span>
-                {runOf(item.path) && <span className="text-faint shrink-0 font-mono font-normal">{runOf(item.path)}</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
-      <StructureWorkspace
-        structures={list}
-        active={activeStructure}
-        onSelect={onSelectStructure}
-        interactions={artifacts.interactions}
-        theme={theme}
-        onAsk={onAsk}
-      />
-    </>
+    <StructureWorkspace
+      structures={list}
+      active={activeStructure}
+      onSelect={onSelectStructure}
+      interactions={artifacts.interactions}
+      theme={theme}
+      onAsk={onAsk}
+    />
   );
 }
 
@@ -545,6 +656,22 @@ function ActivityTab({ artifacts }: Props) {
         })}
       </ol>
     </>
+  );
+}
+
+function DockEmpty() {
+  return (
+    <div className="grid flex-1 place-items-center px-8 text-center">
+      <div>
+        <div aria-hidden="true" style={{ fontSize: 34, opacity: 0.35 }}>
+          ⬡
+        </div>
+        <h3 className="mt-1 text-sm font-semibold">Workbench</h3>
+        <p className="text-muted mx-auto mt-1 max-w-72 text-xs">
+          Structures, candidate tables and job monitors open here. Click any result chip in the conversation, or use + to open a panel.
+        </p>
+      </div>
+    </div>
   );
 }
 
