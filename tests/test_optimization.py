@@ -1800,6 +1800,71 @@ class TestRestoringAJobWhoseWorkerIsStillAlive:
         assert on_disk["state"] == "running"
 
 
+class TestAReaderThatDropsRowsSaysSo:
+    """A truncated frame read as the whole run is worse than a parse error.
+
+    REINVENT appends rows wider than its header, pandas skips them, and every
+    figure is then computed over what survived. One three-step campaign was
+    summarised, ranked and harvested on its first step's 16 molecules out of
+    48, with nothing in the reply indicating it.
+    """
+
+    HEADER = "Score,SMILES,step"
+
+    def _ragged(self, tmp_path):
+        csv = tmp_path / "results_1.csv"
+        csv.write_text(
+            f"{self.HEADER}\n"
+            "0.5,CCO,1\n"
+            "0.6,CCC,1\n"
+            # Steps 2 and 3 carry extra inserted fields, as the live files do.
+            "0.7,CCCC,0.1,True,2\n"
+            "0.8,CCCCC,0.2,True,3\n"
+        )
+        return csv
+
+    def test_the_dropped_count_is_recorded_on_the_frame(self, tmp_path):
+        from reinvent4_mcp.jobs.manager import read_results_csv
+
+        frame = read_results_csv(self._ragged(tmp_path))
+
+        assert len(frame) == 2
+        assert frame.attrs["rows_skipped"] == 2
+        assert frame.attrs["rows_in_file"] == 4
+
+    def test_a_clean_file_records_no_loss(self, tmp_path):
+        from reinvent4_mcp.jobs.manager import read_results_csv
+
+        csv = tmp_path / "clean.csv"
+        csv.write_text(f"{self.HEADER}\n0.5,CCO,1\n0.6,CCC,2\n")
+
+        frame = read_results_csv(csv)
+
+        assert len(frame) == 2
+        assert not frame.attrs.get("rows_skipped")
+
+    def test_read_results_warns_about_what_it_excluded(self, tmp_path):
+        from reinvent4_mcp.tools.results import read_results
+
+        result = read_results(csv_path=str(self._ragged(tmp_path)))
+
+        assert result["n_rows"] == 2
+        assert result["rows_skipped"] == 2
+        assert result["rows_in_file"] == 4
+        assert "excluded from every figure" in result["warning"]
+
+    def test_read_results_is_quiet_on_a_clean_file(self, tmp_path):
+        from reinvent4_mcp.tools.results import read_results
+
+        csv = tmp_path / "clean.csv"
+        csv.write_text(f"{self.HEADER}\n0.5,CCO,1\n")
+
+        result = read_results(csv_path=str(csv))
+
+        assert "warning" not in result
+        assert "rows_skipped" not in result
+
+
 class TestWorkerLiveness:
 
     def test_no_pid_is_not_alive(self, tmp_path):

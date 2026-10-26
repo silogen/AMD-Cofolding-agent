@@ -137,7 +137,27 @@ def read_results_csv(path: Any) -> Any:
     # shift every metadata value -- complete but wrong. Dropping the rows loses
     # the later steps, which is a real cost since those hold the better
     # molecules, but everything that survives is accurate.
-    return pd.read_csv(path, on_bad_lines="skip", engine="python")
+    frame = pd.read_csv(path, on_bad_lines="skip", engine="python")
+
+    # How much was lost, recorded on the frame rather than only in this
+    # process's log. The caller is usually an agent in another pod, and a
+    # frame that quietly holds 16 of 48 molecules is read as the whole run:
+    # one three-step campaign was ranked and harvested on step 1 alone with
+    # nothing anywhere saying so.
+    try:
+        with open(path) as handle:
+            data_lines = max(0, sum(1 for _ in handle) - 1)
+    except OSError:
+        data_lines = len(frame)
+    skipped = max(0, data_lines - len(frame))
+    frame.attrs["rows_skipped"] = skipped
+    frame.attrs["rows_in_file"] = data_lines
+    if skipped:
+        logger.warning(
+            "results CSV %s: kept %d of %d rows, %d unreadable",
+            path, len(frame), data_lines, skipped,
+        )
+    return frame
 
 
 class JobType(str, enum.Enum):

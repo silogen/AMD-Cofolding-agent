@@ -34,6 +34,27 @@ spec:
           ports:
             - name: admet-http
               containerPort: 8084
+          env:
+            # The models are multi-task, so one forward pass yields all seven
+            # endpoints -- a TTP with three ADMET objectives cannot avoid
+            # paying for all of them, and asking for fewer saves nothing.
+            # What it can avoid is the cost of the machinery around a batch of
+            # sixteen.
+            #
+            # The dataloader is built on every call with num_workers=8, which
+            # forks eight processes that each inherit the resident models, to
+            # featurize sixteen molecules. With six concurrent RL jobs each
+            # calling three times per step, that is what exhausted the
+            # container: OOMKilled (exit 137) fourteen times across three
+            # replicas, even after the limit went from 8Gi to 32Gi. In-process
+            # is both cheaper and faster at this size.
+            - name: PRED_LOADER_WORKERS
+              value: "0"
+            # The RDKit fan-out only engages above 128 molecules (_PMIN), so
+            # the pool is never built for our batches. Stated anyway, because
+            # the default is min(32, cpu_count) and this node has 224 cores.
+            - name: PRED_WORKERS
+              value: "1"
           resources:
             # 8Gi was not a tight fit, it was an insufficient one: /score
             # predicts every endpoint for the whole batch and then returns the

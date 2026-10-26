@@ -209,8 +209,12 @@ class ExternalRESTScorer:
 
         self.last_artifacts: dict | None = None
         # Metadata column order, fixed by the first batch to match the one
-        # header REINVENT writes. See _stabilise_metadata.
+        # header REINVENT writes. See _stabilise_metadata. The flag is
+        # separate from the list because "decided, and empty" and "not yet
+        # decided" are different states -- conflating them let a component
+        # whose first call failed add columns later.
         self._metadata_keys: list[str] = []
+        self._schema_fixed = False
 
         # REINVENT4 only logs the component class, so a TTP with several
         # external objectives produces a run of identical "Creating scoring
@@ -464,18 +468,43 @@ class ExternalRESTScorer:
         the others do not have. Rather than let that reshape the file, the
         first batch fixes the schema -- later extras are dropped and absent
         ones padded with None, which is what REINVENT's own writer assumes.
+
+        "First batch" means the first one, not the first that happened to
+        report anything. A failed call returns no metadata, and the header is
+        written from that batch regardless -- so a component whose opening
+        call failed has no metadata columns for the whole run, and the first
+        later success must not invent them. Three ADMET objectives did exactly
+        that when the service was OOMKilled during step 1: step 2 added four
+        columns, every row from then on was four fields wider than the header,
+        and the readers dropped 32 of 48 molecules without a word.
         """
+
+        if not self._schema_fixed:
+            self._schema_fixed = True
+            self._metadata_keys = list(metadata) if metadata else []
+            if not self._metadata_keys:
+                logger.info(
+                    "%s reported no metadata on the first batch, so the "
+                    "results header has no columns for it; metadata from "
+                    "later batches will be dropped", self.service,
+                )
+                return None
+            return metadata
+
+        if not self._metadata_keys:
+            # Schema fixed as "no columns". Anything now is unrepresentable.
+            if metadata:
+                logger.info(
+                    "%s reported metadata %s but the results header has no "
+                    "columns for it; dropping it to keep the CSV parseable",
+                    self.service, list(metadata),
+                )
+            return None
 
         if metadata is None:
             # Nothing to record, but the columns still have to exist or the
             # next row would be narrower than the header.
-            if not self._metadata_keys:
-                return None
             return {key: [None] * n for key in self._metadata_keys}
-
-        if not self._metadata_keys:
-            self._metadata_keys = list(metadata)
-            return metadata
 
         dropped = [key for key in metadata if key not in self._metadata_keys]
         if dropped:

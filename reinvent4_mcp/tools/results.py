@@ -143,6 +143,20 @@ def read_results(csv_path: str) -> dict[str, Any]:
         "columns": list(df.columns),
     }
 
+    # Say so when the file held more than could be parsed. Everything below is
+    # computed over what survived, and a caller shown only `n_rows` reads that
+    # as the whole run: one three-step campaign was summarised, ranked and
+    # harvested on its first step's 16 molecules out of 48.
+    skipped = int(df.attrs.get("rows_skipped") or 0)
+    if skipped:
+        result["rows_skipped"] = skipped
+        result["rows_in_file"] = int(df.attrs.get("rows_in_file") or len(df))
+        result["warning"] = (
+            f"{skipped} of {result['rows_in_file']} rows could not be parsed "
+            "and are excluded from every figure below -- the file has rows "
+            "wider than its header, so the later steps are missing"
+        )
+
     smiles_col = "SMILES" if "SMILES" in df.columns else None
     total_col = score_column(df.columns)
 

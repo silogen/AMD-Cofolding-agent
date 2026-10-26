@@ -231,6 +231,55 @@ class TestExternalRESTScorer:
         assert second.metadata["note"] == [None]
 
     @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_a_failed_first_batch_fixes_the_schema_as_empty(self, mock_post):
+        """"First batch" has to mean the first one, not the first that worked.
+
+        The header is written from the opening batch whether its call
+        succeeded or not. Seeding the schema from the first batch that
+        happened to report something let a component whose opening call had
+        failed start emitting columns the header never had. Three ADMET
+        objectives did this when the service was OOMKilled during step 1:
+        every row from step 2 on was four fields wider than the header, and
+        the readers skipped 32 of 48 molecules in silence.
+        """
+        scorer = ExternalRESTScorer(_make_params())
+
+        # Opening call fails, so REINVENT's header gets no columns for it.
+        mock_post.return_value = _mock_response({"scores": [None]})
+        first = scorer(["CCO"])
+
+        # Service recovers and starts reporting.
+        mock_post.return_value = _mock_response(
+            {"scores": [0.6], "metadata": {"std": [0.2], "ad_pass": [True]}}
+        )
+        second = scorer(["CCC"])
+
+        assert first.metadata is None
+        assert second.metadata is None, (
+            "the header has no columns for this component, so a later batch "
+            "must not add any"
+        )
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
+    def test_a_working_first_batch_still_sets_the_schema(self, mock_post):
+        """The fix must not stop a healthy component reporting metadata."""
+        scorer = ExternalRESTScorer(_make_params())
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.5], "metadata": {"std": [0.1], "ad_pass": [True]}}
+        )
+        first = scorer(["CCO"])
+
+        mock_post.return_value = _mock_response(
+            {"scores": [0.6], "metadata": {"std": [0.2], "ad_pass": [False]}}
+        )
+        second = scorer(["CCC"])
+
+        assert list(first.metadata) == ["std", "ad_pass"]
+        assert list(second.metadata) == ["std", "ad_pass"]
+        assert second.metadata["ad_pass"] == [False]
+
+    @patch("reinvent_plugins.components.comp_external_rest.requests.post")
     def test_a_batch_with_no_metadata_still_fills_the_columns(self, mock_post):
         scorer = ExternalRESTScorer(_make_params())
 
