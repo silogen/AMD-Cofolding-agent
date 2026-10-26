@@ -126,7 +126,9 @@ class Agent:
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             t0 = time.monotonic()
-            result = self.backend.complete(tools, self.max_tokens)
+            # Off the event loop: a reasoning model can take minutes, and the
+            # web gateway must keep answering WebSocket pings meanwhile.
+            result = await asyncio.to_thread(self.backend.complete, tools, self.max_tokens)
             elapsed = time.monotonic() - t0
 
             self.total_input_tokens += result.input_tokens

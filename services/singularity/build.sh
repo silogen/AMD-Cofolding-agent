@@ -87,6 +87,10 @@ if [ -z "${APPTAINER}" ]; then
     fi
 fi
 
+# Clusters without a subuid mapping (e.g. LUMI) build unprivileged through
+# PRoot instead: load the PRoot module and set APPTAINER_BUILD_FLAGS="".
+BUILD_FLAGS="${APPTAINER_BUILD_FLAGS---fakeroot}"
+
 # --- Helpers ----------------------------------------------------------
 is_in() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -124,7 +128,8 @@ build_one() {
     echo "=== ${svc} (${VENDOR}) -> ${out} ==="
     # Build context = dd_agentic/ root so %files paths resolve.
     # ${args[@]+...} guards empty-array expansion under `set -u` (bash 3.2).
-    ( cd "${ROOT_DIR}" && run "${APPTAINER}" build --fakeroot ${args[@]+"${args[@]}"} "${out}" "${def}" )
+    # shellcheck disable=SC2086
+    ( cd "${ROOT_DIR}" && run "${APPTAINER}" build ${BUILD_FLAGS} ${args[@]+"${args[@]}"} "${out}" "${def}" )
 }
 
 echo "Vendor      : ${VENDOR}"

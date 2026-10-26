@@ -205,3 +205,33 @@ def test_reasoning_tokens_are_reported() -> None:
 
     assert result.output_tokens == 900
     assert result.reasoning_tokens == 850
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+def test_visible_reasoning_from_vllm_is_shown_and_kept(field: str) -> None:
+    """vLLM and SGLang send reasoning outside the OpenAI schema.
+
+    It is shown as thinking, and kept in the history where chat templates
+    with preserved thinking (Qwen3.x) read it back.
+    """
+    message = _Message("Aspirin is CC(=O)Oc1ccccc1C(=O)O.")
+    message.model_extra = {field: "  The user wants a SMILES.\n"}
+    backend = _backend("Qwen/Qwen3.8-27B", reasoning_effort="medium")
+    _stub_backend(backend, _Response(_Choice(message, "stop"), _Usage(40, 0)))
+
+    result = backend.complete([], 4096)
+
+    assert result.thinking == "The user wants a SMILES."
+    assert backend._messages[-1]["reasoning_content"] == "The user wants a SMILES."
+
+
+def test_no_reasoning_means_no_thinking() -> None:
+    backend = _backend("gpt-4o")
+    _stub_backend(
+        backend, _Response(_Choice(_Message("hi"), "stop"), _Usage(1, 0))
+    )
+
+    result = backend.complete([], 4096)
+
+    assert result.thinking is None
+    assert "reasoning_content" not in backend._messages[-1]

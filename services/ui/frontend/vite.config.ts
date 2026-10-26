@@ -24,13 +24,16 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const target = env.VITE_PROXY_TARGET || "http://localhost:8000";
+  // Sent on every proxied request, the chat socket included, when dd-web
+  // runs with REINVENT4_WEB_TOKEN. The browser never sees it.
+  const headers = env.VITE_PROXY_TOKEN ? { "X-DD-Token": env.VITE_PROXY_TOKEN } : undefined;
 
   return {
     plugins: [react(), tailwindcss()],
     server: {
       proxy: {
         // ws: true also upgrades /api/chat, which is the chat WebSocket.
-        "/api": { target, changeOrigin: true, ws: true },
+        "/api": { target, changeOrigin: true, ws: true, headers },
       },
     },
     build: {

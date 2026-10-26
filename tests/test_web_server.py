@@ -101,6 +101,33 @@ def test_a_foreign_origin_is_refused_by_the_socket(agents):
     assert agents == []
 
 
+# -- access token ----------------------------------------------------------
+
+
+def test_without_a_token_configured_nothing_is_required(agents):
+    with TestClient(server.create_app()) as client:
+        assert client.get("/api/health").status_code == 200
+
+
+def test_a_configured_token_is_required_on_http(agents, monkeypatch):
+    monkeypatch.setenv("REINVENT4_WEB_TOKEN", "s3cret")
+    with TestClient(server.create_app()) as client:
+        assert client.get("/api/session").status_code == 401
+        assert client.get("/api/session", headers={"X-DD-Token": "wrong"}).status_code == 401
+        assert client.get("/api/session", headers={"X-DD-Token": "s3cret"}).status_code == 200
+
+
+def test_a_configured_token_is_required_on_the_chat_socket(agents, monkeypatch):
+    monkeypatch.setenv("REINVENT4_WEB_TOKEN", "s3cret")
+    with TestClient(server.create_app()) as client:
+        with pytest.raises(WebSocketDisconnect), client.websocket_connect("/api/chat") as ws:
+            ws.receive_json()
+        assert agents == []
+        with client.websocket_connect("/api/chat", headers={"X-DD-Token": "s3cret"}) as ws:
+            ws.send_text("[]")
+            assert receive_until(ws, "error")
+
+
 # -- messages --------------------------------------------------------------
 
 

@@ -23,7 +23,14 @@
 #   --reinvent-gpu <id>     GPU index for the agent (default: $REINVENT_GPU or 0).
 #   --boltz-gpu <id>        GPU index for boltz    (default: $BOLTZ_GPU or 1).
 #   --skip-agent            Start + health-gate services only, then wait (Ctrl-C).
+#   --web                   Run the dd-web gateway for the browser UI instead of
+#                           the terminal agent ($DD_WEB_HOST:$DD_WEB_PORT,
+#                           default 127.0.0.1:8000). Set REINVENT4_WEB_TOKEN
+#                           whenever DD_WEB_HOST is reachable by other users.
 #   --dry-run               Print the apptainer commands without running them.
+#
+# APPTAINER_GPU_FLAG overrides --rocm/--nv. On LUMI set it to "": the GPUs are
+# visible without it, and --rocm would mount the host's older ROCm libraries.
 #
 # GPU assignment mirrors services/env.sh: agent -> GPU0, boltz -> GPU1.
 # ──────────────────────────────────────────────────────────────────────
@@ -38,6 +45,7 @@ DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data}"
 REINVENT_GPU="${REINVENT_GPU:-0}"
 BOLTZ_GPU="${BOLTZ_GPU:-1}"
 SKIP_AGENT=0
+WEB=0
 DRY_RUN=0
 AGENT_ARGS=()
 
@@ -49,9 +57,10 @@ while [ $# -gt 0 ]; do
         --reinvent-gpu)     REINVENT_GPU="$2"; shift 2 ;;
         --boltz-gpu)        BOLTZ_GPU="$2"; shift 2 ;;
         --skip-agent)       SKIP_AGENT=1; shift ;;
+        --web)              WEB=1; shift ;;
         --dry-run)          DRY_RUN=1; shift ;;
         --)                 shift; AGENT_ARGS=("$@"); break ;;
-        -h|--help)          sed -n '5,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)          sed -n '5,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)                  echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -61,6 +70,7 @@ case "${VENDOR}" in
     nvidia) GPU_FLAG="--nv" ;;
     *)      echo "error: --vendor must be amd or nvidia" >&2; exit 1 ;;
 esac
+GPU_FLAG="${APPTAINER_GPU_FLAG-${GPU_FLAG}}"
 
 run() { echo "+ $*"; [ "${DRY_RUN}" -eq 0 ] && "$@"; return 0; }
 
@@ -88,7 +98,9 @@ fi
 gpu_env_flag() {
     local gpu="$1"
     if [ "${VENDOR}" = "amd" ]; then
-        echo "--env HIP_VISIBLE_DEVICES=${gpu},ROCR_VISIBLE_DEVICES=${gpu}"
+        # ROCR renumbers the GPUs it keeps from 0, so a HIP_VISIBLE_DEVICES with the
+        # same id would then point past the single visible device.
+        echo "--env ROCR_VISIBLE_DEVICES=${gpu}"
     else
         echo "--env CUDA_VISIBLE_DEVICES=${gpu}"
     fi
@@ -215,6 +227,16 @@ AGENT_BINDS=(
     --bind "${DATA_DIR}/tb_logs:/data/reinvent4_mcp/tb_logs"
     --bind "${DATA_DIR}/agent_logs:/logs"
 )
+# DEV_SOURCE=1 runs the agent and MCP server from this checkout instead of the
+# copies baked into the image, so Python edits need a restart, not a rebuild.
+# Dependency changes (pyproject.toml) still need build.sh.
+if [ "${DEV_SOURCE:-0}" = 1 ]; then
+    SITE=/opt/venv/lib/python3.12/site-packages
+    AGENT_BINDS+=(
+        --bind "${ROOT_DIR}/reinvent4_agent:${SITE}/reinvent4_agent"
+        --bind "${ROOT_DIR}/reinvent4_mcp:${SITE}/reinvent4_mcp"
+    )
+fi
 
 # Forward agent env into the container. REINVENT4_MCP_CONFIG + LOG_DIR are fixed
 # to the in-container paths; the rest (gateway URL, key, model, ...) pass through
@@ -236,7 +258,18 @@ for _v in LLM_GATEWAY_KEY REINVENT4_AGENT_API_KEY \
     [ -n "${!_v:-}" ] && AGENT_ENV+=(--env "${_v}=${!_v}")
 done
 
-# shellcheck disable=SC2046
+if [ "${WEB}" -eq 1 ]; then
+    # shellcheck disable=SC2046,SC2086
+    run "${APPTAINER}" exec \
+        ${GPU_FLAG} \
+        $(gpu_env_flag "${REINVENT_GPU}") \
+        "${AGENT_ENV[@]}" \
+        "${AGENT_BINDS[@]}" \
+        "${AGENT_SIF}" dd-web --host "${DD_WEB_HOST:-127.0.0.1}" --port "${DD_WEB_PORT:-8000}"
+    exit 0
+fi
+
+# shellcheck disable=SC2046,SC2086
 run "${APPTAINER}" run \
     ${GPU_FLAG} \
     $(gpu_env_flag "${REINVENT_GPU}") \

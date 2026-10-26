@@ -283,7 +283,7 @@ class OpenAIBackend(LLMBackend):
         return ChatResult(
             text=message.content,
             tool_calls=tool_calls,
-            thinking=None,
+            thinking=_reasoning_text(message),
             needs_tool_response=needs_tool,
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             output_tokens=output_tokens,
@@ -559,7 +559,24 @@ def _message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]:
             }
             for tc in message.tool_calls
         ]
+    reasoning = _reasoning_text(message)
+    if reasoning:
+        # Chat templates with preserved thinking (Qwen3.x) read it back from here.
+        d["reasoning_content"] = reasoning
     return d
+
+
+def _reasoning_text(message: ChatCompletionMessage) -> str | None:
+    """Visible reasoning from an OpenAI-compatible server, if it sent any.
+
+    vLLM and SGLang return it outside the OpenAI schema, as ``reasoning``
+    or ``reasoning_content``; api.openai.com never does.
+    """
+    extra = getattr(message, "model_extra", None) or {}
+    text = extra.get("reasoning") or extra.get("reasoning_content")
+    if not isinstance(text, str):
+        return None
+    return text.strip() or None
 
 
 def _get_username() -> str:

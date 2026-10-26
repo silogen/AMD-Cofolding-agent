@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from reinvent4_agent.web.artifacts import resolve_artifact
 from reinvent4_agent.web.events import WebSocketEventHandler
@@ -94,6 +95,20 @@ def origin_allowed(origin: str | None, host: str | None) -> bool:
     if origin_host is None:
         return False
     return origin_host in _LOOPBACK_HOSTS or origin_host == own_host
+
+
+#: Shared secret for clusters where the gateway port is reachable by other
+#: users (on LUMI, from every login node). When set, every request must carry
+#: it in the ``X-DD-Token`` header; the dev proxy adds it (VITE_PROXY_TOKEN).
+_TOKEN_ENV = "REINVENT4_WEB_TOKEN"
+TOKEN_HEADER = "x-dd-token"
+
+
+def token_ok(sent: str | None, expected: str | None) -> bool:
+    """Whether a request may proceed under the configured access token."""
+    if not expected:
+        return True
+    return sent is not None and hmac.compare_digest(sent.encode(), expected.encode())
 
 
 @dataclass
@@ -234,6 +249,16 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    access_token = os.environ.get(_TOKEN_ENV) or None
+
+    if access_token:
+
+        @app.middleware("http")
+        async def require_token(request: Request, call_next: Any) -> Any:
+            if not token_ok(request.headers.get(TOKEN_HEADER), access_token):
+                return JSONResponse({"detail": "Missing or wrong access token"}, status_code=401)
+            return await call_next(request)
+
     @app.get("/api/health")
     async def health() -> JSONResponse:
         body = {
@@ -265,6 +290,10 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
 
     @app.websocket("/api/chat")
     async def chat(websocket: WebSocket) -> None:
+        if not token_ok(websocket.headers.get(TOKEN_HEADER), access_token):
+            logger.warning("Rejected chat connection without a valid access token")
+            await websocket.close(code=1008)
+            return
         origin = websocket.headers.get("origin")
         if not origin_allowed(origin, websocket.headers.get("host")):
             logger.warning("Rejected chat connection from origin %s", origin)
