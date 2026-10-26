@@ -47,6 +47,40 @@ class JobState(str, enum.Enum):
 # capacity check.
 ACTIVE_JOB_STATES = frozenset({JobState.QUEUED, JobState.RUNNING})
 
+
+def worker_alive(pid: Optional[int], job_dir: Any) -> bool:
+    """Whether the recorded worker process is still running this job.
+
+    The pid alone is not enough: pids are recycled, and mistaking an unrelated
+    process for a live worker would leave a dead job holding a concurrency
+    slot forever. Where ``/proc`` is available the command line is checked for
+    this job's own directory, which both confirms liveness and rules out
+    reuse. Elsewhere (macOS, tests) only liveness can be established, which is
+    the safe direction: adopting is recoverable, burying a running job is not.
+    """
+
+    if not pid:
+        return False
+
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if cmdline.exists():
+        try:
+            argv = cmdline.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            return False
+        return str(job_dir) in argv
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists and belongs to someone else, which still means alive.
+        return True
+    except OSError:
+        return False
+    return True
+
 # The aggregated score, by the names it can appear under. REINVENT writes
 # "Score"; "total_score" is kept first because older CSVs and the TL output
 # use it. Resolving only "total_score" meant the column was never found in an
@@ -1041,14 +1075,27 @@ class JobManager:
                     exit_code=data.get("exit_code"),
                     output_model_file=data.get("output_model_file"),
                 )
-                # Anything that held a slot is dead with the process that ran
-                # it. Resetting QUEUED as well as RUNNING matters now that the
-                # slot count is enforced: a job interrupted before it started
-                # would otherwise hold one of them forever.
+                # A job that held a slot is usually dead with the process that
+                # ran it -- but not always, because the worker is a separate
+                # process whose pid is recorded right here. Any second process
+                # in this container that builds a manager would otherwise bury
+                # live jobs: three healthy runs mid-Boltz-call were marked
+                # failed on disk by one diagnostic command, and the
+                # supervisors watching them abandoned the tasks.
+                #
+                # Resetting QUEUED as well as RUNNING still matters where the
+                # process really is gone: with the slot count enforced, a job
+                # interrupted before it started would hold one forever.
                 if job.state in ACTIVE_JOB_STATES:
-                    job.state = JobState.FAILED
-                    job.error = "Server restarted while job was active"
-                    self._save_metadata(job)
+                    if worker_alive(job.pid, job_dir):
+                        logger.info(
+                            "Adopting job %s: its worker (pid %s) is still "
+                            "running", job_id, job.pid,
+                        )
+                    else:
+                        job.state = JobState.FAILED
+                        job.error = "Server restarted while job was active"
+                        self._save_metadata(job)
 
                 self._jobs[job_id] = job
                 logger.info("Restored job %s (state: %s)", job_id, job.state.value)

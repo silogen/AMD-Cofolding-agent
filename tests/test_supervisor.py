@@ -594,15 +594,54 @@ class TestSupervisorLoop:
                 await slow_enough.wait()
                 return await _succeeds(task)
 
-            supervisor = Supervisor(store, _slow, heartbeat_seconds=0.01)
-            running = asyncio.create_task(supervisor.run_once())
-            await asyncio.sleep(0.08)
+            supervisor = Supervisor(
+                store, _slow, poll_seconds=0.01, presence_seconds=0.01
+            )
+            running = asyncio.create_task(supervisor.run_forever())
+            await asyncio.sleep(0.1)
             slow_enough.set()
+            supervisor.stop()
             await running
 
         asyncio.run(scenario())
 
         assert store.presence.count(("busy", "a1b2c3d4")) > 1
+
+    def test_losing_a_lease_does_not_remove_it_from_the_pool(self):
+        """Presence is about the supervisor; the lease is about the task.
+
+        They were renewed on the same beat, so a supervisor whose task was
+        taken -- by a cancel, or its campaign being finalized -- kept working
+        on the job it had already started while vanishing from the pool. Two
+        did exactly that: alive, holding a GPU, invisible.
+        """
+        class LeaseTaken(FakeStore):
+            def heartbeat(self, task_id, lease_seconds=None):
+                raise LeaseLost("held by someone else")
+
+        store = LeaseTaken([_task()])
+
+        async def scenario():
+            still_working = asyncio.Event()
+
+            async def _slow(task):
+                await still_working.wait()
+                return await _succeeds(task)
+
+            supervisor = Supervisor(
+                store, _slow, poll_seconds=0.01,
+                heartbeat_seconds=0.01, presence_seconds=0.01,
+            )
+            running = asyncio.create_task(supervisor.run_forever())
+            await asyncio.sleep(0.1)
+            # The lease is gone by now; presence must have carried on.
+            renewals = store.presence.count(("busy", "a1b2c3d4"))
+            still_working.set()
+            supervisor.stop()
+            await running
+            return renewals
+
+        assert asyncio.run(scenario()) > 1
 
     def test_it_leaves_the_pool_on_shutdown(self):
         """Draining on command should not read as a crash for the next TTL."""

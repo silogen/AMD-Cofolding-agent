@@ -87,7 +87,13 @@ data:
       # Must be at least the campaign's concurrency, or the surplus
       # supervisors have their tasks refused with "Maximum concurrent jobs
       # (N) already active" and burn their retries doing it.
-      max_concurrent_jobs: 3
+      # 6 measured against the fleet it has to serve: node 007 holds five GPUs
+      # we can use (four Boltz plus this runner) and three more belong to a
+      # different Helm release, so Boltz cannot grow. At four replicas folding
+      # one batch at a time, six concurrent jobs keep every replica busy with
+      # roughly one batch queued -- past that the extra agents only deepen the
+      # queue, which is why this is the number and not the node's CPU count.
+      max_concurrent_jobs: 6
       checkpoint_on_stop: true
 
     # Not optional in this deployment: dd-agent:local is CPU-only and carries no

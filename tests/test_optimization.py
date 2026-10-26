@@ -11,6 +11,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import sys
 import signal
 import subprocess
 from pathlib import Path
@@ -1727,6 +1729,118 @@ class TestJobMetadataPersistence:
         jobs = manager.list_jobs()
         assert jobs[0]["state"] == "failed"
         assert "restarted" in jobs[0]["error"]
+
+
+class TestRestoringAJobWhoseWorkerIsStillAlive:
+    """Restoring assumed the worker died with whatever wrote the metadata.
+
+    It does not: the worker is a separate process and its pid is in the
+    metadata. One diagnostic command that built a second manager inside the
+    runner marked three healthy jobs failed on disk -- mid Boltz call, with
+    their processes alive and their logs advancing -- and the supervisors
+    watching them abandoned the tasks and the GPUs they held.
+    """
+
+    def _running_job(self, config, pid=4242, job_id="live1"):
+        job_dir = Path(config.jobs.working_dir) / f"job_{job_id}"
+        job_dir.mkdir(parents=True)
+        (job_dir / "job_metadata.json").write_text(json.dumps({
+            "job_id": job_id, "ttp_id": "test", "ttp_version": 1,
+            "model": ".reinvent", "state": "running",
+            "working_dir": str(job_dir), "pid": pid,
+        }))
+        return job_dir
+
+    def test_a_live_worker_is_adopted_not_buried(self, config, monkeypatch):
+        self._running_job(config)
+        monkeypatch.setattr(
+            "reinvent4_mcp.jobs.manager.worker_alive", lambda pid, d: True
+        )
+
+        job = JobManager(config).list_jobs()[0]
+
+        assert job["state"] == "running"
+        assert not job.get("error")
+
+    def test_an_adopted_job_still_holds_its_concurrency_slot(
+        self, config, monkeypatch
+    ):
+        """It is running, so the slot it occupies is real."""
+        self._running_job(config)
+        monkeypatch.setattr(
+            "reinvent4_mcp.jobs.manager.worker_alive", lambda pid, d: True
+        )
+
+        assert JobManager(config).active_job_ids() == ["live1"]
+
+    def test_a_dead_worker_is_still_marked_failed(self, config, monkeypatch):
+        """The original behaviour, which frees the slot."""
+        self._running_job(config)
+        monkeypatch.setattr(
+            "reinvent4_mcp.jobs.manager.worker_alive", lambda pid, d: False
+        )
+
+        job = JobManager(config).list_jobs()[0]
+
+        assert job["state"] == "failed"
+        assert "restarted" in job["error"]
+
+    def test_the_verdict_is_persisted_only_when_the_job_is_buried(
+        self, config, monkeypatch
+    ):
+        """Adopting must not rewrite the metadata the live worker owns."""
+        job_dir = self._running_job(config)
+        monkeypatch.setattr(
+            "reinvent4_mcp.jobs.manager.worker_alive", lambda pid, d: True
+        )
+
+        JobManager(config)
+
+        on_disk = json.loads((job_dir / "job_metadata.json").read_text())
+        assert on_disk["state"] == "running"
+
+
+class TestWorkerLiveness:
+
+    def test_no_pid_is_not_alive(self, tmp_path):
+        from reinvent4_mcp.jobs.manager import worker_alive
+
+        assert worker_alive(None, tmp_path) is False
+        assert worker_alive(0, tmp_path) is False
+
+    def test_a_finished_process_is_not_alive(self, tmp_path):
+        from reinvent4_mcp.jobs.manager import worker_alive
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+
+        assert worker_alive(proc.pid, tmp_path) is False
+
+    @pytest.mark.skipif(
+        not Path("/proc").is_dir(), reason="needs /proc to read a command line"
+    )
+    def test_an_unrelated_process_on_a_recycled_pid_is_not_adopted(self, tmp_path):
+        """Pids are recycled; adopting a stranger would hold a slot forever."""
+        from reinvent4_mcp.jobs.manager import worker_alive
+
+        # This test's own process is alive but is not running tmp_path's job.
+        assert worker_alive(os.getpid(), tmp_path / "job_nothing") is False
+
+    @pytest.mark.skipif(
+        not Path("/proc").is_dir(), reason="needs /proc to read a command line"
+    )
+    def test_a_worker_running_this_job_is_alive(self, tmp_path):
+        from reinvent4_mcp.jobs.manager import worker_alive
+
+        job_dir = tmp_path / "job_live"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", str(job_dir)]
+        )
+        try:
+            assert worker_alive(proc.pid, job_dir) is True
+        finally:
+            proc.kill()
+            proc.wait()
 
 
 # ---------------------------------------------------------------------------

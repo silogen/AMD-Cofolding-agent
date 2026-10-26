@@ -7,8 +7,16 @@ metadata:
     app.kubernetes.io/component: scorer
 spec:
   # CPU only, no /shared mount: the request carries the SMILES and the
-  # response carries the scores, so nothing is handed over by path.
-  replicas: 1
+  # response carries the scores, so nothing is handed over by path. That also
+  # makes replicas free of coordination -- a plain ClusterIP round-robin is
+  # enough, unlike Boltz which needs the proxy to place batches.
+  #
+  # Three, because this is the one scorer a TTP calls more than once per step:
+  # one call per ADMET objective. At six concurrent jobs and three endpoints a
+  # single replica took 18 calls per step round and was OOMKilled eight times
+  # (exit 137), which left Caco2 50% NaN, Solubility 99% and logD 99% while
+  # every non-ADMET component stayed at 0%.
+  replicas: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: dd-agentic-admet
@@ -27,12 +35,18 @@ spec:
             - name: admet-http
               containerPort: 8084
           resources:
+            # 8Gi was not a tight fit, it was an insufficient one: /score
+            # predicts every endpoint for the whole batch and then returns the
+            # one that was asked for, so a 16-molecule call costs all seven
+            # endpoints' worth of model activations regardless. The node
+            # carries 2.1 TiB at a sixth requested, so this headroom was
+            # simply unclaimed.
             requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
-              cpu: "4"
+              cpu: "2"
               memory: 8Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
           startupProbe:
             httpGet:
               path: /health

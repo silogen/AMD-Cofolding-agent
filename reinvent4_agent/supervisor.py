@@ -70,6 +70,9 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = float(os.getenv("SUPERVISOR_POLL_SECONDS", "15"))
 HEARTBEAT_SECONDS = float(os.getenv("SUPERVISOR_HEARTBEAT_SECONDS", "60"))
+# Comfortably inside the store's 120s presence TTL, so one missed beat does
+# not drop a working supervisor out of the pool.
+PRESENCE_SECONDS = float(os.getenv("SUPERVISOR_PRESENCE_SECONDS", "45"))
 
 __all__ = [
     "CampaignStoreClient",
@@ -278,6 +281,7 @@ class Supervisor:
         campaign_id: Optional[str] = None,
         poll_seconds: float = POLL_SECONDS,
         heartbeat_seconds: float = HEARTBEAT_SECONDS,
+        presence_seconds: float = PRESENCE_SECONDS,
         lease_seconds: Optional[float] = None,
     ) -> None:
         self.store = store
@@ -285,10 +289,15 @@ class Supervisor:
         self.campaign_id = campaign_id
         self.poll_seconds = poll_seconds
         self.heartbeat_seconds = heartbeat_seconds
+        self.presence_seconds = presence_seconds
         self.lease_seconds = lease_seconds
         self._stopping = asyncio.Event()
         self.tasks_completed = 0
         self.tasks_failed = 0
+        # What the lifetime presence beat restates between task events.
+        self._presence: tuple[str, Optional[str], Optional[str]] = (
+            "starting", None, "joining the pool",
+        )
 
     def stop(self) -> None:
         """Finish the task in hand, then exit without claiming another."""
@@ -310,6 +319,8 @@ class Supervisor:
         seeing us late, but neither is worth losing an hour of RL over.
         """
 
+        # Remembered so the lifetime beat can restate it without guessing.
+        self._presence = (state, task_id, detail)
         try:
             await asyncio.to_thread(
                 self.store.report_presence,
@@ -319,6 +330,25 @@ class Supervisor:
         except (StoreUnavailable, LeaseLost) as exc:
             logger.debug("could not report presence: %s", exc)
 
+    async def _presence_forever(self) -> None:
+        """Keep this supervisor in the pool for as long as it is running.
+
+        Separate from the task lease heartbeat because the two answer
+        different questions: the lease says "this task is still mine",
+        presence says "this supervisor exists". Renewing presence inside the
+        lease heartbeat tied them together, so a supervisor whose task was
+        taken -- by a cancel, or by its campaign being finalized -- kept
+        working on the job it had already started while disappearing from the
+        pool. Two did exactly that: alive, holding a GPU, invisible.
+        """
+
+        while not self.stopping:
+            await self._sleep_unless_stopping(self.presence_seconds)
+            if self.stopping:
+                return
+            state, task_id, detail = self._presence
+            await self._report(state, task_id, detail)
+
     async def _heartbeat_forever(self, task_id: str) -> None:
         """Renew the lease until cancelled.
 
@@ -327,9 +357,8 @@ class Supervisor:
         more than the ledger entry. If the store stays down the lease lapses
         and the task is requeued, which is the right outcome anyway.
 
-        Presence is renewed on the same beat, since a task can outlast the
-        presence TTL many times over and a supervisor that vanished from the
-        pool while working would read as capacity that is not there.
+        Presence is not renewed here -- ``_presence_forever`` owns that, so
+        losing a lease does not also remove the supervisor from the pool.
         """
 
         while True:
@@ -343,7 +372,6 @@ class Supervisor:
                 raise
             except StoreUnavailable as exc:
                 logger.warning("heartbeat for %s failed: %s", task_id, exc)
-            await self._report("busy", task_id, detail="running task")
 
     async def run_once(self) -> bool:
         """Claim and run one task. False when there was nothing to do."""
@@ -398,6 +426,7 @@ class Supervisor:
             self.store.owner, self.campaign_id or "any campaign", self.store.base_url,
         )
         await self._report("starting", detail="joining the pool")
+        presence = asyncio.create_task(self._presence_forever())
 
         while not self.stopping:
             try:
@@ -410,6 +439,10 @@ class Supervisor:
 
             if not did_work and not self.stopping:
                 await self._sleep_unless_stopping(self.poll_seconds)
+
+        presence.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await presence
 
         # Leave on purpose rather than timing out of the listing, so a pool
         # drained on command does not read as three crashed supervisors for

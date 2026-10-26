@@ -55,13 +55,18 @@ spec:
             - name: REINVENT_RUNNER_SELF
               value: "1"
           resources:
+            # One GPU, but CPU scaled to `jobs.max_concurrent_jobs`: an RL step
+            # spends most of its time in RDKit and the scoring call rather than
+            # on the GPU, so concurrent jobs contend for cores. At the 8-CPU
+            # limit six jobs had ~1.3 each. The node carries 224 cores at a
+            # third requested, so this is headroom that was simply unclaimed.
             requests:
               amd.com/gpu: "1"
-              cpu: "4"
+              cpu: "8"
               memory: 32Gi
             limits:
               amd.com/gpu: "1"
-              cpu: "8"
+              cpu: "24"
               memory: 128Gi
           startupProbe:
             # First request imports torch and REINVENT4, which is slow.

@@ -448,7 +448,11 @@ def _summarize_args(args: dict[str, Any]) -> str:
 def _summarize_tool_result(tool_name: str, data: Any) -> str:
     """Create a brief textual summary of tool result data."""
     if isinstance(data, dict):
-        if "error" in data:
+        # Truthiness, not key presence: a task row carries an ``error`` column
+        # that is null while nothing is wrong, so testing presence reported a
+        # successful enqueue as "Error: None". A conductor told its enqueue had
+        # failed went on to open three more campaigns.
+        if data.get("error"):
             return f"Error: {data['error']}"
         if "molecules" in data:
             mols = data["molecules"]
