@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { clampWidth, closeTab, loadTabs, loadWidth, openTab, saveTabs, saveWidth } from "./dock";
+import { DOCK_TABS, clampWidth, closeTab, dockTabOf, loadTabs, loadWidth, openTab, saveTabs, saveWidth } from "./dock";
 
 function memory() {
   const map = new Map<string, string>();
@@ -13,6 +13,15 @@ describe("openTab", () => {
   it("appends new tabs once", () => {
     expect(openTab(["a"], "b")).toEqual(["a", "b"]);
     expect(openTab(["a", "b"], "a")).toEqual(["a", "b"]);
+  });
+});
+
+describe("dockTabOf", () => {
+  it("maps views to the tab that shows them", () => {
+    expect(dockTabOf("candidates")).toBe("molecules");
+    expect(dockTabOf("properties")).toBe("molecules");
+    expect(dockTabOf("activity")).toBe("jobs");
+    expect(dockTabOf("ttp")).toBe("ttp");
   });
 });
 
@@ -33,6 +42,11 @@ describe("persistence", () => {
     saveTabs("s1", ["jobs", "bogus", "jobs"], store);
     expect(loadTabs("s1", ["jobs", "ttp"], store)).toEqual(["jobs"]);
     expect(loadTabs("s2", ["jobs"], store)).toBeNull();
+  });
+  it("opens the merged tab for ids that used to be tabs", () => {
+    const store = memory();
+    saveTabs("s1", ["structure", "candidates", "properties", "activity", "jobs"], store);
+    expect(loadTabs("s1", DOCK_TABS, store)).toEqual(["structure", "molecules", "jobs"]);
   });
   it("tolerates garbage", () => {
     const store = memory();

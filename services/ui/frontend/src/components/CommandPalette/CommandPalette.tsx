@@ -48,13 +48,13 @@ export function CommandPalette({ items, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 p-4 pt-[12vh]" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-start justify-center bg-black/30 p-4 pt-[12vh]" onMouseDown={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Commands"
         onMouseDown={(event) => event.stopPropagation()}
-        className="bg-raised border-subtle w-full max-w-lg overflow-hidden rounded-xl border shadow-2xl"
+        className="bg-raised border-subtle shadow-card w-full max-w-lg overflow-hidden rounded-lg border"
       >
         <input
           autoFocus
@@ -89,14 +89,14 @@ export function CommandPalette({ items, onClose }: Props) {
             return (
               <li key={item.id} role="option" aria-selected={index === highlight}>
                 {header && (
-                  <p className="text-faint px-4 pt-2 pb-1 text-[10px] font-semibold tracking-wide uppercase">{header}</p>
+                  <p className="text-faint px-4 pt-3 pb-1 text-[10px] tracking-wide uppercase">{header}</p>
                 )}
                 <button
                   type="button"
                   onClick={() => run(item)}
                   onMouseMove={() => setHighlight(index)}
-                  className={`flex w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-xs ${
-                    index === highlight ? "bg-sunken" : ""
+                  className={`flex w-full cursor-pointer items-center gap-3 px-4 py-1.5 text-left text-xs ${
+                    index === highlight ? "bg-sunken text-body" : "text-muted"
                   }`}
                 >
                   {index === highlight && (

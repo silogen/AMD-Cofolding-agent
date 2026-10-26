@@ -9,7 +9,6 @@ import type { Theme } from "../../hooks/useTheme";
 import { toolSteps } from "../../lib/transcript";
 import { clock, duration, summarise } from "../../lib/format";
 import { panelKey } from "../../lib/artifacts";
-import { suggestFollowups } from "../../lib/followups";
 import { remarkResidueLinks, residueFromHref } from "../../lib/residueLinks";
 import { sendToViewer } from "../../lib/viewerBus";
 import { openWorkbench } from "../../lib/workbenchBus";
@@ -31,8 +30,6 @@ interface Props {
   onShowProperties: () => void;
   /** Turn residue names in answers into viewer links; only useful once there is a structure. */
   linkResidues: boolean;
-  /** Set on the latest answer only: offers next questions and puts the chosen one in the composer. */
-  onFollowup?: (text: string) => void;
 }
 
 /** Re-render every second while *running*, for live timers. */
@@ -53,7 +50,7 @@ function useNow(running: boolean): number {
  * is doing now, the steps it took (each with its duration and output), what
  * those steps produced, and finally its answer.
  */
-export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, onShowProperties, linkResidues, onFollowup }: Props) {
+export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, onShowProperties, linkResidues }: Props) {
   const running = !turn.done;
   const now = useNow(running);
   const steps = toolSteps(turn);
@@ -63,9 +60,7 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
   );
   const lastThinking = [...turn.blocks].reverse().find((block) => block.kind === "thinking");
   const failedSteps = steps.filter((step) => step.result?.isError).length;
-  const answered = turn.done && turn.blocks.some((block) => block.kind === "text") && !turn.blocks.some((block) => block.kind === "cancelled");
   const tools = steps.map((step) => step.name);
-  const followups = onFollowup && answered ? suggestFollowups(panels, tools) : [];
   const texts = turn.blocks.flatMap((block) => (block.kind === "text" ? [block.content] : []));
   const onlyAlerts = turn.blocks.length > 0 && turn.blocks.every((block) => block.kind === "alert");
   const title = onlyAlerts ? "Monitor alert" : running && texts.length === 0 && steps.length === 0 ? "Working…" : answerTitle(texts, tools);
@@ -126,22 +121,6 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
 
       {links.length > 0 && <ArtifactLinks links={links} />}
 
-      {followups.length > 0 && onFollowup && (
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <span className="text-faint text-[10px] font-semibold tracking-wider uppercase">Next</span>
-          {followups.map((text) => (
-            <button
-              key={text}
-              type="button"
-              onClick={() => onFollowup(text)}
-              className="text-muted cursor-pointer text-xs hover:text-[var(--color-structure)] hover:underline"
-            >
-              {text}
-            </button>
-          ))}
-        </div>
-      )}
-
       {!running && (steps.length > 0 || thoughts.length > 0) && (
         <TurnTrace
           steps={steps}
@@ -196,7 +175,7 @@ function ArtifactLinks({ links }: { links: ArtifactLink[] }) {
   );
 }
 
-/** A finished turn's steps and reasoning, folded into one line under the answer. */
+/** A finished turn's steps, timing and reasoning, folded into one line under the answer. */
 function TurnTrace({
   steps,
   thoughts,
@@ -211,30 +190,24 @@ function TurnTrace({
   now: number;
 }) {
   const [open, setOpen] = useState(false);
+  const details = meta.filter(Boolean);
   return (
     <div className="text-[11px]">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="text-faint hover:text-muted flex max-w-full cursor-pointer flex-wrap items-center gap-x-1.5 text-left touch:min-h-11"
+        className="text-faint hover:text-muted flex max-w-full cursor-pointer items-center gap-x-1.5 text-left touch:min-h-11"
       >
         <span aria-hidden="true" className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>
           ›
         </span>
-        {steps.length > 0 && (
-          <span className="text-muted font-medium">
-            {steps.length} step{steps.length === 1 ? "" : "s"}
-          </span>
-        )}
+        <span className="font-medium">{steps.length > 0 ? `${steps.length} step${steps.length === 1 ? "" : "s"}` : "Details"}</span>
         {failed > 0 && <span style={{ color: "var(--color-accent)" }}>· {failed} failed</span>}
-        {thoughts.length > 0 && <span>· reasoning available</span>}
-        {meta.filter(Boolean).map((item, index) => (
-          <span key={index}>· {item}</span>
-        ))}
       </button>
       {open && (
         <div className="mt-2 flex flex-col gap-2">
+          {details.length > 0 && <p className="text-faint">{details.join(" · ")}</p>}
           {steps.length > 0 && <StepList steps={steps} now={now} />}
           {thoughts.map((content, index) => (
             <p key={index} className="text-muted border-subtle border-l-2 py-0.5 pl-3 text-xs whitespace-pre-wrap">

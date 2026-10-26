@@ -163,6 +163,7 @@ export interface NoticeEvent {
 export interface UserMessageEvent extends Recorded {
   type: "user_message";
   content: string;
+  effort?: Effort;
 }
 
 export interface ThinkingEvent extends Recorded {
@@ -234,8 +235,11 @@ export type ConversationEvent =
 
 export type AgentEvent = ReadyEvent | SessionEvent | NoticeEvent | ConversationEvent;
 
+/** How hard the model reasons on a turn; the gateway sets it on the session's backend. */
+export type Effort = "low" | "medium" | "high";
+
 /** What the browser sends. */
-export type ClientMessage = { type: "user_message"; content: string } | { type: "cancel" };
+export type ClientMessage = { type: "user_message"; content: string; effort?: Effort } | { type: "cancel" };
 
 // ---------------------------------------------------------------------------
 // sessions — saved conversations

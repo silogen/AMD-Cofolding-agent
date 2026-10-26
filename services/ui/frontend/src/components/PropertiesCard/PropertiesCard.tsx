@@ -1,10 +1,17 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+import { useMemo, useState } from "react";
 import type { PropertiesPanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
+import { propertiesSheet } from "../../lib/csv";
 import { endpointLabel, endpointRange, endpointUnit, formatValue, serviceName } from "../../lib/properties";
+import { radarData } from "../../lib/radar";
+import { ExportButtons } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { RadarChart } from "./RadarChart";
+
+const RADAR_MAX = 5;
 
 interface Props {
   panel: PropertiesPanel;
@@ -21,20 +28,40 @@ interface Props {
  * ensemble spread and a bar placing it among the other molecules.
  */
 export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: Props) {
+  const [view, setView] = useState<"table" | "radar">("table");
+  const radar = useMemo(() => radarData(panel, RADAR_MAX), [panel]);
   const rows = limit ? panel.molecules.slice(0, limit) : panel.molecules;
   const hidden = panel.molecules.length - rows.length;
   const outside = panel.molecules.filter((m) => m.adPass === false).length;
+  const showRadar = view === "radar" && radar !== null;
 
   return (
     <section className="bg-raised border-subtle shadow-card overflow-hidden rounded-xl border">
-      <header className="border-subtle flex items-center gap-2 border-b px-3 py-2">
+      <header className="border-subtle flex flex-wrap items-center gap-2 border-b px-3 py-2">
         <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ background: "var(--color-table)" }} />
         <span className="truncate text-xs font-semibold">{serviceName(panel)} predictions</span>
         <span className="text-faint ml-auto shrink-0 text-[11px]">
           {panel.molecules.length} molecule{panel.molecules.length === 1 ? "" : "s"} · {panel.endpoints.length} endpoints
         </span>
+        {radar && (
+          <span role="group" aria-label="View" className="bg-sunken flex shrink-0 rounded-md p-0.5 text-[10px] font-medium">
+            {(["table", "radar"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                aria-pressed={view === v}
+                className={`cursor-pointer rounded px-1.5 py-px capitalize touch:min-h-11 ${view === v ? "bg-raised text-body shadow-card" : "text-faint hover:text-body"}`}
+              >
+                {v}
+              </button>
+            ))}
+          </span>
+        )}
+        <ExportButtons name={`${serviceName(panel)} predictions`} sheet={() => propertiesSheet(panel)} scope={`all ${panel.molecules.length} molecules`} />
       </header>
-      <div className="overflow-x-auto">
+      {showRadar && <RadarChart axes={radar.axes} series={radar.series} total={panel.molecules.filter((m) => m.ok).length} />}
+      <div className={`overflow-x-auto ${showRadar ? "hidden" : ""}`}>
         <table className="w-full text-[11px]">
           <thead>
             <tr className="text-muted border-subtle border-b text-left">

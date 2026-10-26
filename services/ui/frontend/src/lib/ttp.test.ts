@@ -26,8 +26,23 @@ import {
   objectiveSource,
   ttpCreated,
   ttpGeneration,
+  buildTtp,
+  createdTtp,
+  formProblems,
+  nativeObjective,
+  normaliseSequence,
+  objectiveCatalogue,
+  parseComponents,
+  parseServices,
+  presetObjectives,
+  renameObjective,
+  sequenceProblem,
+  serviceObjective,
+  slugify,
+  uniqueName,
   type ToolEvent,
   type Ttp,
+  type TtpForm,
 } from "./ttp";
 
 const SEQ = "MSAKAEQLLHAVEGNNKSVRQLLKA";
@@ -290,3 +305,139 @@ describe("TTP display helpers", () => {
     ]);
   });
 });
+
+const SERVICES = JSON.stringify({
+  boltz: { url: "http://localhost:8091/score", status: "ok" },
+  posebusters: { url: "http://localhost:8082/score", status: "ok" },
+  admet: { url: "http://localhost:8084/score", status: "ok", endpoints: ["logp", "logd", "caco2_permeability"] },
+  retrodmta: { url: "http://localhost:8085/score", status: "ok", targets: ["FXA"], targets_detail: { FXA: { endpoints: ["FXA_pKi", "FXA_logD"] } } },
+});
+
+describe("builder inputs", () => {
+  it("reads services with their selectors", () => {
+    const services = parseServices(SERVICES);
+    expect(Object.keys(services)).toEqual(["boltz", "posebusters", "admet", "retrodmta"]);
+    expect(services.admet.endpoints).toEqual(["logp", "logd", "caco2_permeability"]);
+    expect(services.retrodmta.targets).toEqual({ FXA: ["FXA_pKi", "FXA_logD"] });
+    expect(parseServices("not json")).toEqual({});
+  });
+
+  it("keeps the native scorers that need no settings", () => {
+    const components = parseComponents([
+      { name: "qed", class: "Qed", component_type: "scorer", parameters: [] },
+      { name: "sascore", class: "SAScore", component_type: "scorer", parameters: null },
+      { name: "customalerts", class: "CustomAlerts", component_type: "filter", parameters: [] },
+      { name: "fragmentqed", class: "FragmentQed", component_type: "scorer", parameters: [] },
+      { name: "tanimotosimilarity", class: "TanimotoSimilarity", component_type: "scorer", parameters: [{ name: "smiles" }] },
+    ]);
+    expect(components).toEqual(["Qed", "SAScore"]);
+  });
+
+  it("slugs names into ids and cleans sequences", () => {
+    expect(slugify("BRD4 Cofolding (v2)!")).toBe("brd4-cofolding-v2");
+    expect(slugify("  ")).toBe("");
+    expect(normaliseSequence(">sp|O60885|BRD4_HUMAN\nmsae sgpg\n10 TRLR*")).toBe("MSAESGPGTRLR");
+    expect(sequenceProblem("MSAE")).toMatch(/at least 10/);
+    expect(sequenceProblem("MSAEXGPGTRLRB")).toMatch(/B, X/);
+    expect(sequenceProblem(SEQ)).toBeNull();
+    expect(sequenceProblem("")).toBeNull();
+  });
+});
+
+describe("objectives", () => {
+  const services = parseServices(SERVICES);
+
+  it("uses the configured service URLs and chains PoseBusters after Boltz", () => {
+    const [boltz, posebusters] = presetObjectives("cofolding", services);
+    expect(boltz).toMatchObject({ type: "external", service: "boltz", service_url: "http://localhost:8091/score" });
+    expect(boltz.transform?.type).toBe("reverse_sigmoid");
+    expect(posebusters).toMatchObject({ service: "posebusters", depends_on: boltz.name });
+  });
+
+  it("selects ADMET endpoints and RetroDMTA targets through service_params", () => {
+    expect(serviceObjective(services, "admet", "logd")).toMatchObject({ name: "LogD", service_params: { endpoint: "logd" } });
+    expect(serviceObjective(services, "retrodmta", "FXA_pKi", "FXA")).toMatchObject({ service_params: { target: "FXA", endpoint: "FXA_pKi" }, transform: { type: "sigmoid" } });
+    expect(nativeObjective("TanimotoSimilarity").params).toMatchObject({ smiles: [], radius: 3 });
+    expect(nativeObjective("QED").transform).toBeNull();
+  });
+
+  it("offers every service selector and native scorer", () => {
+    const keys = objectiveCatalogue(services, ["QED", "Csp3"]).map((e) => e.key);
+    expect(keys).toContain("boltz");
+    expect(keys).toContain("admet:caco2_permeability");
+    expect(keys).toContain("retrodmta:FXA:FXA_logD");
+    expect(keys).toContain("native:QED");
+    expect(keys).toContain("native:Csp3");
+    expect(keys).toContain("native:TanimotoSimilarity");
+    expect(keys).not.toContain("native:SlogP");
+    expect(keys).not.toContain("ip:hbond");
+  });
+
+  it("names and renames without breaking links", () => {
+    expect(uniqueName("QED", ["QED", "QED 2"])).toBe("QED 3");
+    expect(uniqueName("MW", ["QED"])).toBe("MW");
+    const renamed = renameObjective(presetObjectives("cofolding", services), 0, "Affinity");
+    expect(renamed[0].name).toBe("Affinity");
+    expect(renamed[1].depends_on).toBe("Affinity");
+  });
+});
+
+describe("formProblems and buildTtp", () => {
+  const services = parseServices(SERVICES);
+  const form = (patch: Partial<TtpForm> = {}): TtpForm => ({
+    name: "BRD4 cofold",
+    id: "brd4-cofold",
+    description: "",
+    sequence: SEQ,
+    pdbId: "",
+    aggregation: "geometric_mean",
+    objectives: presetObjectives("cofolding", services),
+    ...patch,
+  });
+
+  it("accepts a complete form", () => {
+    expect(formProblems(form())).toEqual([]);
+  });
+
+  it("explains what the server would reject", () => {
+    expect(formProblems(form({ id: "Bad id" }))[0]).toMatch(/lowercase/);
+    expect(formProblems(form(), ["brd4-cofold"])[0]).toMatch(/already exists/);
+    expect(formProblems(form({ sequence: "" }))).toContain("Boltz scoring needs the target's protein sequence.");
+    expect(formProblems(form({ objectives: [] }))).toContain("Add at least one objective.");
+    const objectives = presetObjectives("cofolding", services);
+    expect(formProblems(form({ objectives: objectives.slice(1) })).join(" ")).toMatch(/runs after "Boltz affinity"/);
+    expect(formProblems(form({ objectives: [objectives[2], { ...objectives[2] }] })).join(" ")).toMatch(/unique: QED/);
+    expect(formProblems(form({ objectives: [{ ...objectives[2], weight: 0 }] })).join(" ")).toMatch(/weight above 0/);
+    expect(formProblems(form({ objectives: [nativeObjective("TanimotoSimilarity")] })).join(" ")).toMatch(/reference SMILES/);
+  });
+
+  it("builds a create_ttp argument without empty fields", () => {
+    const ttp = buildTtp(form({ description: " For the demo ", pdbId: "3mxf", sequence: `>x\n${SEQ.toLowerCase()}` }));
+    expect(ttp).toMatchObject({
+      id: "brd4-cofold",
+      name: "BRD4 cofold",
+      target: { protein_sequence: SEQ, pdb_id: "3MXF" },
+      scoring: { comment: "For the demo", aggregation: "geometric_mean" },
+    });
+    const [boltz, posebusters, qed] = (ttp.scoring as { objectives: Record<string, unknown>[] }).objectives;
+    expect(boltz).toEqual({
+      name: "Boltz affinity",
+      type: "external",
+      weight: 1,
+      service: "boltz",
+      service_url: "http://localhost:8091/score",
+      transform: { type: "reverse_sigmoid", low: -3, high: 1, k: 1 },
+      comment: "log10 IC50 in µM; lower binds tighter",
+    });
+    expect(posebusters.depends_on).toBe("Boltz affinity");
+    expect(qed).toEqual({ name: "QED", type: "native", weight: 0.6, component: "QED" });
+    expect(buildTtp(form({ sequence: "", objectives: [qed as never] })).target).toBeUndefined();
+  });
+
+  it("reads create_ttp's answer", () => {
+    expect(createdTtp(JSON.stringify({ status: "created", id: "x", name: "X", version: 1 }))).toEqual({ id: "x", name: "X" });
+    expect(createdTtp({ error: "Invalid TTP: boom" })).toEqual({ error: "Invalid TTP: boom" });
+    expect(createdTtp("Tool failed")).toEqual({ error: "Tool failed" });
+  });
+});
+

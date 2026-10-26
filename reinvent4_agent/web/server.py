@@ -20,6 +20,8 @@ Endpoints
 ``GET    /api/sessions/{id}/events``         every event of one, for export.
 ``POST   /api/tools/{name}``                 call one MCP tool without the LLM.
 ``GET    /api/jobs/{job_id}/files/{name}``   a results, log or config file of a job.
+``POST   /api/uploads?session=&name=``       store a file the user brought (raw body).
+``POST   /api/uploads/rcsb``                 fetch a PDB entry from RCSB into the same place.
 ``WS     /api/chat?session=&after=``         the conversation itself.
 
 Conversations are sessions owned by the gateway (see ``sessions.py``): a turn
@@ -36,6 +38,8 @@ import json
 import logging
 import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +47,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+from reinvent4_agent.web import artifacts as shared_files
 from reinvent4_agent.web.artifacts import extract_panels, parse_tool_result, resolve_artifact
 from reinvent4_agent.web.events import WebSocketEventHandler
 from reinvent4_agent.web.sessions import SessionManager, SessionStore, valid_session_id
@@ -59,6 +64,7 @@ _ARTIFACT_MEDIA_TYPES = {
     ".csv": "text/csv",
     ".json": "application/json",
     ".sdf": "chemical/x-mdl-sdfile",
+    ".mol": "chemical/x-mdl-molfile",
     ".smi": "text/plain",
     ".a3m": "text/plain",
 }
@@ -101,6 +107,64 @@ _JOB_ID = re.compile(r"^[0-9a-f]{6,32}$")
 #: Files of a job the browser may read.  Names, not patterns, except the
 #: numbered checkpoints and results REINVENT writes.
 _JOB_FILES = re.compile(r"^(reinvent\.log|config\.toml|job_metadata\.json|monitor_actions\.jsonl|[\w.-]+\.csv)$")
+
+#: Files the user may upload, by suffix, and how large they may be.  They
+#: land in ``<shared>/uploads/<session>/`` where the tools can read them.
+UPLOAD_SUFFIXES = frozenset({".pdb", ".cif", ".mmcif", ".ent", ".sdf", ".mol", ".smi", ".csv"})
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_UPLOAD_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_PDB_ID = re.compile(r"^[0-9][A-Za-z0-9]{3}$")
+RCSB_DOWNLOAD_URL = "https://files.rcsb.org/download/{id}.cif"
+RCSB_TIMEOUT_S = 30
+
+#: Reasoning efforts a user message may ask for.
+EFFORTS = frozenset({"low", "medium", "high"})
+
+
+def upload_name(name: str | None) -> str | None:
+    """A safe file name for an upload, or None if it cannot be one.
+
+    Only the last path component is kept, so a name never points elsewhere,
+    and only letters, digits, dots, dashes and underscores survive.
+    """
+    if not name:
+        return None
+    base = re.split(r"[\\/]", name)[-1]
+    clean = _UPLOAD_NAME_CHARS.sub("_", base)[-120:].lstrip("._")
+    if not clean or Path(clean).suffix.lower() not in UPLOAD_SUFFIXES:
+        return None
+    return clean
+
+
+def _upload_session(session: Any) -> str:
+    if isinstance(session, str) and (session == "new" or valid_session_id(session)):
+        return session
+    raise HTTPException(status_code=422, detail="Unknown session")
+
+
+def _store_upload(session: str, name: str, data: bytes) -> dict[str, Any]:
+    directory = shared_files.SHARED_ROOT / "uploads" / session
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / name
+    tmp = target.with_name(f".{name}.part")
+    tmp.write_bytes(data)
+    tmp.replace(target)
+    return {
+        "path": target.as_posix(),
+        "url": f"/api/artifacts/uploads/{session}/{name}",
+        "name": name,
+        "size": len(data),
+    }
+
+
+def _download_rcsb(pdb_id: str) -> bytes:
+    """The mmCIF of one PDB entry; blocking, so run it in a thread."""
+    url = RCSB_DOWNLOAD_URL.format(id=pdb_id)
+    with urllib.request.urlopen(url, timeout=RCSB_TIMEOUT_S) as response:  # noqa: S310 - fixed https URL
+        data = response.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError("The entry is larger than the upload limit")
+    return data
 
 
 def _env_flag(name: str) -> bool:
@@ -426,6 +490,46 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         media_type = _ARTIFACT_MEDIA_TYPES.get(path.suffix.lower(), "text/plain")
         return FileResponse(path, media_type=media_type, filename=name)
 
+    # -- files the user brings ------------------------------------------------
+
+    @app.post("/api/uploads")
+    async def upload(request: Request) -> dict[str, Any]:
+        session_id = _upload_session(request.query_params.get("session"))
+        name = upload_name(request.query_params.get("name"))
+        if name is None:
+            allowed = ", ".join(sorted(UPLOAD_SUFFIXES))
+            raise HTTPException(status_code=422, detail=f"Only these files can be uploaded: {allowed}")
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="The file is larger than 20 MB")
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="The file is larger than 20 MB")
+        if not data:
+            raise HTTPException(status_code=422, detail="The file is empty")
+        return _store_upload(session_id, name, bytes(data))
+
+    @app.post("/api/uploads/rcsb")
+    async def upload_from_rcsb(request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        session_id = _upload_session(body.get("session"))
+        pdb_id = body.get("id")
+        if not isinstance(pdb_id, str) or not _PDB_ID.match(pdb_id.strip()):
+            raise HTTPException(status_code=422, detail="A PDB id is four characters, e.g. 5UF0")
+        pdb_id = pdb_id.strip().upper()
+        try:
+            data = await asyncio.to_thread(_download_rcsb, pdb_id)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise HTTPException(status_code=404, detail=f"RCSB has no entry {pdb_id}") from exc
+            raise HTTPException(status_code=502, detail=f"RCSB answered {exc.code}") from exc
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not fetch %s from RCSB: %s", pdb_id, exc)
+            raise HTTPException(status_code=502, detail=f"Could not fetch {pdb_id} from RCSB: {exc}") from exc
+        return _store_upload(session_id, f"{pdb_id}.cif", data)
+
     @app.websocket("/api/chat")
     async def chat(websocket: WebSocket) -> None:
         if not token_ok(websocket.headers.get(TOKEN_HEADER), access_token):
@@ -554,8 +658,12 @@ async def _receive_loop(websocket: WebSocket, live: Any) -> None:
             await websocket.send_json({"type": "notice", "message": f"Unknown message type: {kind!r}"})
             continue
 
+        effort = message.get("effort")
+        if effort is not None and (not isinstance(effort, str) or effort not in EFFORTS):
+            await websocket.send_json({"type": "notice", "message": f"Unknown effort: {effort!r}"})
+            continue
         content = (message.get("content") or "").strip()
-        if content and not live.start_turn(content):
+        if content and not live.start_turn(content, effort=effort):
             await websocket.send_json(
                 {"type": "notice", "message": "The agent is still working on the previous request."}
             )

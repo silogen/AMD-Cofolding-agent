@@ -3,8 +3,10 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import type { Theme } from "../../hooks/useTheme";
-import { callTool, jobFileUrl } from "../../lib/api";
+import { callTool, download, jobFileUrl } from "../../lib/api";
+import { candidatesSdf, candidatesSheet, fileName } from "../../lib/csv";
 import { duration } from "../../lib/format";
+import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
   canResume,
   convergenceTone,
@@ -21,6 +23,7 @@ import {
   pct,
   progress,
   remainingSteps,
+  resultsFile,
   resumeArguments,
   resumePrompt,
   reviewPrompt,
@@ -38,6 +41,7 @@ import {
   type JobSummary,
   type Tone,
 } from "../../lib/jobs";
+import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { Badge } from "./Badge";
 import { TrajectoryChart } from "./TrajectoryChart";
@@ -155,6 +159,29 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     setSelectedId(id);
     setConfirm(null);
     setNotice(null);
+  }
+
+  async function saveFile(jobId: string, name: string, mime: string) {
+    try {
+      const response = await fetch(jobFileUrl(jobId, name));
+      if (!response.ok) {
+        setNotice({ tone: "warn", text: response.status === 404 ? `${name} does not exist for job ${jobId} (yet).` : `Could not download ${name}: HTTP ${response.status}.` });
+        return;
+      }
+      download(`${jobId}-${name}`, await response.text(), mime);
+    } catch (error) {
+      setNotice({ tone: "bad", text: `Could not download ${name}: ${errorText(error)}` });
+    }
+  }
+
+  async function saveSdf(jobId: string, list: Candidate[]) {
+    try {
+      const rdkit = await loadRDKit();
+      const sdf = candidatesSdf(list, (smiles) => withMol(rdkit, smiles, (mol) => mol.get_molblock()));
+      download(fileName(`${jobId} top candidates`, "sdf"), sdf, "chemical/x-mdl-sdfile");
+    } catch (error) {
+      setNotice({ tone: "bad", text: `Could not write the SD file: ${errorText(error)}` });
+    }
   }
 
   async function stop(target: JobSummary) {
@@ -281,6 +308,17 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
               {job.id} · {typeLabel(job.type)} · {job.model ?? "default model"}
               {runtime !== null && ` · ran ${duration(runtime)}`}
             </p>
+            <div className="-ml-1.5 mt-1 flex flex-wrap items-center gap-0.5">
+              {[
+                { name: resultsFile(job), label: "Results CSV", mime: "text/csv", hint: "Every molecule REINVENT scored, step by step" },
+                { name: "config.toml", label: "config.toml", mime: "text/plain", hint: "The REINVENT configuration the run used" },
+                { name: "reinvent.log", label: "reinvent.log", mime: "text/plain", hint: "REINVENT's log" },
+              ].map((file) => (
+                <TextButton key={file.name} title={`${file.hint} (${file.name})`} onClick={() => void saveFile(job.id, file.name, file.mime)}>
+                  <DownloadIcon /> {file.label}
+                </TextButton>
+              ))}
+            </div>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
             {job.state === "running" && job.type === "optimization" && (
@@ -423,7 +461,19 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
         )}
 
         {hasResults && (
-          <Card title={`Top candidates${top?.value.length ? ` · ${top.value.length}` : ""}`}>
+          <Card
+            title={`Top candidates${top?.value.length ? ` · ${top.value.length}` : ""}`}
+            actions={
+              top && top.value.length > 0 ? (
+                <>
+                  <ExportButtons name={`${job.id} top candidates`} sheet={() => candidatesSheet(top.value)} scope={`the top ${top.value.length} candidates`} />
+                  <TextButton title="Download the top candidates as an SD file with their scores" onClick={() => void saveSdf(job.id, top.value)}>
+                    <DownloadIcon /> SDF
+                  </TextButton>
+                </>
+              ) : null
+            }
+          >
             {top?.error ? (
               <p className="text-faint">{top.error}</p>
             ) : !top ? (
@@ -490,10 +540,13 @@ function Centered({ children }: { children: ReactNode }) {
   return <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-xs">{children}</div>;
 }
 
-function Card({ title, children, inGrid }: { title: string; children: ReactNode; inGrid?: boolean }) {
+function Card({ title, children, inGrid, actions }: { title: string; children: ReactNode; inGrid?: boolean; actions?: ReactNode }) {
   return (
     <section className={`bg-raised border-subtle shadow-card rounded-xl border px-3 py-2.5 ${inGrid ? "" : "mt-3"}`}>
-      <h3 className="text-faint mb-2 text-[10px] font-semibold tracking-wider uppercase">{title}</h3>
+      <div className="mb-2 flex items-center gap-2">
+        <h3 className="text-faint text-[10px] font-semibold tracking-wider uppercase">{title}</h3>
+        {actions && <div className="-my-1 ml-auto flex items-center gap-0.5">{actions}</div>}
+      </div>
       {children}
     </section>
   );

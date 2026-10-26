@@ -11,13 +11,17 @@ import {
   DOCK_DEFAULT_WIDTH,
   DOCK_MAX_FRACTION,
   DOCK_MIN_WIDTH,
+  DOCK_TABS,
   clampWidth,
   closeTab,
+  dockTabOf,
   loadTabs,
   loadWidth,
   openTab,
   saveTabs,
   saveWidth,
+  type DockTab,
+  type DockView,
 } from "../../lib/dock";
 import { endpointLabel, formatValue, serviceName } from "../../lib/properties";
 import { sendToViewer } from "../../lib/viewerBus";
@@ -36,17 +40,8 @@ import { TtpPanel } from "../TtpPanel/TtpPanel";
 import { TargetCard } from "../TargetCard/TargetCard";
 import { AssetsPanel } from "../AssetsPanel/AssetsPanel";
 
-export type WorkbenchTab =
-  | "structure"
-  | "candidates"
-  | "molecules"
-  | "properties"
-  | "jobs"
-  | "ttp"
-  | "target"
-  | "assets"
-  | "tables"
-  | "activity";
+/** A tab, or a view inside one: "candidates" and "properties" open in Molecules, "activity" in Jobs. */
+export type WorkbenchTab = DockView;
 export type WorkbenchLayout = "sidebar" | "sheet";
 
 interface Props {
@@ -67,19 +62,25 @@ interface Props {
   openSeq?: number;
 }
 
-const TABS: { id: WorkbenchTab; label: string; colour: string }[] = [
-  { id: "structure", label: "Structure", colour: "var(--color-structure)" },
-  { id: "candidates", label: "Top candidates", colour: "var(--color-molecule)" },
-  { id: "molecules", label: "Molecules", colour: "var(--color-molecule)" },
-  { id: "properties", label: "Properties", colour: "var(--color-table)" },
-  { id: "jobs", label: "Jobs", colour: "var(--color-structure)" },
-  { id: "ttp", label: "TTP", colour: "var(--color-table)" },
-  { id: "target", label: "Target", colour: "var(--color-structure)" },
-  { id: "assets", label: "Assets", colour: "var(--text-faint)" },
-  { id: "tables", label: "Tables", colour: "var(--color-table)" },
-  { id: "activity", label: "Activity", colour: "var(--color-accent)" },
-];
-const TAB_IDS = TABS.map((entry) => entry.id);
+const LABEL: Record<DockTab, string> = {
+  structure: "Structure",
+  molecules: "Molecules",
+  tables: "Tables",
+  jobs: "Jobs",
+  target: "Target",
+  ttp: "TTP",
+  assets: "Assets",
+};
+
+const MOLECULE_VIEWS = [
+  { id: "candidates", label: "Candidates" },
+  { id: "molecules", label: "All" },
+  { id: "properties", label: "Properties" },
+] as const;
+const JOB_VIEWS = [
+  { id: "jobs", label: "Jobs" },
+  { id: "activity", label: "Activity" },
+] as const;
 
 /**
  * Everything the conversation produced, in one place: the complexes, the
@@ -118,30 +119,34 @@ export function Workbench(props: Props) {
     activity: artifacts.steps.length,
   };
 
-  const labelOf = (id: WorkbenchTab) =>
-    id === "structure" && props.activeStructure ? structureTitle(props.activeStructure) : TABS.find((entry) => entry.id === id)!.label;
+  const labelOf = (id: DockTab) => (id === "structure" && props.activeStructure ? structureTitle(props.activeStructure) : LABEL[id]);
+  const current = dockTabOf(tab);
 
   // Open tabs, editor-style. Synced from the `tab` prop during render (no effect).
-  const [openIds, setOpenIds] = useState<WorkbenchTab[]>(() => openTab(loadTabs(sessionId, TAB_IDS) ?? [], tab));
+  const [openIds, setOpenIds] = useState<DockTab[]>(() => openTab(loadTabs(sessionId, DOCK_TABS) ?? [], current));
+  /** The view each merged tab showed last, so going back to it lands where the user left. */
+  const [lastView, setLastView] = useState<Partial<Record<DockTab, WorkbenchTab>>>(() => ({ [current]: tab }));
   const [seen, setSeen] = useState({ sessionId, tab, openSeq });
   if (seen.sessionId !== sessionId) {
     setSeen({ sessionId, tab, openSeq });
-    setOpenIds(openTab(loadTabs(sessionId, TAB_IDS) ?? [], tab));
+    setOpenIds(openTab(loadTabs(sessionId, DOCK_TABS) ?? [], current));
   } else if (seen.tab !== tab || seen.openSeq !== openSeq) {
     setSeen({ sessionId, tab, openSeq });
-    setOpenIds((current) => openTab(current, tab));
+    setOpenIds((ids) => openTab(ids, current));
+    setLastView((views) => ({ ...views, [current]: tab }));
   }
   useEffect(() => saveTabs(sessionId, openIds), [sessionId, openIds]);
 
-  const active = openIds.includes(tab) ? tab : null;
-  const close = (id: WorkbenchTab) => {
+  const viewOf = (id: DockTab): WorkbenchTab => lastView[id] ?? (id === "molecules" && candidateCount > 0 ? "candidates" : id);
+  const active = openIds.includes(current) ? current : null;
+  const close = (id: DockTab) => {
     const next = closeTab(openIds, id, active);
     setOpenIds(next.tabs);
-    if (next.active && next.active !== tab) onTabChange(next.active);
+    if (next.active && next.active !== current) onTabChange(viewOf(next.active));
   };
-  const open = (id: WorkbenchTab) => {
-    setOpenIds((current) => openTab(current, id));
-    onTabChange(id);
+  const open = (id: DockTab) => {
+    setOpenIds((ids) => openTab(ids, id));
+    onTabChange(viewOf(id));
   };
 
   const [menu, setMenu] = useState(false);
@@ -191,11 +196,10 @@ export function Workbench(props: Props) {
         <div role="tablist" aria-label="Workbench" className="flex min-w-0 flex-1 overflow-x-auto">
           {openIds.map((id) => {
             const selected = id === active;
-            const colour = TABS.find((entry) => entry.id === id)!.colour;
             return (
               <div
                 key={id}
-                className={`border-subtle group flex shrink-0 items-center border-r border-b-2 ${
+                className={`group flex shrink-0 items-center border-b-2 ${
                   selected ? "bg-raised text-body" : "text-muted hover:text-body border-b-transparent"
                 }`}
                 style={selected ? { borderBottomColor: "var(--color-accent)" } : undefined}
@@ -204,20 +208,18 @@ export function Workbench(props: Props) {
                   type="button"
                   role="tab"
                   aria-selected={selected}
-                  onClick={() => onTabChange(id)}
-                  className="flex max-w-56 cursor-pointer items-center gap-1.5 py-2 pr-1 pl-3 text-xs font-medium whitespace-nowrap"
+                  onClick={() => onTabChange(viewOf(id))}
+                  className="flex max-w-56 cursor-pointer items-center py-2 pr-1 pl-3.5 text-xs whitespace-nowrap"
                 >
-                  <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} />
                   <span className="truncate">{labelOf(id)}</span>
-                  {counts[id] > 0 && <span className="bg-inset text-faint rounded-full px-1.5 text-[10px]">{counts[id]}</span>}
                 </button>
                 <button
                   type="button"
                   onClick={() => close(id)}
                   aria-label={`Close ${labelOf(id)}`}
                   title="Close tab"
-                  className={`hover:bg-inset mr-1.5 grid size-5 cursor-pointer place-items-center rounded text-sm leading-none ${
-                    selected ? "" : "opacity-60 group-hover:opacity-100"
+                  className={`text-faint hover:text-body hover:bg-inset mr-1.5 grid size-5 cursor-pointer place-items-center rounded text-sm leading-none touch:opacity-100 ${
+                    selected ? "" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                   }`}
                 >
                   ×
@@ -241,22 +243,22 @@ export function Workbench(props: Props) {
           {menu && (
             <>
               <button type="button" aria-label="Close menu" tabIndex={-1} className="fixed inset-0 z-30 cursor-default" onClick={() => setMenu(false)} />
-              <ul role="menu" className="bg-raised border-subtle absolute top-full right-0 z-40 mt-1 w-52 rounded-lg border py-1 shadow-lg">
-                {TABS.map((entry) => (
-                  <li key={entry.id} role="none">
+              <ul role="menu" className="bg-raised border-subtle shadow-card absolute top-full right-0 z-40 mt-1 w-48 rounded-lg border py-1">
+                {DOCK_TABS.map((id) => (
+                  <li key={id} role="none">
                     <button
                       type="button"
                       role="menuitem"
                       onClick={() => {
                         setMenu(false);
-                        open(entry.id);
+                        open(id);
                       }}
-                      className="hover:bg-inset flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs"
+                      className={`hover:bg-sunken flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs ${
+                        openIds.includes(id) ? "text-body" : "text-muted"
+                      }`}
                     >
-                      <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: entry.colour }} />
-                      <span className="flex-1">{entry.label}</span>
-                      {openIds.includes(entry.id) && <span className="text-faint text-[10px]">open</span>}
-                      {counts[entry.id] > 0 && <span className="bg-inset text-faint rounded-full px-1.5 text-[10px]">{counts[entry.id]}</span>}
+                      <span className="flex-1">{LABEL[id]}</span>
+                      {counts[id] > 0 && <span className="text-faint text-[11px] tabular-nums">{counts[id]}</span>}
                     </button>
                   </li>
                 ))}
@@ -290,17 +292,27 @@ export function Workbench(props: Props) {
       <div className="flex min-h-0 flex-1 flex-col">
         {active === null && <DockEmpty />}
         {active === "structure" && <StructureTab {...props} />}
-        {active === "candidates" && <CandidatesTab {...props} />}
-        {active === "molecules" && <MoleculesTab {...props} />}
-        {active === "properties" && <PropertiesTab {...props} />}
+        {active === "molecules" && (
+          <>
+            <ViewSwitch label="Molecules" views={MOLECULE_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
+            {tab === "candidates" && <CandidatesTab {...props} />}
+            {tab === "molecules" && <MoleculesTab {...props} />}
+            {tab === "properties" && <PropertiesTab {...props} />}
+          </>
+        )}
         {active === "jobs" && (
-          <div className="h-full min-h-0">
-            <JobsPanel sessionId={props.sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={(smiles) => openMolecule(props, smiles)} />
-          </div>
+          <>
+            <ViewSwitch label="Jobs" views={JOB_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
+            {tab === "jobs" && (
+              <div className="min-h-0 flex-1">
+                <JobsPanel sessionId={props.sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={(smiles) => openMolecule(props, smiles)} />
+              </div>
+            )}
+            {tab === "activity" && <ActivityTab {...props} />}
+          </>
         )}
         {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
         {active === "tables" && <TablesTab {...props} />}
-        {active === "activity" && <ActivityTab {...props} />}
       </div>
     </aside>
   );
@@ -314,7 +326,7 @@ function openMolecule({ onSelectSmiles, onTabChange }: Props, smiles: string) {
 function CandidatesTab(props: Props) {
   const { artifacts, theme, onSelectStructure, onTabChange, onAsk } = props;
   return (
-    <div className="h-full min-h-0">
+    <div className="min-h-0 flex-1">
       <CandidatesPanel
         artifacts={artifacts}
         theme={theme}
@@ -346,7 +358,7 @@ function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
   return <AssetsPanel events={events} onOpenStructure={(path) => sendToViewer({ path, source: "assets" })} onInsert={onAsk} />;
 }
 
-function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, onAsk }: Props) {
+function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, onAsk, sessionId }: Props) {
   const list = artifacts.structures;
   const sequence = useMemo(() => extractTargetFacts(toolEvents(artifacts.steps)).sequence, [artifacts.steps]);
   if (!activeStructure) {
@@ -359,6 +371,7 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
       onSelect={onSelectStructure}
       interactions={artifacts.interactions}
       targetSequence={sequence}
+      sessionId={sessionId}
       theme={theme}
       onAsk={onAsk}
     />
@@ -616,34 +629,35 @@ function ActivityTab({ artifacts }: Props) {
 
   return (
     <>
-      <div className="border-subtle text-muted flex shrink-0 items-center gap-3 border-b px-3 py-2 text-[11px]">
+      <div className="text-faint flex shrink-0 items-center gap-3 px-3 py-2 text-[11px]">
         <span>
           {artifacts.steps.length} calls · {duration(total)} in tools
         </span>
-        <div role="group" aria-label="Filter" className="ml-auto flex gap-1">
-          {(["all", "failed"] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              aria-pressed={filter === value}
-              onClick={() => setFilter(value)}
-              className="cursor-pointer rounded-md px-2 py-0.5 font-medium"
-              style={filter === value ? { background: "var(--color-accent)", color: "white" } : { background: "var(--surface-inset)" }}
-            >
-              {value === "all" ? "All" : `Failed (${failed})`}
-            </button>
-          ))}
-        </div>
+        {failed > 0 && (
+          <div role="group" aria-label="Filter" className="ml-auto flex gap-0.5">
+            {(["all", "failed"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={filter === value}
+                onClick={() => setFilter(value)}
+                className={`cursor-pointer rounded-md px-2 py-0.5 ${filter === value ? "bg-inset text-body" : "hover:text-body"}`}
+              >
+                {value === "all" ? "All" : `Failed ${failed}`}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-      <ol className="min-h-0 flex-1 overflow-y-auto">
+      <ol className="border-subtle min-h-0 flex-1 overflow-y-auto border-t">
         {steps.map((step) => {
           const state = !step.result ? "running" : step.result.isError ? "failed" : "ok";
           return (
             <li key={step.id} className="border-subtle flex items-center gap-2 border-b px-3 py-1.5 text-[11px]">
               <span
                 aria-label={state}
-                className={`size-2 shrink-0 rounded-full ${state === "running" ? "animate-pulse" : ""}`}
-                style={{ background: state === "ok" ? "var(--color-ok)" : "var(--color-accent)" }}
+                className={`size-1.5 shrink-0 rounded-full ${state === "running" ? "animate-pulse" : ""}`}
+                style={{ background: state === "ok" ? "var(--border-strong)" : state === "failed" ? "var(--color-accent)" : "var(--color-warn)" }}
               />
               <span className="text-faint shrink-0 font-mono">{clock(step.at)}</span>
               <span className="shrink-0 font-mono font-semibold">{step.name}</span>
@@ -661,22 +675,53 @@ function ActivityTab({ artifacts }: Props) {
   );
 }
 
+/** The quiet switch between the views a merged tab holds. */
+function ViewSwitch({
+  label,
+  views,
+  value,
+  counts,
+  onChange,
+}: {
+  label: string;
+  views: readonly { id: WorkbenchTab; label: string }[];
+  value: WorkbenchTab;
+  counts: Record<WorkbenchTab, number>;
+  onChange: (view: WorkbenchTab) => void;
+}) {
+  return (
+    <div role="group" aria-label={label} className="border-subtle flex shrink-0 items-center gap-0.5 border-b px-2 py-1.5">
+      {views.map((view) => {
+        const selected = view.id === value;
+        return (
+          <button
+            key={view.id}
+            type="button"
+            aria-pressed={selected}
+            onClick={() => onChange(view.id)}
+            className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1 text-xs touch:min-h-11 ${
+              selected ? "bg-inset text-body" : "text-muted hover:text-body"
+            }`}
+          >
+            {view.label}
+            {counts[view.id] > 0 && <span className="text-faint text-[11px] tabular-nums">{counts[view.id]}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function DockEmpty() {
   return (
-    <div className="grid flex-1 place-items-center px-8 text-center">
-      <div>
-        <div aria-hidden="true" style={{ fontSize: 34, opacity: 0.35 }}>
-          ⬡
-        </div>
-        <h3 className="mt-1 text-sm font-semibold">Workbench</h3>
-        <p className="text-muted mx-auto mt-1 max-w-72 text-xs">
-          Structures, candidate tables and job monitors open here. Click any result chip in the conversation, or use + to open a panel.
-        </p>
-      </div>
+    <div className="grid flex-1 place-items-center px-10 text-center">
+      <p className="text-faint max-w-72 text-xs leading-relaxed">
+        Structures, molecules and jobs open here. Click a result in the conversation, or use + to open a panel.
+      </p>
     </div>
   );
 }
 
 function Empty({ children }: { children: ReactNode }) {
-  return <p className="text-muted flex-1 px-6 py-10 text-center text-xs">{children}</p>;
+  return <p className="text-faint flex-1 px-8 py-12 text-center text-xs leading-relaxed">{children}</p>;
 }

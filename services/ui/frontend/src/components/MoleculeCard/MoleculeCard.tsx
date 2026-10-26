@@ -3,6 +3,7 @@
 
 import type { MoleculePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
+import { openSketcher } from "../../lib/sketcherBus";
 import { CopyButton } from "../CopyButton/CopyButton";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 
@@ -46,6 +47,14 @@ export function MoleculeCard({ panel, theme, onOpen }: Props) {
         <code className="text-muted min-w-0 flex-1 truncate font-mono text-[11px]" title={panel.smiles}>
           {panel.smiles}
         </code>
+        <button
+          type="button"
+          onClick={() => openSketcher(panel.smiles)}
+          title="Edit in the sketcher; Use puts the result in the message"
+          className="text-muted hover:text-body hover:bg-inset shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] transition-colors touch:min-h-11 touch:px-3"
+        >
+          Edit in sketcher
+        </button>
         <CopyButton value={panel.smiles} label="Copy SMILES" />
       </div>
     </figure>

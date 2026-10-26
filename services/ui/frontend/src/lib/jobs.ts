@@ -271,6 +271,15 @@ export function parseCandidates(result: unknown): Candidate[] {
     .filter((c): c is Candidate => c !== null);
 }
 
+/**
+ * The job's results CSV as a file name the gateway serves
+ * (/api/jobs/<id>/files/<name>); REINVENT writes results_1.csv for a single stage.
+ */
+export function resultsFile(job: JobSummary): string {
+  const name = job.csvPath?.split(/[\\/]/).pop() ?? "";
+  return /^[\w.-]+\.csv$/.test(name) ? name : "results_1.csv";
+}
+
 /** Whether a job can still change, so the panel keeps polling. */
 export const isActive = (state: JobState) => state === "running" || state === "queued";
 

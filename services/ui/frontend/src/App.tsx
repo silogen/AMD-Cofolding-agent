@@ -11,7 +11,7 @@ import { Transcript } from "./components/Transcript/Transcript";
 import { Composer, type ComposerHandle } from "./components/Composer/Composer";
 import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
 import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
-import type { SessionSummary, StructurePanel } from "./types/api";
+import type { Effort, SessionSummary, StructurePanel } from "./types/api";
 import { collectArtifacts, runOf, sameFile, structureTitle } from "./lib/artifacts";
 import { availableCommands, VIEW_PREFIX } from "./lib/commands";
 import { onOpenRequest, sendToViewer } from "./lib/viewerBus";
@@ -142,8 +142,8 @@ export default function App() {
   /** "/view …" runs on the viewer, here; everything else goes to the agent. */
   const { send: sendToAgent } = chat;
   const send = useCallback(
-    (text: string) => {
-      if (!text.toLowerCase().startsWith(VIEW_PREFIX)) return sendToAgent(text);
+    (text: string, effort?: Effort) => {
+      if (!text.toLowerCase().startsWith(VIEW_PREFIX)) return sendToAgent(text, effort);
       const command = text.slice(VIEW_PREFIX.length).trim();
       const action = parseViewerCommand(command || "help");
       if (!action) {
@@ -211,12 +211,14 @@ export default function App() {
           ]
         : []),
       { id: "tab-structure", group: "Workbench", label: "Show the structure", run: () => showWorkbench("structure") },
-      { id: "tab-candidates", group: "Workbench", label: "Show candidates", run: () => showWorkbench("candidates") },
-      { id: "tab-molecules", group: "Workbench", label: "Show molecules", run: () => showWorkbench("molecules") },
-      { id: "tab-properties", group: "Workbench", label: "Show predicted properties", run: () => showWorkbench("properties") },
+      { id: "tab-candidates", group: "Workbench", label: "Show candidates", hint: "Molecules", run: () => showWorkbench("candidates") },
+      { id: "tab-molecules", group: "Workbench", label: "Show all molecules", hint: "Molecules", run: () => showWorkbench("molecules") },
+      { id: "tab-properties", group: "Workbench", label: "Show predicted properties", hint: "Molecules", run: () => showWorkbench("properties") },
+      { id: "tab-tables", group: "Workbench", label: "Show tables", run: () => showWorkbench("tables") },
       { id: "tab-jobs", group: "Workbench", label: "Show REINVENT jobs", hint: "/jobs", run: () => showWorkbench("jobs") },
-      { id: "tab-ttp", group: "Workbench", label: "Show the target product profile", run: () => showWorkbench("ttp") },
+      { id: "tab-activity", group: "Workbench", label: "Show tool activity", hint: "Jobs", run: () => showWorkbench("activity") },
       { id: "tab-target", group: "Workbench", label: "Show the target", run: () => showWorkbench("target") },
+      { id: "tab-ttp", group: "Workbench", label: "Show the target product profile", run: () => showWorkbench("ttp") },
       { id: "tab-assets", group: "Workbench", label: "Show shared assets", hint: "/shared", run: () => showWorkbench("assets") },
       ...artifacts.structures.map(({ item }) => ({
         id: `st-${item.path}`,
@@ -241,8 +243,6 @@ export default function App() {
             { id: "v-shot", group: "Viewer", label: "Save an image", hint: "/view screenshot", run: () => view({ kind: "screenshot" }) },
           ]
         : []),
-      { id: "tab-tables", group: "Workbench", label: "Show tables", run: () => showWorkbench("tables") },
-      { id: "tab-activity", group: "Workbench", label: "Show tool activity", run: () => showWorkbench("activity") },
       { id: "rail", group: "View", label: railOpen ? "Hide conversations" : "Show conversations", run: () => setRailOpen((v) => !v) },
       {
         id: "workbench",
@@ -366,6 +366,10 @@ export default function App() {
             busy={busy}
             connected={connected}
             tools={agent?.tools ?? []}
+            theme={theme}
+            sessionId={session?.id ?? null}
+            model={agent?.model ?? null}
+            defaultEffort={agent?.reasoningEffort ?? null}
           />
         </main>
 

@@ -17,11 +17,11 @@ const ICON: Record<CalloutTone, string> = { info: "ⓘ", warn: "⚠", bad: "⚠"
 export function Callout({ tone, title, children }: { tone: CalloutTone; title?: string | null; children: ReactNode }) {
   return (
     <div
-      className="bg-raised border-subtle my-3 flex items-start gap-2.5 rounded-md border border-l-2 px-3 py-2 text-[0.875rem]"
+      className="my-3 flex items-start gap-2 border-l-2 py-0.5 pl-3 text-[0.875rem]"
       style={{ borderLeftColor: COLOR[tone] }}
       role={tone === "warn" || tone === "bad" ? "note" : undefined}
     >
-      <span aria-hidden="true" className="leading-snug" style={{ color: COLOR[tone] }}>
+      <span aria-hidden="true" className="text-xs leading-snug" style={{ color: COLOR[tone] }}>
         {ICON[tone]}
       </span>
       <div className="callout-body min-w-0 flex-1 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">

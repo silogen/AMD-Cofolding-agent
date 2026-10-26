@@ -28,6 +28,8 @@ describe("parseViewerCommand", () => {
     ["download", { kind: "download" }],
     ["quality", { kind: "panel", tab: "quality" }],
     ["next", { kind: "structure", step: 1 }],
+    ["open 3mxf", { kind: "pdb", id: "3MXF" }],
+    ["load PDB 1abc", { kind: "pdb", id: "1ABC" }],
   ])("%s", (text, expected) => {
     expect(parseViewerCommand(text)).toEqual(expected);
   });
@@ -35,21 +37,21 @@ describe("parseViewerCommand", () => {
   it("reads residues in the forms chemists write", () => {
     expect(parseViewerCommand("focus ASN140")).toEqual({
       kind: "residues",
-      residues: [{ chain: null, resnum: 140 }],
+      residues: [{ chain: null, resnum: 140, resname: "ASN" }],
       mode: "focus",
     });
     expect(parseViewerCommand("highlight Asn 140 and A:92")).toEqual({
       kind: "residues",
       residues: [
-        { chain: null, resnum: 140 },
+        { chain: null, resnum: 140, resname: "ASN" },
         { chain: "A", resnum: 92 },
       ],
       mode: "highlight",
     });
     expect(parseViewerCommand("ASN140 LEU92.B")).toMatchObject({
       residues: [
-        { chain: null, resnum: 140 },
-        { chain: "B", resnum: 92 },
+        { chain: null, resnum: 140, resname: "ASN" },
+        { chain: "B", resnum: 92, resname: "LEU" },
       ],
     });
   });
@@ -61,8 +63,8 @@ describe("parseViewerCommand", () => {
 
   it("parses residue tokens", () => {
     expect(parseResidues("Tyr97, Pro82 and 140.A")).toEqual([
-      { chain: null, resnum: 97 },
-      { chain: null, resnum: 82 },
+      { chain: null, resnum: 97, resname: "TYR" },
+      { chain: null, resnum: 82, resname: "PRO" },
       { chain: "A", resnum: 140 },
     ]);
   });

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ from reinvent4_agent.web import server  # noqa: E402
 class FakeBackend:
     def __init__(self) -> None:
         self.history: list[dict] = []
+        self.reasoning_effort: str | None = None
 
     def export_history(self) -> list[dict]:
         return list(self.history)
@@ -221,6 +223,30 @@ def test_cancel_stops_the_running_turn(agents):
         assert agents[0].cancelled
 
 
+def test_a_message_sets_the_reasoning_effort_of_its_turn(agents):
+    with TestClient(server.create_app()) as client, client.websocket_connect("/api/chat") as ws:
+        receive_until(ws, "session")
+        ws.send_json({"type": "user_message", "content": "quick one", "effort": "high"})
+        assert receive_until(ws, "user_message")["effort"] == "high"
+        receive_until(ws, "assistant_message")
+        assert receive_until(ws, "status")["state"] == "idle"
+        assert agents[0].backend.reasoning_effort == "high"
+        ws.send_json({"type": "user_message", "content": "quick two"})
+        assert "effort" not in receive_until(ws, "user_message")
+        receive_until(ws, "assistant_message")
+        assert agents[0].backend.reasoning_effort == "high"
+
+
+@pytest.mark.parametrize("effort", ["max", "", 3, ["high"]])
+def test_an_unknown_effort_is_refused(agents, effort):
+    with TestClient(server.create_app()) as client, client.websocket_connect("/api/chat") as ws:
+        session_id = receive_until(ws, "session")["id"]
+        ws.send_json({"type": "user_message", "content": "quick one", "effort": effort})
+        assert "Unknown effort" in receive_until(ws, "notice")["message"]
+        assert client.get(f"/api/sessions/{session_id}/events").json()["events"] == []
+        assert agents[0].backend.reasoning_effort is None
+
+
 def test_a_second_question_during_a_turn_is_refused_to_that_browser_only(agents):
     with TestClient(server.create_app()) as client, client.websocket_connect("/api/chat") as ws:
         session_id = receive_until(ws, "session")["id"]
@@ -315,8 +341,8 @@ def test_a_panel_can_call_a_read_tool(tools):
 
 def test_tools_that_create_or_delete_are_left_to_the_agent(tools):
     with TestClient(server.create_app()) as client:
-        assert client.post("/api/tools/create_ttp", json={"arguments": {}}).status_code == 403
         assert client.post("/api/tools/delete_ttp", json={"arguments": {}}).status_code == 403
+        assert client.post("/api/tools/score_molecules", json={"arguments": {}}).status_code == 403
         assert tools == []
 
 
@@ -346,3 +372,134 @@ def test_job_files_are_served_by_name_only(agents, monkeypatch, tmp_path):
         assert client.get("/api/jobs/abc123/files/secret.txt").status_code == 404
         assert client.get("/api/jobs/abc123/files/..%2Fsecret.txt").status_code == 404
         assert client.get("/api/jobs/ABC/files/results_1.csv").status_code == 404
+
+
+# -- uploads ---------------------------------------------------------------
+
+PDB = b"ATOM      1  N   ALA A   1      11.104   6.134  -6.504  1.00  0.00           N\nEND\n"
+
+
+@pytest.fixture
+def shared(agents, monkeypatch, tmp_path):
+    root = tmp_path / "shared"
+    root.mkdir()
+    monkeypatch.setattr(server.shared_files, "SHARED_ROOT", root)
+    return root
+
+
+def test_an_uploaded_structure_is_stored_and_served(shared):
+    with TestClient(server.create_app()) as client:
+        response = client.post("/api/uploads?session=new&name=my%20pocket.pdb", content=PDB)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "my_pocket.pdb"
+        assert body["size"] == len(PDB)
+        assert body["path"] == (shared / "uploads" / "new" / "my_pocket.pdb").as_posix()
+        assert body["url"] == "/api/artifacts/uploads/new/my_pocket.pdb"
+        assert client.get(body["url"]).content == PDB
+
+
+def test_an_upload_goes_to_its_session_folder(shared):
+    session_id = "s-20260101-000000-abcdef"
+    with TestClient(server.create_app()) as client:
+        body = client.post(f"/api/uploads?session={session_id}&name=ligands.sdf", content=b"x\n$$$$\n").json()
+    assert (shared / "uploads" / session_id / "ligands.sdf").read_bytes() == b"x\n$$$$\n"
+    assert body["url"] == f"/api/artifacts/uploads/{session_id}/ligands.sdf"
+
+
+@pytest.mark.parametrize("name", ["../../etc/passwd.pdb", "..\\up.cif", "/abs/x.csv"])
+def test_an_upload_name_cannot_leave_the_folder(shared, name):
+    with TestClient(server.create_app()) as client:
+        body = client.post("/api/uploads", params={"session": "new", "name": name}, content=PDB).json()
+    stored = Path(body["path"])
+    assert stored.parent == shared / "uploads" / "new"
+    assert stored.is_file()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"session": "new", "name": "notes.txt"},
+        {"session": "new", "name": "script.pdb.exe"},
+        {"session": "new", "name": ".pdb"},
+        {"session": "new"},
+        {"session": "../x", "name": "a.pdb"},
+        {"name": "a.pdb"},
+    ],
+)
+def test_an_upload_needs_an_allowed_name_and_a_session(shared, params):
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/uploads", params=params, content=PDB).status_code == 422
+    assert not (shared / "uploads").exists()
+
+
+def test_an_empty_or_oversized_upload_is_refused(shared, monkeypatch):
+    monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 10)
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/uploads?session=new&name=a.pdb", content=b"").status_code == 422
+        assert client.post("/api/uploads?session=new&name=a.pdb", content=PDB).status_code == 413
+
+
+class FakeResponse:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def read(self, limit: int = -1) -> bytes:
+        return self.data if limit < 0 else self.data[:limit]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+@pytest.fixture
+def rcsb(monkeypatch):
+    requested: list[str] = []
+
+    def urlopen(url, timeout=None):
+        requested.append(url)
+        if "0XXX" in url:
+            raise server.urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        if "9BAD" in url:
+            raise server.urllib.error.URLError("no route to host")
+        return FakeResponse(b"data_5UF0\n#\n")
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", urlopen)
+    return requested
+
+
+def test_a_pdb_entry_is_fetched_from_rcsb(shared, rcsb):
+    with TestClient(server.create_app()) as client:
+        response = client.post("/api/uploads/rcsb", json={"id": "5uf0", "session": "new"})
+        assert response.status_code == 200
+        body = response.json()
+        assert rcsb == ["https://files.rcsb.org/download/5UF0.cif"]
+        assert body["name"] == "5UF0.cif"
+        assert body["url"] == "/api/artifacts/uploads/new/5UF0.cif"
+        assert client.get(body["url"]).content == b"data_5UF0\n#\n"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"id": "BRD4", "session": "new"},
+        {"id": "5uf", "session": "new"},
+        {"id": 5, "session": "new"},
+        {"id": "5UF0", "session": "x"},
+        {"id": "5UF0", "session": 1},
+    ],
+)
+def test_a_pdb_id_and_session_are_validated(shared, rcsb, body):
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/uploads/rcsb", json=body).status_code == 422
+    assert rcsb == []
+
+
+def test_rcsb_failures_are_reported(shared, rcsb):
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/uploads/rcsb", json={"id": "0XXX", "session": "new"}).status_code == 404
+        response = client.post("/api/uploads/rcsb", json={"id": "9BAD", "session": "new"})
+        assert response.status_code == 502
+        assert "9BAD" in response.json()["detail"]

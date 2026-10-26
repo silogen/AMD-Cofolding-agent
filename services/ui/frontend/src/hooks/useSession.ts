@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { AgentEvent, ClientMessage, ConnectionState, ConversationEvent, SessionSummary } from "../types/api";
+import type { AgentEvent, ClientMessage, ConnectionState, ConversationEvent, Effort, SessionSummary } from "../types/api";
 import { applyEvent, EMPTY_TRANSCRIPT, type Transcript } from "../lib/transcript";
 
 /** Reconnect delays in ms. The last value repeats for later attempts. */
@@ -36,7 +36,7 @@ interface SessionState {
   gatewayError: string | null;
   notices: Notice[];
   dismissNotice: (id: number) => void;
-  send: (text: string) => boolean;
+  send: (text: string, effort?: Effort) => boolean;
   cancel: () => void;
   reconnect: () => void;
 }
@@ -255,9 +255,9 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
   // No local echo: the gateway sends the user's message back as an event,
   // so every open tab shows it, in the order the gateway recorded it.
   const send = useCallback(
-    (text: string) => {
+    (text: string, effort?: Effort) => {
       const content = text.trim();
-      return content ? sendMessage({ type: "user_message", content }) : false;
+      return content ? sendMessage({ type: "user_message", content, ...(effort ? { effort } : {}) }) : false;
     },
     [sendMessage],
   );

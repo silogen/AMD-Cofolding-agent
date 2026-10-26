@@ -10,6 +10,21 @@ export const DOCK_DEFAULT_WIDTH = "clamp(520px, 56vw, calc(100vw - 680px))";
 const TABS_KEY = "cofold.dock.tabs";
 const WIDTH_KEY = "cofold.dock.width";
 
+/** The tabs the dock can open. */
+export type DockTab = "structure" | "molecules" | "tables" | "jobs" | "target" | "ttp" | "assets";
+/** What can be asked for: a tab, or a view inside one (e.g. "properties" is a view of the molecules tab). */
+export type DockView = DockTab | "candidates" | "properties" | "activity";
+
+export const DOCK_TABS: readonly DockTab[] = ["structure", "molecules", "tables", "jobs", "target", "ttp", "assets"];
+
+/** Views that used to be tabs of their own; saved tab lists still name them. */
+const MERGED: Partial<Record<DockView, DockTab>> = { candidates: "molecules", properties: "molecules", activity: "jobs" };
+
+/** The tab that shows `view`. */
+export function dockTabOf(view: DockView): DockTab {
+  return MERGED[view] ?? (view as DockTab);
+}
+
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
 
 function storage(): Storage | null {
@@ -41,7 +56,7 @@ function tabsKey(sessionId: string | null) {
   return `${TABS_KEY}:${sessionId ?? "new"}`;
 }
 
-/** The tabs saved for a session, keeping only ids in `allowed`. */
+/** The tabs saved for a session, keeping only ids in `allowed`; merged ids open the tab they became. */
 export function loadTabs<T extends string>(sessionId: string | null, allowed: readonly T[], store: Storage | null = storage()): T[] | null {
   const raw = store?.getItem(tabsKey(sessionId));
   if (!raw) return null;
@@ -49,7 +64,10 @@ export function loadTabs<T extends string>(sessionId: string | null, allowed: re
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return null;
     const seen = new Set<T>();
-    for (const value of parsed) if (allowed.includes(value as T)) seen.add(value as T);
+    for (const value of parsed) {
+      const id = (MERGED[value as DockView] ?? value) as T;
+      if (allowed.includes(id)) seen.add(id);
+    }
     return [...seen];
   } catch {
     return null;

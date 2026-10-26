@@ -30,6 +30,18 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
+    // The sketcher (Ketcher) is imported lazily, so the dev server would only
+    // discover its many CommonJS dependencies on first use and reload the
+    // page; pre-bundle them up front instead.
+    optimizeDeps: {
+      include: ["ketcher-react", "ketcher-standalone", "ketcher-core"],
+    },
+    // Ketcher was built for webpack 4, which shimmed these Node globals; its
+    // "util" polyfill reads NODE_DEBUG at import time.
+    define: {
+      global: "globalThis",
+      "process.env.NODE_DEBUG": "false",
+    },
     server: {
       proxy: {
         // ws: true also upgrades /api/chat, which is the chat WebSocket.

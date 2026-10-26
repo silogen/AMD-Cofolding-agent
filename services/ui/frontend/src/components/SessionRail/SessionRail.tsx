@@ -137,21 +137,7 @@ export function SessionRail({ sessions, activeId, error, agent, onSelect, onNew,
         ))}
       </div>
 
-      <footer className="border-subtle text-faint flex shrink-0 flex-col gap-0.5 border-t px-4 py-3 text-[10px]">
-        {agent ? (
-          <>
-            <span className="text-muted truncate font-mono text-[11px]" title={agent.model}>
-              {agent.model.split("/").pop()}
-            </span>
-            <span>
-              {agent.reasoningEffort ? `effort ${agent.reasoningEffort} · ` : ""}
-              <span title={agent.tools.join(", ")}>{agent.tools.length} MCP tools</span> · {agent.backend}
-            </span>
-          </>
-        ) : (
-          <span>Starting the agent…</span>
-        )}
-      </footer>
+      {!agent && <footer className="border-subtle text-faint shrink-0 border-t px-4 py-3 text-[10px]">Starting the agent…</footer>}
     </nav>
   );
 }

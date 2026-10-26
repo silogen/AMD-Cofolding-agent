@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { poseKey, poseSiblings, stepPose, structureKind } from "./poses";
+import { poseKey, posebustersCheck, poseSiblings, stepPose, structureKind, structureOption } from "./poses";
 
 const run = "predictions/out_7a/boltz_results_batch_7a/predictions";
 const paths = [
@@ -51,5 +51,24 @@ describe("structureKind", () => {
     expect(structureKind("prep/brd4/complex.pdb")).toBe("prepared");
     expect(structureKind("structures/brd4.pdb")).toBeNull();
     expect(structureKind("structures/brd4.pdb", true)).toBe("predicted");
+  });
+  it("trusts the tool over the path", () => {
+    expect(structureKind("uploads/x/entry.cif", false, "rcsb")).toBe("experimental");
+  });
+});
+
+describe("structureOption", () => {
+  it("names the run, and the pose after the first", () => {
+    expect(structureOption("JQ1", `${run}/mol_0/mol_0_model_0.pdb`, "7aa793db")).toBe("JQ1 · 7aa793db");
+    expect(structureOption("JQ1", `${run}/mol_0/mol_0_model_2.pdb`, "7aa793db")).toBe("JQ1 · 7aa793db · pose 3");
+    expect(structureOption("3MXF", "rcsb/3MXF.cif", null)).toBe("3MXF");
+  });
+});
+
+describe("posebustersCheck", () => {
+  it("explains known checks and humanises the rest", () => {
+    expect(posebustersCheck("sanitization")).toBe("Ligand chemistry is valid");
+    expect(posebustersCheck("All atoms connected")).toBe("All ligand atoms are connected");
+    expect(posebustersCheck("some_new_check")).toBe("Some new check");
   });
 });

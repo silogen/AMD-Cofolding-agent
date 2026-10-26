@@ -25,17 +25,17 @@ interface Props {
 export function StructureCard({ panel, theme, isOpen }: Props) {
   const verdict = gate(panel.metrics);
   const m = panel.metrics ?? {};
-  const affinity = verdict.status === "pass" ? affinityText(m) : null;
+  const affinity = affinityText(m);
   const facts: [string, string, boolean | null][] = verdict.checks
     .filter((check) => check.value !== "—")
     .map((check) => [check.label, check.value, check.ok]);
-  if (m.affinity !== undefined) facts.push(["Affinity", affinity ?? "withheld", verdict.status === "pass" ? true : null]);
+  if (affinity) facts.push(["Affinity", affinity, null]);
   if (m.binderProbability !== undefined) facts.push(["Binder p", m.binderProbability.toFixed(2), null]);
 
   const show = (action?: Parameters<typeof sendToViewer>[0]["action"]) => sendToViewer({ path: panel.path, action, source: "chat" });
 
   return (
-    <figure className="bg-raised border-subtle shadow-card m-0 overflow-hidden rounded-xl border">
+    <figure className="bg-raised border-subtle m-0 overflow-hidden rounded-xl border">
       <figcaption className="border-subtle flex items-center gap-2 border-b px-3 py-2">
         <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ background: "var(--color-structure)" }} />
         <span className="min-w-0 truncate text-xs font-semibold" title={panel.path}>
@@ -44,14 +44,11 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
         {runOf(panel.path) && <span className="text-faint shrink-0 font-mono text-[10px]">{runOf(panel.path)}</span>}
         {verdict.status !== "unknown" && (
           <span
-            className="ml-auto shrink-0 rounded-full border px-1.5 py-px text-[10px] font-semibold"
-            style={{
-              color: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-accent)",
-              borderColor: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-accent)",
-            }}
+            className="ml-auto shrink-0 text-[10px]"
+            style={{ color: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-warn)" }}
             title={verdict.reasons.join(" · ") || "Confidence > 0.6, ligand ipTM > 0.5, PoseBusters all pass"}
           >
-            gate {verdict.status}
+            {verdict.status === "pass" ? "✓ quality gate" : "below quality gate"}
           </span>
         )}
         <span className={`text-faint shrink-0 text-[10px] uppercase ${verdict.status === "unknown" ? "ml-auto" : ""}`}>{panel.format}</span>
@@ -69,19 +66,21 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
           <span className="bg-sunken text-faint grid h-20 w-28 shrink-0 place-items-center rounded-lg text-[10px]">{panel.format.toUpperCase()} file</span>
         )}
         {facts.length > 0 ? (
-          <dl className="grid min-w-0 flex-1 grid-cols-2 content-center gap-x-3 gap-y-0.5 text-[11px]">
-            {facts.map(([label, value, ok]) => (
-              <div key={label} className="min-w-0">
-                <dt className="text-faint truncate">{label}</dt>
-                <dd
-                  className="truncate font-mono tabular-nums"
-                  style={{ color: ok === false ? "var(--color-accent)" : undefined }}
-                >
-                  {value}
-                </dd>
-              </div>
-            ))}
-          </dl>
+          <div className="min-w-0 flex-1 self-center">
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+              {facts.map(([label, value, ok]) => (
+                <div key={label} className="min-w-0">
+                  <dt className="text-faint truncate">{label}</dt>
+                  <dd className="truncate font-mono tabular-nums" style={{ color: ok === false ? "var(--color-warn)" : undefined }}>
+                    {value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+            {verdict.status === "fail" && affinity && (
+              <p className="text-faint mt-1 text-[10px]">Pose below the quality gate; read the affinity with caution.</p>
+            )}
+          </div>
         ) : (
           <p className="text-muted self-center text-[11px]">No confidence values with this file. Open it to rotate it, find the pocket and read the contacts.</p>
         )}

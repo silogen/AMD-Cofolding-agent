@@ -12,6 +12,10 @@
   },
   "dependencies": {
     "@rdkit/rdkit": "^2025.3.4-1.0.0",
+    "events": "^3.3.0",
+    "ketcher-core": "3.18.0",
+    "ketcher-react": "3.18.0",
+    "ketcher-standalone": "3.18.0",
     "molstar": "^5.13.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",

@@ -494,6 +494,354 @@ export function saveDraft(sessionId: string, value: TtpDraft | null, storage: Ke
 }
 
 // ---------------------------------------------------------------------------
+// building a new TTP
+// ---------------------------------------------------------------------------
+
+/** A configured scoring service, from list_external_services. */
+export interface ServiceInfo {
+  name: string;
+  url: string;
+  status: string;
+  /** ADMET endpoints. */
+  endpoints: string[];
+  /** RetroDMTA endpoints by target. */
+  targets: Record<string, string[]>;
+}
+
+/** list_external_services, keyed by service name. */
+export function parseServices(value: unknown): Record<string, ServiceInfo> {
+  const parsed = parseResult(value);
+  if (!isRecord(parsed)) return {};
+  const services: Record<string, ServiceInfo> = {};
+  for (const [name, entry] of Object.entries(parsed)) {
+    if (!isRecord(entry) || typeof entry.url !== "string") continue;
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+    const targets: Record<string, string[]> = {};
+    if (isRecord(entry.targets_detail)) {
+      for (const [target, detail] of Object.entries(entry.targets_detail)) targets[target] = isRecord(detail) ? strings(detail.endpoints) : [];
+    } else {
+      for (const target of strings(entry.targets)) targets[target] = [];
+    }
+    services[name] = { name, url: entry.url, status: str(entry.status) ?? "unknown", endpoints: strings(entry.endpoints), targets };
+  }
+  return services;
+}
+
+/** Native REINVENT4 scorers a profile can use without extra settings, from list_scoring_components. */
+export function parseComponents(value: unknown): string[] {
+  const parsed = parseResult(value);
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter(isRecord)
+    .filter((c) => c.component_type === "scorer" && typeof c.class === "string" && !String(c.class).startsWith("Fragment"))
+    .filter((c) => !Array.isArray(c.parameters) || c.parameters.length === 0)
+    .map((c) => c.class as string)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+/** "BRD4 Cofolding (v2)" -> "brd4-cofolding-v2", a valid TTP id. */
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/, "");
+}
+
+export const TTP_ID = /^[a-z0-9][a-z0-9_-]*$/;
+const AMINO_ACIDS = /^[ACDEFGHIKLMNPQRSTVWY]+$/;
+
+/** A pasted sequence or FASTA record as bare residues. */
+export function normaliseSequence(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith(">"))
+    .join("")
+    .replace(/[\s\d*]/g, "")
+    .toUpperCase();
+}
+
+/** Why the server would reject a sequence (reinvent4_mcp/ttp/schema.py TargetConfig), or null. */
+export function sequenceProblem(sequence: string): string | null {
+  if (!sequence) return null;
+  if (sequence.length < 10) return "The protein sequence needs at least 10 residues.";
+  if (!AMINO_ACIDS.test(sequence)) {
+    const bad = [...new Set(sequence.replace(/[ACDEFGHIKLMNPQRSTVWY]/g, ""))].sort().join(", ");
+    return `The sequence has non-standard residues: ${bad}.`;
+  }
+  return null;
+}
+
+/** Transforms that suit each objective out of the box; none for scores already in 0-1. */
+const NATIVE_TRANSFORMS: Record<string, Transform | null> = {
+  QED: null,
+  Csp3: null,
+  MolecularWeight: { type: "double_sigmoid", low: 200, high: 500, coef_div: 500, coef_si: 20, coef_se: 20 },
+  SlogP: { type: "double_sigmoid", low: 1, high: 5, coef_div: 5, coef_si: 10, coef_se: 10 },
+  TPSA: { type: "double_sigmoid", low: 20, high: 130, coef_div: 130, coef_si: 20, coef_se: 20 },
+  HBondDonors: { type: "reverse_sigmoid", low: 0, high: 6, k: 0.5 },
+  HBondAcceptors: { type: "reverse_sigmoid", low: 0, high: 12, k: 0.5 },
+  NumRotBond: { type: "reverse_sigmoid", low: 0, high: 10, k: 0.5 },
+  NumAromaticRings: { type: "reverse_sigmoid", low: 0, high: 5, k: 0.5 },
+  NumHeavyAtoms: { type: "double_sigmoid", low: 15, high: 40, coef_div: 40, coef_si: 20, coef_se: 20 },
+  SAScore: { type: "reverse_sigmoid", low: 1, high: 4, k: 0.4 },
+  TanimotoSimilarity: { type: "sigmoid", low: 0.2, high: 0.6, k: 0.5 },
+};
+
+const ADMET_TRANSFORMS: Record<string, Transform> = {
+  logp: { type: "double_sigmoid", low: 1, high: 3, coef_div: 3, coef_si: 10, coef_se: 10 },
+  logd: { type: "double_sigmoid", low: 1, high: 3, coef_div: 3, coef_si: 10, coef_se: 10 },
+  aqueous_solubility: { type: "sigmoid", low: -6, high: -3, k: 0.5 },
+  kinetic_solubility: { type: "sigmoid", low: -6, high: -3, k: 0.5 },
+  caco2_permeability: { type: "sigmoid", low: -6.5, high: -4.5, k: 0.5 },
+  efflux_mdck: { type: "reverse_sigmoid", low: 0.3, high: 1.3, k: 0.5 },
+  efflux_caco2: { type: "reverse_sigmoid", low: 0.3, high: 1.3, k: 0.5 },
+};
+
+const ENDPOINT_NAMES: Record<string, string> = {
+  logp: "LogP",
+  logd: "LogD",
+  aqueous_solubility: "Aqueous solubility",
+  kinetic_solubility: "Kinetic solubility",
+  caco2_permeability: "Caco-2 permeability",
+  efflux_mdck: "MDCK efflux",
+  efflux_caco2: "Caco-2 efflux",
+};
+
+const COMPONENT_NAMES: Record<string, string> = {
+  QED: "QED",
+  MolecularWeight: "Molecular weight",
+  SlogP: "cLogP",
+  TPSA: "TPSA",
+  HBondDonors: "H-bond donors",
+  HBondAcceptors: "H-bond acceptors",
+  NumRotBond: "Rotatable bonds",
+  SAScore: "Synthetic accessibility",
+  TanimotoSimilarity: "Similarity to reference",
+};
+
+export const DEFAULT_SERVICE_URLS: Record<string, string> = {
+  boltz: "http://boltz:8080/score",
+  posebusters: "http://posebusters:8080/score",
+  admet: "http://admet-predictor:8084/score",
+  retrodmta: "http://retrodmta-predictor:8085/score",
+  interaction_profiler: "http://interaction-profiler:8080/score",
+};
+
+const serviceUrl = (services: Record<string, ServiceInfo>, service: string) => services[service]?.url ?? DEFAULT_SERVICE_URLS[service] ?? "";
+
+export const BOLTZ_NAME = "Boltz affinity";
+
+export function nativeObjective(component: string, weight = 1): Objective {
+  const transform = NATIVE_TRANSFORMS[component];
+  const objective: Objective = { name: COMPONENT_NAMES[component] ?? component, type: "native", component, weight, transform: transform ? { ...transform } : null };
+  if (component === "TanimotoSimilarity") objective.params = { smiles: [], radius: 3, use_counts: true, use_features: false };
+  return objective;
+}
+
+export function serviceObjective(services: Record<string, ServiceInfo>, service: string, selector?: string, target?: string): Objective {
+  const base = { type: "external" as const, service, service_url: serviceUrl(services, service), weight: 1 };
+  switch (service) {
+    case "boltz":
+      return { ...base, name: BOLTZ_NAME, transform: { type: "reverse_sigmoid", low: -3, high: 1, k: 1 }, comment: "log10 IC50 in µM; lower binds tighter" };
+    case "posebusters":
+      return { ...base, name: "Pose quality", weight: 0.5, depends_on: BOLTZ_NAME, transform: null, comment: "PoseBusters checks passed, 0-1" };
+    case "interaction_profiler":
+      return {
+        ...base,
+        name: `${selector ?? "hbond"} contacts`,
+        weight: 0.5,
+        depends_on: BOLTZ_NAME,
+        service_params: { interaction_type: selector ?? "hbond" },
+        transform: { type: "sigmoid", low: 0, high: 4, k: 0.5 },
+      };
+    case "admet": {
+      const endpoint = selector ?? services.admet?.endpoints[0] ?? "logp";
+      const transform = ADMET_TRANSFORMS[endpoint];
+      return { ...base, name: ENDPOINT_NAMES[endpoint] ?? endpoint, service_params: { endpoint }, transform: transform ? { ...transform } : null };
+    }
+    case "retrodmta": {
+      const endpoint = selector ?? "";
+      const potency = /_p(ki|kd|ic50|ec50)$/i.test(endpoint);
+      return {
+        ...base,
+        name: endpoint || target || "RetroDMTA",
+        service_params: { target: target ?? "", ...(endpoint ? { endpoint } : {}) },
+        transform: potency ? { type: "sigmoid", low: 5, high: 9, k: 0.5 } : null,
+      };
+    }
+    default:
+      return { ...base, name: service, transform: null };
+  }
+}
+
+export type PresetId = "cofolding" | "admet" | "druglike";
+
+export const PRESETS: { id: PresetId; label: string; hint: string }[] = [
+  { id: "cofolding", label: "Cofolding", hint: "Boltz-2 affinity and PoseBusters pose checks on the target, plus drug-likeness. Needs a protein sequence." },
+  { id: "admet", label: "ADMET", hint: "Predicted logD, solubility, permeability and efflux, plus QED. No target needed." },
+  { id: "druglike", label: "Drug-likeness", hint: "Fast RDKit descriptors only: QED, weight, cLogP, TPSA, synthetic accessibility." },
+];
+
+export function presetObjectives(preset: PresetId, services: Record<string, ServiceInfo>): Objective[] {
+  const native = (component: string, weight: number) => nativeObjective(component, weight);
+  switch (preset) {
+    case "cofolding":
+      return [
+        { ...serviceObjective(services, "boltz"), weight: 1 },
+        { ...serviceObjective(services, "posebusters"), weight: 0.6 },
+        native("QED", 0.6),
+        native("MolecularWeight", 0.4),
+        native("SAScore", 0.4),
+      ];
+    case "admet":
+      return [
+        { ...serviceObjective(services, "admet", "logd"), weight: 0.8 },
+        { ...serviceObjective(services, "admet", "aqueous_solubility"), weight: 0.6 },
+        { ...serviceObjective(services, "admet", "caco2_permeability"), weight: 0.6 },
+        { ...serviceObjective(services, "admet", "efflux_mdck"), weight: 0.4 },
+        native("QED", 0.6),
+      ];
+    case "druglike":
+      return [native("QED", 1), native("MolecularWeight", 0.6), native("SlogP", 0.6), native("TPSA", 0.4), native("SAScore", 0.6)];
+  }
+}
+
+/** An objective the "Add" menu offers. */
+export interface CatalogueEntry {
+  key: string;
+  group: string;
+  label: string;
+  make: () => Objective;
+}
+
+const PREFERRED_NATIVE = ["QED", "MolecularWeight", "SlogP", "TPSA", "HBondDonors", "HBondAcceptors", "NumRotBond", "SAScore", "TanimotoSimilarity"];
+
+/** Every objective the builder can add, grouped for a <select>. */
+export function objectiveCatalogue(services: Record<string, ServiceInfo>, components: string[]): CatalogueEntry[] {
+  const entries: CatalogueEntry[] = [];
+  const has = (name: string) => name in services || Object.keys(services).length === 0;
+  if (has("boltz")) entries.push({ key: "boltz", group: "Structure", label: "Boltz-2 binding affinity", make: () => serviceObjective(services, "boltz") });
+  if (has("posebusters")) entries.push({ key: "posebusters", group: "Structure", label: "PoseBusters pose quality (after Boltz)", make: () => serviceObjective(services, "posebusters") });
+  if (has("interaction_profiler")) {
+    entries.push({ key: "ip:hbond", group: "Structure", label: "H-bond contacts (after Boltz)", make: () => serviceObjective(services, "interaction_profiler", "hbond") });
+  }
+  const endpoints = services.admet?.endpoints.length ? services.admet.endpoints : has("admet") ? Object.keys(ADMET_TRANSFORMS) : [];
+  for (const endpoint of endpoints) {
+    entries.push({ key: `admet:${endpoint}`, group: "ADMET", label: ENDPOINT_NAMES[endpoint] ?? endpoint, make: () => serviceObjective(services, "admet", endpoint) });
+  }
+  for (const [target, list] of Object.entries(services.retrodmta?.targets ?? {})) {
+    for (const endpoint of list.length ? list : [""]) {
+      entries.push({
+        key: `retrodmta:${target}:${endpoint}`,
+        group: "RetroDMTA",
+        label: endpoint || target,
+        make: () => serviceObjective(services, "retrodmta", endpoint || undefined, target),
+      });
+    }
+  }
+  const available = components.length ? new Set(components) : new Set(PREFERRED_NATIVE);
+  const native = [...PREFERRED_NATIVE.filter((c) => available.has(c) || c === "TanimotoSimilarity"), ...[...available].filter((c) => !PREFERRED_NATIVE.includes(c))];
+  for (const component of native) {
+    entries.push({ key: `native:${component}`, group: "RDKit descriptors", label: COMPONENT_NAMES[component] ? `${COMPONENT_NAMES[component]} (${component})` : component, make: () => nativeObjective(component) });
+  }
+  return entries;
+}
+
+/** A name not yet taken: "QED", "QED 2", ... */
+export function uniqueName(name: string, taken: string[]): string {
+  if (!taken.includes(name)) return name;
+  let n = 2;
+  while (taken.includes(`${name} ${n}`)) n += 1;
+  return `${name} ${n}`;
+}
+
+/** Rename one objective and keep the depends_on links pointing at it. */
+export function renameObjective(list: Objective[], index: number, name: string): Objective[] {
+  const previous = list[index]?.name;
+  return list.map((o, i) => (i === index ? { ...o, name } : previous && o.depends_on === previous ? { ...o, depends_on: name } : o));
+}
+
+export interface TtpForm {
+  name: string;
+  id: string;
+  description: string;
+  sequence: string;
+  pdbId: string;
+  aggregation: "geometric_mean" | "arithmetic_mean";
+  objectives: Objective[];
+}
+
+/** What stops the form from making a TTP the server accepts. */
+export function formProblems(form: TtpForm, existingIds: string[] = []): string[] {
+  const problems: string[] = [];
+  if (!form.name.trim()) problems.push("Give the profile a name.");
+  if (!form.id) problems.push("The id is empty.");
+  else if (!TTP_ID.test(form.id)) problems.push("The id may only hold lowercase letters, digits, - and _, starting with a letter or digit.");
+  else if (existingIds.includes(form.id)) problems.push(`A TTP with id "${form.id}" already exists.`);
+  const sequence = normaliseSequence(form.sequence);
+  const seqProblem = sequenceProblem(sequence);
+  if (seqProblem) problems.push(seqProblem);
+  if (form.objectives.length === 0) problems.push("Add at least one objective.");
+  const names = form.objectives.map((o) => o.name.trim());
+  if (names.some((n) => !n)) problems.push("Every objective needs a name.");
+  const dupes = [...new Set(names.filter((n, i) => n && names.indexOf(n) !== i))];
+  if (dupes.length) problems.push(`Objective names must be unique: ${dupes.join(", ")}.`);
+  for (const o of form.objectives) {
+    if (!(o.weight > 0)) problems.push(`${o.name || "An objective"} needs a weight above 0.`);
+    if (o.depends_on && !names.includes(o.depends_on)) problems.push(`${o.name} runs after "${o.depends_on}", which is not in the profile.`);
+    if (o.type === "external" && !o.service_url) problems.push(`${o.name} has no service URL.`);
+    if (o.service === "retrodmta" && !o.service_params?.target) problems.push(`${o.name} needs a RetroDMTA target.`);
+    if (o.component === "TanimotoSimilarity") {
+      const smiles = o.params?.smiles;
+      if (!Array.isArray(smiles) || !smiles.some((s) => typeof s === "string" && s.trim())) problems.push(`${o.name} needs a reference SMILES.`);
+    }
+    for (const key of transformParams(o.transform?.type ?? "")) {
+      if (typeof o.transform?.[key] !== "number" || !Number.isFinite(o.transform[key])) problems.push(`${o.name}: the transform's ${key} is not a number.`);
+    }
+  }
+  if (form.objectives.some((o) => o.service === "boltz") && !sequence) problems.push("Boltz scoring needs the target's protein sequence.");
+  return problems;
+}
+
+/** The create_ttp argument for a form; empty optional fields are left out. */
+export function buildTtp(form: TtpForm): Record<string, unknown> {
+  const sequence = normaliseSequence(form.sequence);
+  const objectives = form.objectives.map((o) => {
+    const clean: Record<string, unknown> = { name: o.name.trim(), type: o.type, weight: o.weight };
+    if (o.type === "native") clean.component = o.component;
+    else {
+      clean.service = o.service;
+      clean.service_url = o.service_url;
+      if (o.service_params && Object.keys(o.service_params).length) clean.service_params = o.service_params;
+    }
+    if (o.depends_on) clean.depends_on = o.depends_on;
+    if (o.transform) clean.transform = o.transform;
+    if (o.params && Object.keys(o.params).length) clean.params = o.params;
+    if (o.comment) clean.comment = o.comment;
+    return clean;
+  });
+  const ttp: Record<string, unknown> = {
+    id: form.id,
+    name: form.name.trim(),
+    scoring: { ...(form.description.trim() ? { comment: form.description.trim() } : {}), aggregation: form.aggregation, objectives },
+  };
+  if (sequence) ttp.target = { protein_sequence: sequence, ...(form.pdbId.trim() ? { pdb_id: form.pdbId.trim().toUpperCase() } : {}) };
+  return ttp;
+}
+
+/** The id and name create_ttp answered with, or its error. */
+export function createdTtp(value: unknown): { id: string; name: string } | { error: string } {
+  const parsed = parseResult(value);
+  const error = payloadError(parsed);
+  if (error) return { error };
+  if (isRecord(parsed) && typeof parsed.id === "string") return { id: parsed.id, name: str(parsed.name) ?? parsed.id };
+  return { error: typeof value === "string" && value.trim() ? value.trim() : "create_ttp gave no answer." };
+}
+
+// ---------------------------------------------------------------------------
 // target facts
 // ---------------------------------------------------------------------------
 

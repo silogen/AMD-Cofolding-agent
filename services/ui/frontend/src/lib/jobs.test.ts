@@ -13,6 +13,7 @@ import {
   parseRunConfig,
   parseStatus,
   progress,
+  resultsFile,
   resumeArguments,
   runningBest,
   scoreDomain,
@@ -57,6 +58,16 @@ describe("parseJobs", () => {
   it("is empty for anything that is not a list", () => {
     expect(parseJobs({ error: "x" })).toEqual([]);
     expect(parseJobs(null)).toEqual([]);
+  });
+});
+
+describe("resultsFile", () => {
+  it("is the CSV's file name, or REINVENT's default", () => {
+    const [parsed] = parseJobs([job]);
+    expect(resultsFile(parsed)).toBe("results_1.csv");
+    expect(resultsFile({ ...parsed, csvPath: "C:\\jobs\\job_1\\stage2.csv" })).toBe("stage2.csv");
+    expect(resultsFile({ ...parsed, csvPath: "/x/../etc/passwd" })).toBe("results_1.csv");
+    expect(resultsFile({ ...parsed, csvPath: null })).toBe("results_1.csv");
   });
 });
 

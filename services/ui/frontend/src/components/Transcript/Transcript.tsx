@@ -51,7 +51,7 @@ export function Transcript({ turns, theme, openStructurePath, onOpenMolecule, on
       <div className="mx-auto flex max-w-3xl flex-col gap-5 px-3 py-4 pb-20 sm:gap-6 sm:px-4 sm:py-6 lg:pb-6">
         {turns.length === 0 && <EmptyState onPick={onPickPrompt} />}
 
-        {turns.map((turn, index) =>
+        {turns.map((turn) =>
           turn.role === "user" ? (
             <UserBubble key={turn.id} content={turn.content} at={turn.at} />
           ) : (
@@ -63,7 +63,6 @@ export function Transcript({ turns, theme, openStructurePath, onOpenMolecule, on
               onOpenMolecule={onOpenMolecule}
               onShowProperties={onShowProperties}
               linkResidues={hasStructure}
-              onFollowup={index === turns.length - 1 ? onPickPrompt : undefined}
             />
           ),
         )}

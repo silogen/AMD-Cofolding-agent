@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TablePanel } from "../../types/api";
+import { ExportButtons } from "./ExportButtons";
 
 interface Props {
   panel: TablePanel;
@@ -107,6 +108,11 @@ export function DataTable({ panel }: Props) {
           {panel.totalRows} {panel.totalRows === 1 ? "row" : "rows"}
           {panel.truncated ? ` (first ${panel.rows.length} shown)` : ""}
         </span>
+        <ExportButtons
+          name={panel.tool}
+          sheet={() => ({ columns: panel.columns, rows: sorted })}
+          scope={panel.truncated ? `the ${panel.rows.length} rows received` : `all ${panel.rows.length} rows`}
+        />
       </div>
 
       <div className="relative">

@@ -355,3 +355,19 @@ def test_scores_reported_as_text_are_read_as_numbers(shared_root):
     structure = only(artifacts.extract_panels("score_molecules", raw), "structure")
 
     assert structure["metrics"] == {"confidence": 0.98, "ligandIptm": 0.97, "posebustersPassed": 18, "posebustersTotal": 22}
+
+
+def test_results_recorded_without_panels_get_them_on_load():
+    from reinvent4_agent.web.sessions import refresh_panels
+
+    raw = json.dumps({"service": "admet", "results": [{"input_smiles": "CCO", "predictions": {"logp": {"mean": 0.1, "std": 0.02}}}]})
+    events = [
+        {"type": "tool_call", "id": "c1", "name": "predict_admet", "arguments": {"smiles": ["CCO"]}},
+        {"type": "tool_result", "id": "c1", "name": "predict_admet", "result": raw, "isError": False, "panels": []},
+        {"type": "tool_result", "id": "c2", "name": "predict_admet", "result": raw, "isError": True, "panels": []},
+    ]
+
+    refreshed = refresh_panels(events)
+
+    assert "properties" in kinds(refreshed[1]["panels"])
+    assert refreshed[2]["panels"] == []

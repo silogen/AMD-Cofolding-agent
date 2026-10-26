@@ -145,23 +145,27 @@ export function CandidateDetail({ candidate: c, props: p, theme, onClose, onOpen
               </span>
               <span
                 className="font-mono"
-                style={{ color: check.ok === null ? "var(--text-faint)" : check.ok ? "#3ccf91" : "#ff4d4f" }}
+                style={{ color: check.ok === null ? "var(--text-faint)" : check.ok ? "var(--color-ok)" : "var(--color-warn)" }}
               >
-                {check.value} {check.ok === null ? "" : check.ok ? "✓" : "✗"}
+                {check.value} {check.ok === null ? "" : check.ok ? "✓" : "!"}
               </span>
             </div>
           ))}
-          {affinity &&
-            (c.gate.status === "pass" && c.metrics.affinity !== undefined ? (
-              <p className="rounded-md border px-2 py-1.5" style={{ borderColor: "#3ccf91" }}>
-                Boltz affinity {affinity} (pIC50 {pIC50(c.metrics.affinity).toFixed(2)},{" "}
-                {affinityConcentration(c.metrics.affinity)})
+          {affinity && c.metrics.affinity !== undefined && (
+            <div className="bg-sunken rounded-md px-2 py-1.5">
+              <p>
+                Boltz affinity <span className="font-mono font-semibold">{affinity}</span>{" "}
+                <span className="text-muted">
+                  (pIC50 {pIC50(c.metrics.affinity).toFixed(2)}, {affinityConcentration(c.metrics.affinity)})
+                </span>
               </p>
-            ) : (
-              <p className="text-muted rounded-md border px-2 py-1.5" style={{ borderColor: "#ff4d4f" }}>
-                Affinity withheld: {c.gate.reasons.join("; ") || "the pose has not passed the confidence gate."}
-              </p>
-            ))}
+              {c.gate.status === "fail" && (
+                <p className="mt-0.5 text-[10px]" style={{ color: "var(--color-warn)" }} title={c.gate.reasons.join("; ")}>
+                  Pose below the quality gate; read the affinity with caution.
+                </p>
+              )}
+            </div>
+          )}
         </section>
       )}
 

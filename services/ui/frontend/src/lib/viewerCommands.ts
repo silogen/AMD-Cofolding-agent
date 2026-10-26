@@ -24,7 +24,8 @@ export type ViewerAction =
   | { kind: "screenshot" }
   | { kind: "download" }
   | { kind: "panel"; tab: "contacts" | "quality" | "files" }
-  | { kind: "structure"; step: 1 | -1 };
+  | { kind: "structure"; step: 1 | -1 }
+  | { kind: "pdb"; id: string };
 
 export const VIEWER_EXAMPLES = [
   "fit",
@@ -42,7 +43,7 @@ export const VIEWER_EXAMPLES = [
 export const VIEWER_HELP =
   "fit · focus ligand · pocket [6 Å] · focus ASN140 LEU92 · highlight 140 · show hbonds / contacts · " +
   "cartoon / surface / atoms / illustrative · color by chain / element / hydrophobicity / confidence · " +
-  "background dark / light · spin / stop · clear · screenshot · download · contacts / quality / files · next / previous";
+  "background dark / light · spin / stop · clear · screenshot · download · contacts / quality / files · next / previous · open 3MXF";
 
 const RESIDUE_CODES =
   "ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|HID|HIE|HIP|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL|SEC|PYL|MSE";
@@ -57,7 +58,7 @@ export function parseResidues(text: string): Residue[] {
   const out: Residue[] = [];
   for (const match of text.matchAll(RESIDUE_TOKEN)) {
     const chain = (match[1] ?? match[4])?.toUpperCase() ?? null;
-    out.push({ chain, resnum: Number(match[3]) });
+    out.push(match[2] ? { chain, resnum: Number(match[3]), resname: match[2].toUpperCase() } : { chain, resnum: Number(match[3]) });
   }
   return out;
 }
@@ -154,6 +155,8 @@ export function parseViewerCommand(input: string): ViewerAction | null {
     const tab = /quality|confidence/.test(t) ? "quality" : /file/.test(t) ? "files" : "contacts";
     return { kind: "panel", tab };
   }
+  const pdb = /^(?:open|load|fetch)(?: pdb| the pdb entry| entry)? ([0-9][a-z0-9]{3})$/.exec(t);
+  if (pdb && !/^\d+$/.test(pdb[1])) return { kind: "pdb", id: pdb[1].toUpperCase() };
   if (/^(next|forward)( structure| pose| model| complex)?$/.test(t)) return { kind: "structure", step: 1 };
   if (/^(previous|prev|back)( structure| pose| model| complex)?$/.test(t)) return { kind: "structure", step: -1 };
 

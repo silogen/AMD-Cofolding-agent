@@ -14,15 +14,18 @@ import {
   type BackgroundName,
   type ColorName,
   type Picked,
+  type Residue,
   type ViewStyleName,
   pickedName,
 } from "../../lib/molstar";
-import { parseViewerCommand, VIEWER_EXAMPLES, VIEWER_HELP, type ViewerAction } from "../../lib/viewerCommands";
+import { VIEWER_HELP, type ViewerAction } from "../../lib/viewerCommands";
 import { onViewerRequest } from "../../lib/viewerBus";
-import { contactColor, contactLabel, residuesOf, sortedTypes } from "../../lib/contacts";
-import { affinityConcentration, affinityText, gate, pIC50, type Gate } from "../../lib/gate";
+import { contactColor, contactLabel, contactLines, matchesTypes, residuesOf, sortedTypes, toggleType } from "../../lib/contacts";
+import { affinityConcentration, affinityText, gate, GATE, pIC50, type Gate } from "../../lib/gate";
 import { clock } from "../../lib/format";
-import { poseKey, poseSiblings, stepPose, STRUCTURE_KINDS, structureKind } from "../../lib/poses";
+import { posebustersCheck, STRUCTURE_KINDS, structureKind, structureOption } from "../../lib/poses";
+import { buildNumbering, displayNumber, rememberNumbering, residueLabel, resolveResidue, type FileResidue, type Numbering } from "../../lib/numbering";
+import { fetchPdbEntry, isPdbId } from "../../lib/rcsb";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { CopyButton } from "../CopyButton/CopyButton";
 
@@ -33,6 +36,8 @@ interface Props {
   interactions: Sourced<InteractionsPanel>[];
   /** The target's canonical UniProt sequence, when the conversation looked it up. */
   targetSequence?: string | null;
+  /** The conversation, for structures the user brings in; null before it has an id. */
+  sessionId?: string | null;
   theme: Theme;
   /** Put a prompt in the composer. */
   onAsk: (text: string) => void;
@@ -43,8 +48,13 @@ interface Message {
   id: number;
   text: string;
   tone: "ok" | "bad";
-  /** A command the viewer did not understand, offered to the agent instead. */
+  /** A request the viewer cannot serve, offered to the agent instead. */
   ask?: string;
+}
+/** Which contacts are drawn as dashes: every one (ligand or pocket focus) or those of some residues. */
+interface DashScope {
+  path: string;
+  residues: { chain: string | null; resnum: number }[] | null;
 }
 
 const COLOR_LABELS: Record<ColorName, string> = {
@@ -56,12 +66,18 @@ const COLOR_LABELS: Record<ColorName, string> = {
   secondary: "Secondary structure",
 };
 
+const OPEN_PDB = "\u0000open-pdb";
+
+const sameResidue = (r: { chain?: string | null; resnum: number }, c: Contact) =>
+  c.resnum === r.resnum && (!r.chain || !c.chain || c.chain === r.chain);
+const residueKey = (chain: string | null | undefined, resnum: number | null) => `${chain ?? ""}:${resnum}`;
+
 /**
  * The 3D structure workspace: one Mol* viewport for every complex in the
- * conversation, with the confidence gate above it, quick views and a command
- * line on it, and the contacts and quality details under it.
+ * conversation, with the quality verdict above it, quick views on it, and
+ * the contacts and quality details under it.
  */
-export function StructureWorkspace({ structures, active, onSelect, interactions, theme, onAsk }: Props) {
+export function StructureWorkspace({ structures, active, onSelect, interactions, targetSequence, sessionId, theme, onAsk }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<StructureView | null>(null);
   const pendingRef = useRef<ViewerAction | null>(null);
@@ -75,7 +91,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   const [selected, setSelected] = useState<{ path: string; index: number } | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>("contacts");
-  const [typeFilter, setTypeFilter] = useState<string | null>(null);
+  const [types, setTypes] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [controls, setControls] = useState(false);
   const [style, setStyle] = useState<ViewStyleName>("cartoon");
@@ -83,31 +99,32 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   const [background, setBackground] = useState<BackgroundName | null>(null);
   const [spinning, setSpinning] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [fileResidues, setFileResidues] = useState<{ path: string; list: FileResidue[] } | null>(null);
+  const [dashScope, setDashScope] = useState<DashScope | null>(null);
+  const [flash, setFlash] = useState<{ keys: string[]; at: number } | null>(null);
+  const [pdbForm, setPdbForm] = useState(false);
 
   const profile = useMemo(() => contactsFor(active, interactions), [active, interactions]);
   const verdict = useMemo(() => gate(active.metrics), [active.metrics]);
+  const numbering = useMemo(
+    () => (fileResidues && fileResidues.path === active.path ? buildNumbering(fileResidues.list, targetSequence) : null),
+    [fileResidues, active.path, targetSequence],
+  );
   const index = structures.findIndex(({ item }) => item.path === active.path);
   const title = structureTitle(active);
-  const run = runOf(active.path);
   const loaded = loadedPath === active.path;
   const failure = error && (error.path === null || error.path === active.path) ? error.text : null;
   const backgroundValue = BACKGROUNDS[background ?? (theme === "dark" ? "black" : "white")];
   const lightCanvas = backgroundValue === BACKGROUNDS.white || backgroundValue === BACKGROUNDS.light;
+  const kind = structureKind(active.path, Boolean(active.metrics), active.tool);
 
-  const allPaths = useMemo(() => structures.map(({ item }) => item.path), [structures]);
-  const poses = useMemo(() => poseSiblings(allPaths, active.path), [allPaths, active.path]);
-  const poseIndex = poses.paths.indexOf(active.path);
-  /** One entry per molecule, for the structure selector when poses are grouped. */
-  const molecules = useMemo(() => {
-    const seen = new Map<string, StructurePanel>();
-    for (const { item } of structures) {
-      const { key } = poseKey(item.path);
-      if (!seen.has(key)) seen.set(key, item);
-    }
-    return [...seen.entries()].map(([key, item]) => ({ key, item }));
-  }, [structures]);
-  const activeMolecule = poseKey(active.path).key;
-  const kind = structureKind(active.path, Boolean(active.metrics));
+  /** "LEU94" in UniProt numbering when known, with the file's number when it differs. */
+  const nameOf = (resname: string, chain: string | null | undefined, resnum: number) => residueLabel(numbering, resname, chain, resnum);
+  const nameInFile = (r: { chain?: string | null; resnum: number }) =>
+    profile?.contacts.find((c) => sameResidue(r, c))?.resname ??
+    numbering?.names.get(residueKey(r.chain, r.resnum)) ??
+    fileResidues?.list.find((f) => f.resnum === r.resnum && (!r.chain || f.chain === r.chain))?.resname ??
+    "";
 
   const pathRef = useRef(active.path);
   const profileRef = useRef(profile);
@@ -116,21 +133,24 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
     profileRef.current = profile;
   }, [active.path, profile]);
 
-  const stepPoseBy = (step: number) => {
-    const target = stepPose(poses.paths, active.path, step);
-    const next = target ? structures.find(({ item }) => item.path === target) : undefined;
-    if (next && next.item.path !== active.path) onSelect(next.item);
-  };
+  useEffect(() => {
+    if (numbering || fileResidues?.path === active.path) rememberNumbering(active.path, numbering);
+  }, [numbering, fileResidues, active.path]);
 
-  /** A residue clicked in 3D: select its contacts in the drawer. */
+  /** A residue clicked in 3D: its contacts in the drawer and as dashes. */
   const onResiduePicked = (pick: (Picked & { path: string }) | null) => {
     setPicked(pick);
+    if (!pick || pick.resnum === null) {
+      setDashScope(null);
+      return;
+    }
+    const residue = { chain: pick.chain, resnum: pick.resnum };
+    setDashScope({ path: pick.path, residues: [residue] });
     const current = profileRef.current;
-    if (!pick || pick.resnum === null || !current) return;
-    const first = current.contacts.findIndex((c) => c.resnum === pick.resnum && (!pick.chain || !c.chain || c.chain === pick.chain));
+    const first = current ? current.contacts.findIndex((c) => sameResidue(residue, c)) : -1;
     if (first < 0) return;
     setSelected({ path: pick.path, index: first });
-    setTypeFilter(null);
+    setFlash({ keys: [residueKey(pick.chain, pick.resnum)], at: Date.now() });
     setDrawerTab("contacts");
     setDetailsOpen(true);
   };
@@ -187,6 +207,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
       .then(async (ok) => {
         if (!ok || stale) return;
         if (color) await view.setColor(color);
+        setFileResidues({ path: active.path, list: view.residues() });
         setLoadedPath(active.path);
         setError(null);
       })
@@ -199,6 +220,17 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
     // color is applied on load and by its own command; reloading on a colour change is not wanted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewReady, active.path, active.url, active.format, title, attempt]);
+
+  // The profiler's contacts as dashes, for what is in focus and the chosen types.
+  const dashed = useMemo(() => {
+    if (!profile || !dashScope || dashScope.path !== active.path) return [];
+    const residues = dashScope.residues;
+    return profile.contacts.filter((c) => matchesTypes(c, types) && (!residues || residues.some((r) => sameResidue(r, c))));
+  }, [profile, dashScope, active.path, types]);
+  const canvasTheme = lightCanvas ? "light" : "dark";
+  useEffect(() => {
+    if (loaded) void viewRef.current?.setContacts(contactLines(dashed, canvasTheme));
+  }, [loaded, dashed, canvasTheme, backgroundValue]);
 
   useEffect(() => {
     if (!message) return;
@@ -213,19 +245,41 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
     setDetailsOpen(true);
   };
 
-  const showContacts = (contacts: Contact[], what: string) => {
-    const residues = residuesOf(contacts);
-    if (!residues.length) {
-      say(`No ${what} in this structure.`, "bad");
+  /** Focus residues (file numbering), dash their contacts and flash their rows. */
+  const focusOn = (view: StructureView, residues: { chain: string | null; resnum: number }[], mode: "focus" | "highlight" = "focus") => {
+    if (!view.focusResidues(residues, mode)) return false;
+    if (mode === "focus") setDashScope({ path: active.path, residues });
+    setFlash({ keys: residues.map((r) => residueKey(r.chain, r.resnum)), at: Date.now() });
+    return true;
+  };
+
+  const focusLigand = (view: StructureView, radius?: number) => {
+    const ok = radius === undefined ? view.focusLigand() : view.focusPocket(radius);
+    if (ok) setDashScope({ path: active.path, residues: null });
+    return ok;
+  };
+
+  const openPdb = async (id: string) => {
+    if (!isPdbId(id)) {
+      say(`“${id}” is not a PDB id: four characters starting with a digit, like 3MXF.`, "bad");
       return;
     }
-    viewRef.current?.focusResidues(residues);
-    const names = [...new Set(contacts.map((c) => c.label))];
-    say(`${contacts.length} ${what}: ${names.slice(0, 6).join(", ")}${names.length > 6 ? "…" : ""}`);
+    say(`Fetching ${id.toUpperCase()} from the PDB…`);
+    try {
+      const panel = await fetchPdbEntry(id, sessionId ?? "new");
+      onSelect(panel);
+      say(`${id.toUpperCase()} from the RCSB PDB.`);
+    } catch (reason) {
+      say(reason instanceof Error ? reason.message : String(reason), "bad");
+    }
   };
 
   /** Run one viewer action and say what happened. */
   function execute(action: ViewerAction) {
+    if (action.kind === "pdb") {
+      void openPdb(action.id);
+      return;
+    }
     const view = viewRef.current;
     if (!view || !loaded) {
       pendingRef.current = action;
@@ -248,23 +302,29 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         say("Whole complex in view.");
         break;
       case "ligand":
-        if (view.focusLigand()) say("The ligand, the residues within 5 Å as sticks, and their interactions.");
+        if (focusLigand(view)) say(profile ? "The ligand, its neighbours as sticks, and its contacts from the profile." : "The ligand and the residues within 5 Å.");
         else say("This structure has no ligand.", "bad");
         break;
       case "pocket":
-        if (view.focusPocket(action.radius)) say("The pocket: the ligand's neighbours as sticks, with their interactions.");
+        if (focusLigand(view, action.radius)) say(`The pocket: residues within ${action.radius} Å of the ligand.`);
         else say("This structure has no ligand.", "bad");
         break;
       case "residues": {
-        const names = action.residues
-          .map((r) => {
-            const resname = profile?.contacts.find((c) => c.resnum === r.resnum && (!r.chain || c.chain === r.chain))?.resname;
-            return `${resname ?? ""}${r.resnum}${r.chain ? ` (chain ${r.chain})` : ""}`;
+        const residues = action.residues.map((r: Residue) => ({ chain: r.chain ?? null, resnum: resolveResidue(numbering, r) }));
+        const names = residues
+          .map((r, i) => {
+            const resname = nameInFile(r) || action.residues[i].resname || "";
+            const shown = nameOf(resname, r.chain, r.resnum);
+            return `${shown.label}${r.chain ? ` (chain ${r.chain})` : ""}`;
           })
           .join(", ");
-        if (!view.focusResidues(action.residues, action.mode)) say(`${names} is not in this structure.`, "bad");
-        else if (action.mode === "highlight") say(`Highlighted ${names}.`);
-        else say(`${names} and its neighbours as sticks, with their interactions.`);
+        if (!focusOn(view, residues, action.mode)) {
+          say(`${action.residues.map((r) => `${r.resname ?? ""}${r.resnum}`).join(", ")} is not in this structure.`, "bad");
+          break;
+        }
+        const count = profile ? profile.contacts.filter((c) => residues.some((r) => sameResidue(r, c))).length : 0;
+        if (action.mode === "highlight") say(`Highlighted ${names}.`);
+        else say(count ? `${names}: ${count} contact${count === 1 ? "" : "s"} with the ligand.` : `${names} and its neighbours.`);
         break;
       }
       case "contacts": {
@@ -273,9 +333,14 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           break;
         }
         const list = action.type ? profile.contacts.filter((c) => c.type === action.type) : profile.contacts;
-        setTypeFilter(action.type);
+        setTypes(action.type ? [action.type] : []);
         openDetails("contacts");
-        showContacts(list, action.type ? `${contactLabel(action.type).toLowerCase()} contacts` : "contacts");
+        if (!list.length || !focusLigand(view)) {
+          say(`No ${action.type ? `${contactLabel(action.type).toLowerCase()} ` : ""}contacts in this structure.`, "bad");
+          break;
+        }
+        const names = residuesOf(list).map((r) => nameOf(nameInFile(r), r.chain, r.resnum).label);
+        say(`${list.length} ${action.type ? `${contactLabel(action.type).toLowerCase()} ` : ""}contacts: ${names.slice(0, 6).join(", ")}${names.length > 6 ? "…" : ""}`);
         break;
       }
       case "style":
@@ -302,6 +367,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         view.clearSelection();
         setSelected(null);
         setPicked(null);
+        setDashScope(null);
         say("Selection cleared.");
         break;
       case "controls":
@@ -364,58 +430,62 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
     [structures],
   );
 
+  /** A chip: show only that type, add it, or drop it; with nothing in focus, focus the ligand so the dashes show. */
+  const onToggleType = (type: string) => {
+    setTypes((current) => toggleType(current, type));
+    const view = viewRef.current;
+    if (view && loaded && (!dashScope || dashScope.path !== active.path)) focusLigand(view);
+  };
+
   const pickedHere = picked && picked.path === active.path ? picked : null;
   const pickedContacts = pickedHere && profile ? profile.contacts.filter((c) => c.resnum === pickedHere.resnum) : [];
+  const pickedShown = pickedHere?.resname && pickedHere.resnum !== null ? nameOf(pickedHere.resname, pickedHere.chain, pickedHere.resnum) : null;
+  const pickedTitle = pickedHere ? (pickedName(pickedHere) === "the ligand" ? "the ligand" : (pickedShown?.label ?? pickedHere.label)) : "";
   const selectedHere = selected && selected.path === active.path && profile ? profile.contacts[selected.index] : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="border-subtle flex shrink-0 items-center gap-2 border-b px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <h3 className="truncate text-sm font-semibold" title={active.path}>
-            {title}
-          </h3>
-          {run && <span className="text-faint shrink-0 font-mono text-[11px]">{run}</span>}
-          {kind && (
-            <span
-              className="shrink-0 rounded-full border px-1.5 py-px text-[10px] font-semibold whitespace-nowrap"
-              style={{ color: STRUCTURE_KINDS[kind].color, borderColor: STRUCTURE_KINDS[kind].color }}
-              title={STRUCTURE_KINDS[kind].hint}
-            >
-              {STRUCTURE_KINDS[kind].label}
-            </span>
-          )}
-          <GatePill verdict={verdict} />
-        </div>
-        {poses.grouped && molecules.length > 1 && (
+      <header className="border-subtle flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
+        {pdbForm ? (
+          <PdbForm
+            onOpen={(id) => {
+              setPdbForm(false);
+              void openPdb(id);
+            }}
+            onCancel={() => setPdbForm(false)}
+          />
+        ) : (
           <select
-            value={activeMolecule}
+            value={active.path}
             onChange={(event) => {
-              const next = molecules.find((m) => m.key === event.target.value);
+              if (event.target.value === OPEN_PDB) {
+                setPdbForm(true);
+                return;
+              }
+              const next = structures.find(({ item }) => item.path === event.target.value);
               if (next) onSelect(next.item);
             }}
             aria-label="Structure"
-            title="Switch to another molecule or structure"
-            className="bg-sunken border-subtle text-muted max-w-40 shrink-0 rounded-md border px-1 py-0.5 text-[11px]"
+            title={active.path}
+            className="hover:bg-inset text-body min-w-0 flex-1 cursor-pointer truncate rounded-md bg-transparent px-1 py-0.5 text-[13px] font-semibold outline-none"
           >
-            {molecules.map((m, i) => (
-              <option key={m.key} value={m.key}>
-                Structure {i + 1} of {molecules.length} · {m.key.slice(m.key.lastIndexOf("/") + 1)}
+            {index < 0 && <option value={active.path}>{structureOption(title, active.path, runOf(active.path))}</option>}
+            {structures.map(({ item }, i) => (
+              <option key={item.path} value={item.path}>
+                {structures.length > 1 ? `${i + 1}/${structures.length} · ` : ""}
+                {structureOption(structureTitle(item), item.path, runOf(item.path))}
               </option>
             ))}
+            <option value={OPEN_PDB}>Open PDB entry…</option>
           </select>
         )}
-        {poses.paths.length > 1 && (
-          <div className="border-subtle flex shrink-0 items-center rounded-md border" title={poses.grouped ? "Samples of this molecule" : "Structures in the conversation"}>
-            <HeadButton label="‹" title={poses.grouped ? "Previous pose" : "Previous structure"} onClick={() => stepPoseBy(-1)} />
-            <span className="text-faint min-w-9 text-center font-mono text-[11px]">
-              {poses.grouped ? "pose " : ""}
-              {(poseIndex < 0 ? index : poseIndex) + 1}/{poses.paths.length}
-            </span>
-            <HeadButton label="›" title={poses.grouped ? "Next pose" : "Next structure"} onClick={() => stepPoseBy(1)} />
-          </div>
+        {kind && (
+          <span className="flex shrink-0 items-center gap-1 text-[10px] whitespace-nowrap" title={STRUCTURE_KINDS[kind].hint}>
+            <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: STRUCTURE_KINDS[kind].color }} />
+            <span className="text-muted">{STRUCTURE_KINDS[kind].label}</span>
+          </span>
         )}
-        <a href={active.url} download={active.name} className="text-muted hover:text-body hover:bg-inset rounded-md px-2 py-1 text-[11px]">
+        <a href={active.url} download={active.name} className="text-muted hover:text-body hover:bg-inset shrink-0 rounded-md px-2 py-1 text-[11px]">
           Download
         </a>
         <HeadButton
@@ -426,7 +496,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         />
       </header>
 
-      <GateStrip verdict={verdict} panel={active} />
+      <GateStrip verdict={verdict} panel={active} onQuality={() => openDetails("quality")} />
 
       <div className="relative min-h-[280px] flex-1 overflow-hidden" style={{ background: `#${backgroundValue.toString(16).padStart(6, "0")}` }}>
         <div ref={hostRef} className="molstar-host absolute inset-0" />
@@ -482,8 +552,9 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         </div>
 
         {pickedHere && (
-          <div className="bg-raised border-subtle shadow-card absolute bottom-12 left-2 z-20 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px]">
-            <span className="font-mono font-semibold">{pickedHere.label}</span>
+          <div className="bg-raised border-subtle shadow-card absolute bottom-2 left-2 z-20 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px]">
+            <span className="font-mono font-semibold">{pickedShown?.label ?? pickedHere.label}</span>
+            {pickedShown?.file != null && <span className="text-faint font-mono text-[10px]">file {pickedShown.file}</span>}
             {pickedHere.chain && <span className="text-faint">chain {pickedHere.chain}</span>}
             {pickedContacts.length > 0 && (
               <span className="flex items-center gap-1">
@@ -495,7 +566,8 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             )}
             <ChipButton
               onClick={() =>
-                pickedHere.resnum !== null && execute({ kind: "residues", residues: [{ chain: pickedHere.chain, resnum: pickedHere.resnum }], mode: "focus" })
+                pickedHere.resnum !== null &&
+                execute({ kind: "residues", residues: [{ chain: pickedHere.chain, resnum: pickedHere.resnum, resname: pickedHere.resname }], mode: "focus" })
               }
             >
               Focus
@@ -504,13 +576,13 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
               primary
               onClick={() =>
                 onAsk(
-                  pickedName(pickedHere) === "the ligand"
+                  pickedTitle === "the ligand"
                     ? `In ${title}, how is the ligand held in the pocket? Name its key contacts from the interaction profile.`
-                    : `In ${title}, what role does ${pickedHere.label}${pickedHere.chain ? ` (chain ${pickedHere.chain})` : ""} play in binding the ligand? Use the interaction profile.`,
+                    : `In ${title}, what role does ${pickedTitle}${pickedHere.chain ? ` (chain ${pickedHere.chain})` : ""} play in binding the ligand? Use the interaction profile.`,
                 )
               }
             >
-              Ask the agent about {pickedName(pickedHere)}
+              Ask the agent about {pickedTitle}
             </ChipButton>
             <button type="button" aria-label="Dismiss" onClick={() => setPicked(null)} className="text-muted hover:text-body cursor-pointer px-1">
               ×
@@ -518,12 +590,10 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           </div>
         )}
 
-        <CommandBar onRun={execute} onUnknown={(text) => say(`“${text}” is not a viewer command.`, "bad", text)} />
-
         {message && (
           <div
             role="status"
-            className="bg-raised border-subtle shadow-card absolute right-2 bottom-12 left-2 z-30 mx-auto flex max-w-xl items-start gap-2 rounded-lg border px-3 py-1.5 text-[11px]"
+            className={`bg-raised border-subtle shadow-card absolute right-2 left-2 z-30 mx-auto flex max-w-xl items-start gap-2 rounded-lg border px-3 py-1.5 text-[11px] ${pickedHere ? "bottom-12" : "bottom-2"}`}
           >
             <span aria-hidden="true" className="mt-1 size-1.5 shrink-0 rounded-full" style={{ background: message.tone === "ok" ? "var(--color-ok)" : "var(--color-accent)" }} />
             <span className="min-w-0 flex-1">{message.text}</span>
@@ -543,12 +613,13 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
       </div>
 
       <section aria-label="Structure details" className={`border-subtle bg-raised flex shrink-0 flex-col border-t ${detailsOpen ? "h-[min(42%,340px)]" : ""}`}>
-        <div className="flex h-9 shrink-0 items-center gap-2 px-3">
+        <div className="flex h-8 shrink-0 items-center gap-2 px-3">
           <button type="button" onClick={() => setDetailsOpen((open) => !open)} className="text-muted hover:text-body cursor-pointer text-[11px] font-semibold">
             {detailsOpen ? "Hide details" : "Show details"}
           </button>
           <span className="text-faint text-[11px]">
             {profile ? `${profile.totalContacts} contact${profile.totalContacts === 1 ? "" : "s"}` : "no contact profile"}
+            {numbering && !numbering.same && " · UniProt numbering"}
           </span>
           {detailsOpen && (
             <nav role="tablist" className="ml-auto flex gap-0.5">
@@ -573,27 +644,30 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             {drawerTab === "contacts" && (
               <ContactsTab
                 profile={profile}
+                numbering={numbering}
                 smiles={active.smiles ?? profile?.smiles ?? null}
                 theme={theme}
-                typeFilter={typeFilter}
-                onTypeFilter={(type) => {
-                  setTypeFilter(type);
-                  if (type && profile) showContacts(profile.contacts.filter((c) => c.type === type), `${contactLabel(type).toLowerCase()} contacts`);
-                }}
+                types={types}
+                onToggleType={onToggleType}
+                onAllTypes={() => setTypes([])}
                 query={query}
                 onQuery={setQuery}
                 selected={selectedHere}
                 picked={pickedHere && pickedHere.resnum !== null ? { chain: pickedHere.chain, resnum: pickedHere.resnum } : null}
+                flash={flash}
                 onSelect={(contact) => {
                   if (!profile) return;
                   setSelected({ path: active.path, index: profile.contacts.indexOf(contact) });
-                  if (contact.resnum !== null) viewRef.current?.focusResidues([{ chain: contact.chain, resnum: contact.resnum }]);
+                  const view = viewRef.current;
+                  if (view && contact.resnum !== null) focusOn(view, [{ chain: contact.chain, resnum: contact.resnum }]);
                 }}
                 onProfile={() => onAsk(`Profile the protein-ligand interactions of ${active.path}.`)}
               />
             )}
             {drawerTab === "quality" && <QualityTab panel={active} verdict={verdict} />}
-            {drawerTab === "files" && <FilesTab panel={active} at={structures[index]?.at} tool={structures[index]?.tool ?? active.tool} />}
+            {drawerTab === "files" && (
+              <FilesTab panel={active} at={structures[index]?.at} tool={structures[index]?.tool ?? active.tool} numbering={numbering} sequenceKnown={Boolean(targetSequence)} />
+            )}
           </div>
         )}
       </section>
@@ -603,46 +677,64 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
 
 // ---------------------------------------------------------------------------
 
-function Badge({ tone, children }: { tone: "structure" | "ok" | "bad" | "muted"; children: ReactNode }) {
-  const colour = { structure: "var(--color-structure)", ok: "var(--color-ok)", bad: "var(--color-accent)", muted: "var(--text-faint)" }[tone];
+/** The verdict in one quiet line: the values, the affinity, and a caution when the pose is below the gate. */
+function GateStrip({ verdict, panel, onQuality }: { verdict: Gate; panel: StructurePanel; onQuality: () => void }) {
+  const m = panel.metrics;
+  if (!m || verdict.status === "unknown") return null;
+  const affinity = affinityText(m);
   return (
-    <span className="shrink-0 rounded-full border px-1.5 py-px text-[10px] font-semibold whitespace-nowrap" style={{ color: colour, borderColor: colour }}>
-      {children}
-    </span>
+    <button
+      type="button"
+      onClick={onQuality}
+      title="Quality details"
+      className="border-subtle hover:bg-sunken flex shrink-0 cursor-pointer items-baseline gap-x-3 gap-y-0.5 overflow-hidden border-b px-3 py-1 text-left text-[11px] whitespace-nowrap"
+    >
+      {verdict.checks
+        .filter((check) => check.value !== "—")
+        .map((check) => (
+          <span key={check.label} className="text-muted">
+            {check.label} <span className="font-mono tabular-nums" style={{ color: check.ok === false ? "var(--color-warn)" : "var(--text-body)" }}>{check.value}</span>
+          </span>
+        ))}
+      {affinity && (
+        <span className="text-muted">
+          affinity <span className="text-body font-mono tabular-nums">{affinity}</span>
+          {m.affinity !== undefined && <span className="text-faint"> {affinityConcentration(m.affinity)}</span>}
+        </span>
+      )}
+      <span className="ml-auto truncate text-[10px]" style={{ color: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-warn)" }}>
+        {verdict.status === "pass" ? "passes the quality gate" : "below the quality gate · read affinity with caution"}
+      </span>
+    </button>
   );
 }
 
-export function GatePill({ verdict }: { verdict: Gate }) {
-  if (verdict.status === "pass") return <Badge tone="ok">Gate passed</Badge>;
-  if (verdict.status === "fail") return <Badge tone="bad">Gate failed</Badge>;
-  return null;
-}
-
-function GateStrip({ verdict, panel }: { verdict: Gate; panel: StructurePanel }) {
-  const m = panel.metrics;
-  if (!m || verdict.status === "unknown") return null;
-  const values = verdict.checks.filter((check) => check.value !== "—").map((check) => `${check.label.toLowerCase()} ${check.value}`);
-  if (verdict.status === "fail") {
-    return (
-      <div className="border-subtle flex shrink-0 items-baseline gap-2 overflow-hidden border-b px-3 py-1.5 text-[11px]" style={{ background: "var(--color-accent-soft)" }}>
-        <strong className="shrink-0" style={{ color: "var(--color-accent)" }}>
-          Affinity withheld
-        </strong>
-        <span className="truncate" title={verdict.reasons.join(" · ")}>
-          {verdict.reasons.join(" · ")}
-        </span>
-      </div>
-    );
-  }
-  const affinity = affinityText(m);
+function PdbForm({ onOpen, onCancel }: { onOpen: (id: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState("");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (value.trim()) onOpen(value.trim());
+  };
   return (
-    <div className="border-subtle flex shrink-0 items-baseline gap-2 overflow-hidden border-b px-3 py-1.5 text-[11px]" style={{ background: "color-mix(in oklch, var(--color-ok) 8%, transparent)" }}>
-      <span className="text-body truncate">
-        {values.join(" · ")}
-        {affinity && ` · affinity ${affinity} log₁₀(IC₅₀/µM)`}
-      </span>
-      <span className="text-faint shrink-0">screening estimate</span>
-    </div>
+    <form onSubmit={submit} className="flex min-w-0 flex-1 items-center gap-1">
+      <input
+        autoFocus
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => event.key === "Escape" && onCancel()}
+        placeholder="PDB id, e.g. 3MXF"
+        aria-label="PDB id"
+        maxLength={4}
+        spellCheck={false}
+        className="bg-sunken border-subtle w-32 rounded-md border px-2 py-0.5 font-mono text-[11px] uppercase outline-none focus:border-[var(--color-accent)]"
+      />
+      <button type="submit" disabled={!isPdbId(value)} className="text-body hover:bg-inset cursor-pointer rounded-md px-2 py-0.5 text-[11px] font-semibold disabled:cursor-default disabled:opacity-50">
+        Open
+      </button>
+      <button type="button" onClick={onCancel} className="text-muted hover:text-body cursor-pointer rounded-md px-2 py-0.5 text-[11px]">
+        Cancel
+      </button>
+    </form>
   );
 }
 
@@ -653,7 +745,7 @@ function HeadButton({ label, title, onClick, pressed }: { label: string; title: 
       title={title}
       aria-pressed={pressed}
       onClick={onClick}
-      className={`cursor-pointer rounded-md px-2 py-1 text-[11px] ${pressed ? "bg-inset text-body" : "text-muted hover:text-body hover:bg-inset"}`}
+      className={`shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] ${pressed ? "bg-inset text-body" : "text-muted hover:text-body hover:bg-inset"}`}
     >
       {label}
     </button>
@@ -667,9 +759,8 @@ function OverlayButton({ label, title, onClick, pressed }: { label: string; titl
       title={title}
       aria-pressed={pressed}
       onClick={onClick}
-      className={`bg-raised cursor-pointer rounded border px-2 py-0.5 text-[11px] backdrop-blur-sm ${
-        pressed ? "text-body border-[var(--color-accent)]" : "text-muted border-subtle hover:text-body hover:border-[var(--color-accent)]"
-      }`}
+      className={`bg-raised cursor-pointer rounded px-2 py-0.5 text-[11px] shadow-sm ${pressed ? "text-body" : "text-muted hover:text-body"}`}
+      style={pressed ? { boxShadow: "inset 0 -2px 0 var(--color-accent)" } : undefined}
     >
       {label}
     </button>
@@ -738,116 +829,37 @@ function StyleMenu({
   );
 }
 
-function CommandBar({ onRun, onUnknown }: { onRun: (action: ViewerAction) => void; onUnknown: (text: string) => void }) {
-  const [value, setValue] = useState("");
-  const [focused, setFocused] = useState(false);
-  const [history, setHistory] = useState<string[]>([]);
-  const [cursor, setCursor] = useState(-1);
-  const needle = value.trim().toLowerCase();
-  const suggestions = focused ? VIEWER_EXAMPLES.filter((example) => !needle || example.includes(needle)).slice(0, 4) : [];
-
-  const run = (text: string) => {
-    const command = text.trim();
-    if (!command) return;
-    const action = parseViewerCommand(command);
-    if (action) onRun(action);
-    else onUnknown(command);
-    setHistory((previous) => [command, ...previous.filter((entry) => entry !== command)].slice(0, 20));
-    setCursor(-1);
-    setValue("");
-  };
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    run(value);
-  };
-
-  return (
-    <div className="pointer-events-none absolute right-2 bottom-2 left-2 z-20">
-      <form
-        onSubmit={submit}
-        className="bg-sunken border-subtle pointer-events-auto mx-auto flex h-7 max-w-[520px] items-center border focus-within:border-[var(--color-accent)]"
-      >
-        <span aria-hidden="true" className="w-[25px] text-center text-sm" style={{ color: "var(--color-accent)" }}>
-          ⌘
-        </span>
-        <input
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") event.currentTarget.blur();
-            if (event.key === "ArrowUp" && history.length) {
-              event.preventDefault();
-              const next = Math.min(cursor + 1, history.length - 1);
-              setCursor(next);
-              setValue(history[next]);
-            }
-            if (event.key === "ArrowDown" && cursor >= 0) {
-              event.preventDefault();
-              const next = cursor - 1;
-              setCursor(next);
-              setValue(next < 0 ? "" : history[next]);
-            }
-          }}
-          spellCheck={false}
-          autoComplete="off"
-          aria-label="Viewer command"
-          placeholder="Ask the viewer… fit, focus ligand, pocket, focus ASN140, show hbonds"
-          className="text-body placeholder:text-muted h-full min-w-0 flex-1 bg-transparent px-1 text-[11px] outline-none"
-        />
-        <button
-          type="submit"
-          className="bg-inset text-muted mr-[3px] h-[22px] cursor-pointer rounded px-[7px] text-[10px] hover:bg-[var(--color-accent)] hover:text-white"
-        >
-          Run
-        </button>
-      </form>
-      {suggestions.length > 0 && (
-        <div className="pointer-events-auto mx-auto flex max-w-[520px] flex-wrap justify-center gap-[3px] pt-[3px]">
-          {suggestions.map((suggestion) => (
-            <button
-              key={suggestion}
-              type="button"
-              onMouseDown={(event) => {
-                event.preventDefault();
-                run(suggestion);
-              }}
-              className="bg-sunken border-subtle text-muted hover:text-body cursor-pointer border px-1.5 py-0.5 font-mono text-[10px] hover:border-[var(--color-accent)]"
-            >
-              {suggestion}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ContactsTab({
   profile,
+  numbering,
   smiles,
   theme,
-  typeFilter,
-  onTypeFilter,
+  types,
+  onToggleType,
+  onAllTypes,
   query,
   onQuery,
   selected,
   picked,
+  flash,
   onSelect,
   onProfile,
 }: {
   profile: InteractionsPanel | null;
+  numbering: Numbering | null;
   smiles: string | null;
   theme: Theme;
-  typeFilter: string | null;
-  onTypeFilter: (type: string | null) => void;
+  /** Types shown; empty means all. */
+  types: string[];
+  onToggleType: (type: string) => void;
+  onAllTypes: () => void;
   query: string;
   onQuery: (text: string) => void;
   selected: Contact | null;
   /** The residue clicked in 3D; its contacts are highlighted and scrolled to. */
   picked: { chain: string | null; resnum: number } | null;
+  /** Residues just clicked ("chain:resnum"), whose rows flash. */
+  flash: { keys: string[]; at: number } | null;
   onSelect: (contact: Contact) => void;
   onProfile: () => void;
 }) {
@@ -857,6 +869,19 @@ function ContactsTab({
     if (!pickedKey) return;
     listRef.current?.querySelector('[data-picked="true"]')?.scrollIntoView({ block: "nearest" });
   }, [pickedKey, selected]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!flash || !list) return;
+    const rows = flash.keys.flatMap((key) => [...list.querySelectorAll<HTMLElement>(`[data-residue="${CSS.escape(key)}"] > button`)]);
+    rows[0]?.scrollIntoView({ block: "nearest" });
+    for (const row of rows) {
+      row.animate([{ backgroundColor: "color-mix(in oklch, var(--color-structure) 28%, transparent)" }, { backgroundColor: "transparent" }], {
+        duration: 1400,
+        easing: "ease-out",
+      });
+    }
+  }, [flash]);
 
   if (!profile) {
     return (
@@ -871,57 +896,74 @@ function ContactsTab({
   if (profile.error) return <p className="py-4 text-center text-xs" style={{ color: "var(--color-accent)" }}>{profile.error}</p>;
 
   const needle = query.trim().toLowerCase();
-  const rows = profile.contacts.filter(
-    (contact) =>
-      (!typeFilter || contact.type === typeFilter) &&
-      (!needle || [contact.type, contact.label, contact.fragment, contact.ligandAtom, contact.receptorAtom].join(" ").toLowerCase().includes(needle)),
-  );
+  const rows = profile.contacts.filter((contact) => {
+    if (!matchesTypes(contact, types)) return false;
+    if (!needle) return true;
+    const shown = contact.resnum !== null ? `${contact.resname}${displayNumber(numbering, contact.chain, contact.resnum)}` : "";
+    return [contact.type, contactLabel(contact.type), contact.label, shown, contact.fragment, contact.ligandAtom, contact.receptorAtom].join(" ").toLowerCase().includes(needle);
+  });
   const highlight = selected?.ligandAtomIndex != null && selected.ligandAtomIndex >= 0 ? [selected.ligandAtomIndex] : undefined;
+  const selectedName = selected?.resnum != null ? residueLabel(numbering, selected.resname, selected.chain, selected.resnum).label : selected?.label;
 
   return (
     <div className="flex gap-3">
       <div className="min-w-0 flex-1">
-        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <div className="mb-2 flex flex-wrap items-center gap-1">
           <input
             type="search"
             value={query}
             onChange={(event) => onQuery(event.target.value)}
             placeholder="Filter contacts"
             aria-label="Filter contacts"
-            className="bg-sunken border-subtle w-32 rounded border px-2 py-0.5 text-[11px] outline-none focus:border-[var(--color-accent)]"
+            className="bg-sunken border-subtle mr-1 w-28 rounded border px-2 py-0.5 text-[11px] outline-none focus:border-[var(--color-accent)]"
           />
-          {sortedTypes(profile.counts).map((type) => (
-            <button
-              key={type}
-              type="button"
-              aria-pressed={typeFilter === type}
-              onClick={() => onTypeFilter(typeFilter === type ? null : type)}
-              title={`Show ${contactLabel(type).toLowerCase()} contacts on the structure`}
-              className={`flex cursor-pointer items-center gap-1 rounded-full border px-1.5 py-px text-[10px] ${typeFilter === type ? "border-strong bg-inset text-body" : "border-subtle text-muted hover:text-body"}`}
-            >
-              <span className="size-1.5 rounded-full" style={{ background: contactColor(type, theme) }} />
-              {contactLabel(type)}
-              <b className="font-semibold">{profile.counts[type]}</b>
-            </button>
-          ))}
+          <div role="group" aria-label="Contact types" className="flex flex-wrap items-center gap-1">
+            {sortedTypes(profile.counts).map((type) => {
+              const on = types.includes(type);
+              const dimmed = types.length > 0 && !on;
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => onToggleType(type)}
+                  title={on ? `Stop showing ${contactLabel(type).toLowerCase()} contacts` : types.length ? `Also show ${contactLabel(type).toLowerCase()} contacts` : `Show only ${contactLabel(type).toLowerCase()} contacts`}
+                  className={`flex cursor-pointer items-center gap-1 rounded-full px-1.5 py-px text-[10px] transition-opacity ${on ? "text-body" : "text-muted hover:text-body"} ${dimmed ? "opacity-50 hover:opacity-100" : ""}`}
+                  style={on ? { background: `color-mix(in oklch, ${contactColor(type, theme)} 18%, transparent)`, boxShadow: `inset 0 0 0 1px ${contactColor(type, theme)}` } : undefined}
+                >
+                  <span className="size-1.5 rounded-full" style={{ background: contactColor(type, theme) }} />
+                  {contactLabel(type)}
+                  <b className="font-semibold">{profile.counts[type]}</b>
+                </button>
+              );
+            })}
+            {types.length > 0 && (
+              <button type="button" onClick={onAllTypes} className="text-faint hover:text-body cursor-pointer px-1 text-[10px]">
+                Show all
+              </button>
+            )}
+          </div>
         </div>
         <ul ref={listRef} className="space-y-px">
           {rows.map((contact, index) => {
             const isSelected = selected === contact;
-            const isPicked =
-              picked !== null && contact.resnum === picked.resnum && (!picked.chain || !contact.chain || contact.chain === picked.chain);
+            const isPicked = picked !== null && sameResidue(picked, contact);
+            const name = contact.resnum !== null ? residueLabel(numbering, contact.resname, contact.chain, contact.resnum) : { label: contact.label, file: null };
             return (
-              <li key={index} data-picked={isPicked || undefined}>
+              <li key={index} data-picked={isPicked || undefined} data-residue={residueKey(contact.chain, contact.resnum)}>
                 <button
                   type="button"
                   onClick={() => onSelect(contact)}
                   aria-current={isSelected || undefined}
-                  className={`grid w-full cursor-pointer grid-cols-[minmax(7rem,1fr)_4.5rem_minmax(6rem,1.3fr)] items-center gap-2 rounded border px-1.5 py-1 text-left text-[11px] ${
-                    isSelected || isPicked ? "border-[var(--color-accent)]" : "hover:bg-sunken border-transparent"
+                  className={`grid w-full cursor-pointer grid-cols-[minmax(7rem,1fr)_minmax(5rem,auto)_minmax(6rem,1.3fr)] items-center gap-2 rounded px-1.5 py-1 text-left text-[11px] ${
+                    isSelected || isPicked ? "" : "hover:bg-sunken"
                   }`}
                   style={
                     isSelected || isPicked
-                      ? { background: `color-mix(in oklch, var(--color-accent) ${isSelected ? 8 : 4}%, transparent)` }
+                      ? {
+                          background: `color-mix(in oklch, var(--color-structure) ${isSelected ? 12 : 6}%, transparent)`,
+                          boxShadow: isSelected ? "inset 2px 0 0 var(--color-structure)" : undefined,
+                        }
                       : undefined
                   }
                 >
@@ -929,10 +971,15 @@ function ContactsTab({
                     <span className="size-1.5 shrink-0 rounded-full" style={{ background: contactColor(contact.type, theme) }} />
                     {contactLabel(contact.type)}
                   </span>
-                  <strong className="font-mono">
-                    {contact.label}
-                    {contact.chain && <span className="text-faint font-normal">.{contact.chain}</span>}
-                  </strong>
+                  <span className="font-mono whitespace-nowrap">
+                    <strong>{name.label}</strong>
+                    {contact.chain && <span className="text-faint">.{contact.chain}</span>}
+                    {name.file !== null && (
+                      <span className="text-faint ml-1 text-[10px]" title="Number in the structure file">
+                        {name.file}
+                      </span>
+                    )}
+                  </span>
                   <span className="text-muted truncate font-mono">
                     {contact.distance != null ? `${contact.distance.toFixed(2)} Å` : "—"}
                     {contact.fragment ? ` · ${contact.fragment}` : ""}
@@ -952,11 +999,11 @@ function ContactsTab({
       </div>
       {smiles && (
         <div className="hidden w-36 shrink-0 sm:block">
-          <div className="bg-sunken border-subtle rounded-lg border p-1">
+          <div className="bg-sunken rounded-lg p-1">
             <MolDepiction smiles={smiles} theme={theme} width={200} height={160} atoms={highlight} className="h-28 w-full" />
           </div>
           <p className="text-faint mt-1 text-center text-[10px]">
-            {selected ? `${selected.ligandAtom ?? "ligand atom"} → ${selected.label}` : "Pick a contact to see the ligand atom"}
+            {selected ? `${selected.ligandAtom ?? "ligand atom"} → ${selectedName}` : "Pick a contact to see the ligand atom"}
           </p>
         </div>
       )}
@@ -968,82 +1015,133 @@ function QualityTab({ panel, verdict }: { panel: StructurePanel; verdict: Gate }
   const m = panel.metrics;
   if (!m) return <p className="text-muted py-4 text-center text-xs">No confidence values were reported for this structure.</p>;
   const affinity = affinityText(m);
-  const extra: [string, string][] = [];
-  if (m.iptm !== undefined) extra.push(["Interface ipTM", m.iptm.toFixed(2)]);
-  if (m.plddt !== undefined) extra.push(["Complex pLDDT", m.plddt.toFixed(2)]);
+  const [confidence, ligandIptm, posebusters] = verdict.checks;
+  const failed = m.failedChecks ?? [];
+  const pbFailed = m.posebustersTotal !== undefined && m.posebustersPassed !== undefined ? m.posebustersTotal - m.posebustersPassed : null;
 
   return (
-    <div className="grid gap-4 text-[11px] sm:grid-cols-2">
-      <div>
-        <p className="text-faint mb-1 text-[10px] font-semibold uppercase">Confidence gate</p>
-        <table className="w-full">
-          <tbody>
-            {verdict.checks.map((check) => (
-              <tr key={check.label} className="border-subtle border-b last:border-b-0">
-                <td className="text-muted py-1">{check.label}</td>
-                <td className="py-1 text-right font-mono tabular-nums">{check.value}</td>
-                <td className="text-faint py-1 pl-2">{check.rule}</td>
-                <td className="py-1 pl-2 text-right">
-                  {check.ok === null ? (
-                    <span className="text-faint">not run</span>
-                  ) : (
-                    <span style={{ color: check.ok ? "var(--color-ok)" : "var(--color-accent)" }}>{check.ok ? "✓" : "✕"}</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {extra.map(([label, value]) => (
-              <tr key={label} className="border-subtle border-b last:border-b-0">
-                <td className="text-muted py-1">{label}</td>
-                <td className="py-1 text-right font-mono tabular-nums">{value}</td>
-                <td colSpan={2} />
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {m.failedChecks && m.failedChecks.length > 0 && (
-          <p className="mt-2" style={{ color: "var(--color-accent)" }}>
-            Failed PoseBusters checks: {m.failedChecks.join(", ")}
-          </p>
+    <div className="grid gap-x-6 gap-y-4 text-[11px] sm:grid-cols-2">
+      <section className="space-y-3">
+        <div>
+          <h4 className="text-faint mb-1.5 text-[10px] font-semibold uppercase">Pose confidence</h4>
+          <div className="grid grid-cols-3 gap-2">
+            <Metric label="Confidence" value={confidence.value} ok={confidence.ok} rule={`gate > ${GATE.confidence}`} />
+            <Metric label="Ligand ipTM" value={ligandIptm.value} ok={ligandIptm.ok} rule={`gate > ${GATE.ligandIptm}`} />
+            <Metric label="PoseBusters" value={posebusters.value} ok={posebusters.ok} rule="gate: all pass" />
+          </div>
+          {(m.iptm !== undefined || m.plddt !== undefined) && (
+            <p className="text-muted mt-1.5">
+              {m.iptm !== undefined && (
+                <>
+                  Interface ipTM <span className="text-body font-mono">{m.iptm.toFixed(2)}</span>
+                </>
+              )}
+              {m.iptm !== undefined && m.plddt !== undefined && " · "}
+              {m.plddt !== undefined && (
+                <>
+                  complex pLDDT <span className="text-body font-mono">{m.plddt.toFixed(2)}</span>
+                </>
+              )}
+            </p>
+          )}
+        </div>
+        {posebusters.ok !== null && (
+          <div>
+            <h4 className="text-faint mb-1 text-[10px] font-semibold uppercase">PoseBusters checks</h4>
+            {failed.length > 0 && (
+              <ul className="mb-1 space-y-0.5">
+                {failed.map((name) => (
+                  <li key={name} className="flex items-baseline gap-1.5" title={name}>
+                    <span aria-hidden="true" style={{ color: "var(--color-warn)" }}>
+                      ✕
+                    </span>
+                    {posebustersCheck(name)}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {failed.length === 0 && pbFailed !== null && pbFailed > 0 && (
+              <p className="mb-1" style={{ color: "var(--color-warn)" }}>
+                {pbFailed} check{pbFailed === 1 ? "" : "s"} failed; the tool did not say which.
+              </p>
+            )}
+            <p className="text-muted flex items-baseline gap-1.5">
+              <span aria-hidden="true" style={{ color: "var(--color-ok)" }}>
+                ✓
+              </span>
+              {m.posebustersPassed} of {m.posebustersTotal} passed: bond geometry, ring flatness, clashes and distance to the protein.
+            </p>
+          </div>
         )}
-      </div>
-      <div>
-        <p className="text-faint mb-1 text-[10px] font-semibold uppercase">Affinity</p>
-        {verdict.status === "pass" && affinity && m.affinity !== undefined ? (
+      </section>
+
+      <section>
+        <h4 className="text-faint mb-1.5 text-[10px] font-semibold uppercase">Predicted affinity</h4>
+        {affinity && m.affinity !== undefined ? (
           <div className="space-y-1">
             <p>
-              <span className="font-mono text-sm font-semibold tabular-nums">{affinity}</span> log₁₀(IC₅₀/1 µM)
+              <span className="font-mono text-base font-semibold tabular-nums">{affinity}</span>{" "}
+              <span className="text-muted">log₁₀(IC₅₀ / 1 µM)</span>
             </p>
             <p className="text-muted">
               {affinityConcentration(m.affinity)} · pIC₅₀ ≈ {pIC50(m.affinity).toFixed(1)}
+              {m.binderProbability !== undefined && ` · binder probability ${m.binderProbability.toFixed(2)}`}
             </p>
-            {m.binderProbability !== undefined && <p className="text-muted">Binder probability {m.binderProbability.toFixed(2)}</p>}
-            <p className="text-faint">
-              A ranking signal, not a measured constant. The unit is six log units away from pIC₅₀.
+            {verdict.status === "fail" && (
+              <p className="flex items-baseline gap-1.5 pt-1" style={{ color: "var(--color-warn)" }}>
+                <span aria-hidden="true">!</span>
+                Pose below the quality gate; read the affinity with caution.
+              </p>
+            )}
+            {verdict.status === "unknown" && <p className="text-faint pt-1">Not all gate values were reported; read the affinity with caution.</p>}
+            <p className="text-faint pt-1">
+              A ranking signal, not a measured constant.
               {affinity.includes("to") && " The two ensemble members disagree by more than one log unit, so this is a range."}
             </p>
           </div>
         ) : (
-          <div className="space-y-1">
-            <p className="font-semibold" style={{ color: verdict.status === "fail" ? "var(--color-accent)" : undefined }}>
-              {verdict.status === "fail" ? "Withheld: the pose failed the gate" : m.affinity === undefined ? "Not predicted" : "Withheld until the gate is known"}
-            </p>
-            {verdict.reasons.length > 0 && (
-              <ul className="text-muted list-disc pl-4">
-                {verdict.reasons.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            )}
-            {m.binderProbability !== undefined && <p className="text-muted">Binder probability {m.binderProbability.toFixed(2)} may still serve as a rough guide.</p>}
-          </div>
+          <p className="text-muted">
+            Not predicted for this structure.
+            {m.binderProbability !== undefined && ` Binder probability ${m.binderProbability.toFixed(2)}.`}
+          </p>
         )}
-      </div>
+        <p className="text-faint mt-3 text-[10px]">
+          Quality gate: confidence &gt; {GATE.confidence}, ligand ipTM &gt; {GATE.ligandIptm} and every PoseBusters check passing.
+        </p>
+      </section>
     </div>
   );
 }
 
-function FilesTab({ panel, tool, at }: { panel: StructurePanel; tool: string; at?: number }) {
+function Metric({ label, value, ok, rule }: { label: string; value: string; ok: boolean | null; rule: string }) {
+  const colour = ok === null ? "var(--text-faint)" : ok ? "var(--color-ok)" : "var(--color-warn)";
+  return (
+    <div className="bg-sunken rounded-md px-2 py-1.5">
+      <p className="text-muted truncate text-[10px]">{label}</p>
+      <p className="flex items-baseline gap-1">
+        <span className="font-mono text-sm font-semibold tabular-nums">{value}</span>
+        <span aria-label={ok === null ? "not run" : ok ? "passes" : "below the gate"} style={{ color: colour }}>
+          {ok === null ? "" : ok ? "✓" : "!"}
+        </span>
+      </p>
+      <p className="text-faint truncate text-[10px]">{rule}</p>
+    </div>
+  );
+}
+
+function FilesTab({
+  panel,
+  tool,
+  at,
+  numbering,
+  sequenceKnown,
+}: {
+  panel: StructurePanel;
+  tool: string;
+  at?: number;
+  numbering: Numbering | null;
+  sequenceKnown: boolean;
+}) {
   const rows: [string, ReactNode][] = [
     ["File", panel.name],
     ["Format", panel.format.toUpperCase()],
@@ -1055,6 +1153,10 @@ function FilesTab({ panel, tool, at }: { panel: StructurePanel; tool: string; at
       </span>,
     ],
     ["From", tool],
+    [
+      "Numbering",
+      numbering ? (numbering.same ? "UniProt (as in the file)" : "UniProt; the file's own numbers are shown small") : sequenceKnown ? "As in the file (no confident match to the UniProt sequence)" : "As in the file",
+    ],
   ];
   if (at) rows.push(["At", clock(at)]);
   if (panel.smiles)

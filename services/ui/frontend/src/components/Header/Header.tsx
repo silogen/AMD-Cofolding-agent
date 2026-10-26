@@ -69,7 +69,7 @@ export function Header({
       )}
 
       <div className="min-w-0 flex-1">
-        <h1 className="truncate text-sm font-bold" title={title}>
+        <h1 className="truncate text-sm font-semibold" title={title}>
           {title || "New conversation"}
         </h1>
         <div className="mt-0.5 flex items-center gap-2 text-[11px]">
@@ -78,41 +78,41 @@ export function Header({
               type="button"
               onClick={onShowTarget}
               title="Show the target"
-              className="border-subtle text-muted hover:text-body cursor-pointer rounded-full border px-2 font-semibold"
+              className="border-subtle text-muted hover:text-body cursor-pointer rounded-full border px-2"
             >
               {target}
             </button>
           ) : (
             <span className="text-faint">No target yet</span>
           )}
-          {busy && <span style={{ color: "var(--color-accent)" }}>working…</span>}
+          {busy && <span className="text-faint">working…</span>}
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+      <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
         <button
           type="button"
           onClick={healthy ? undefined : onReconnect}
           disabled={healthy}
           title={status ?? (healthy ? "Connected to the agent" : "Try to reconnect")}
           aria-label={CONNECTION_LABEL[connection]}
-          className="text-muted flex items-center gap-1.5 px-1 text-[11px] disabled:cursor-default touch:min-h-11 touch:min-w-11 touch:justify-center"
+          className="text-muted flex items-center gap-1.5 px-1.5 text-[11px] disabled:cursor-default touch:min-h-11 touch:min-w-11 touch:justify-center"
         >
           <span
             aria-hidden="true"
             className={`size-1.5 rounded-full ${connection === "connecting" || connection === "closed" ? "animate-pulse" : ""}`}
             style={{ background: healthy && !gatewayError ? "var(--color-ok)" : "var(--color-accent)" }}
           />
-          <span className="hidden sm:inline">{CONNECTION_LABEL[connection].toLowerCase()}</span>
+          {!(healthy && !gatewayError) && <span className="hidden sm:inline">{CONNECTION_LABEL[connection].toLowerCase()}</span>}
         </button>
 
         <button
           type="button"
           onClick={onOpenPalette}
           title="Commands (Ctrl+K)"
-          className="text-muted hover:text-body hidden cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[11px] sm:flex"
+          className="text-faint hover:text-body hidden cursor-pointer items-center rounded-md px-1.5 py-1 sm:flex"
         >
-          <kbd className="border-subtle rounded border px-1 font-mono text-[10px]">Ctrl K</kbd>
+          <kbd className="font-sans text-[11px]">Ctrl K</kbd>
         </button>
 
         <button
@@ -121,7 +121,7 @@ export function Header({
           aria-pressed={workbenchOpen}
           title={`${workbenchOpen ? "Hide" : "Show"} the workbench (Ctrl+B)`}
           aria-label={workbenchOpen ? "Hide the workbench" : "Show the workbench"}
-          className={`cursor-pointer rounded-md px-2.5 py-1 text-xs font-semibold ${workbenchOpen ? "text-body bg-inset" : "text-muted hover:text-body"}`}
+          className={`cursor-pointer rounded-md px-2.5 py-1 text-xs ${workbenchOpen ? "text-body bg-inset" : "text-muted hover:text-body"}`}
         >
           Workbench
         </button>

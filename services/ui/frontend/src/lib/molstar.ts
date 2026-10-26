@@ -24,25 +24,43 @@ interface QueryBuilder {
 interface SchemaItem {
   auth_asym_id?: string;
   auth_seq_id?: number;
+  auth_atom_id?: string;
+  atom_index?: number;
 }
 interface Observable<T> {
   subscribe: (next: (value: T) => void) => { unsubscribe: () => void };
 }
 interface StructureRef {
-  cell: { obj?: { data?: unknown } };
+  cell: { obj?: { data?: unknown }; transform: { ref: string } };
   components: unknown[];
 }
 type Loci = unknown;
+interface StateBuilderNode {
+  ref: string;
+  apply: (transformer: unknown, params?: unknown, options?: { tags?: string; dependsOn?: string[] }) => StateBuilderNode;
+}
+interface StateBuilder {
+  toRoot: () => StateBuilderNode;
+  delete: (ref: string) => StateBuilder;
+  commit: (options?: { doNotLogTiming?: boolean }) => Promise<unknown>;
+}
 interface Plugin {
   canvas3d?: { setProps: (props: Record<string, unknown>) => void; requestCameraReset?: (options?: object) => void };
+  state: {
+    data: { build: () => StateBuilder };
+    updateBehavior: (behavior: { id: string }, params: (old: Record<string, unknown>) => Record<string, unknown>) => Promise<unknown>;
+  };
   managers: {
     camera: {
       reset: (snapshot?: unknown, durationMs?: number) => void;
       focusLoci: (loci: Loci, options?: { extraRadius?: number; durationMs?: number }) => void;
     };
-    interactivity: { lociSelects: { deselectAll: () => void }; lociHighlights: { clearHighlights: () => void; highlight: (loci: { loci: Loci }) => void } };
+    interactivity: {
+      lociSelects: { deselectAll: () => void; selectOnly: (loci: { loci: Loci }) => void };
+      lociHighlights: { clearHighlights: () => void; highlight: (loci: { loci: Loci }) => void };
+    };
     structure: {
-      /** Shows the target and its surroundings as sticks, with the interactions between them. */
+      /** Shows the target and its surroundings as sticks. */
       focus: { setFromLoci: (loci: Loci) => void; clear: () => void };
       hierarchy: { current: { structures: StructureRef[] } };
       component: {
@@ -57,6 +75,7 @@ interface Plugin {
     labels?: { highlight: { value: { labels: ReadonlyArray<string> } } };
   };
   helpers: { viewportScreenshot?: { download: (name?: string) => Promise<void> | void } };
+  config: { set: (key: unknown, value: unknown) => void };
   layout: { setProps: (props: Record<string, unknown>) => void };
   clear: () => Promise<void> | void;
 }
@@ -77,24 +96,37 @@ interface ClickLoci {
 }
 type Property<T> = (location: Location) => T;
 interface StructureLib {
+  Structure: { eachAtomicHierarchyElement: (structure: unknown, visit: { residue?: (location: Location) => void }) => void };
   StructureElement: {
     Loci: {
       is: (loci: unknown) => boolean;
       isEmpty: (loci: unknown) => boolean;
       getFirstLocation: (loci: unknown) => Location | undefined;
+      forEachLocation: (loci: unknown, visit: (location: Location) => void) => void;
       fromExpression: (structure: unknown, expression: (Q: QueryBuilder) => Expression) => Loci;
       fromSchema: (structure: unknown, schema: { items: SchemaItem[] }) => Loci;
     };
     Location: { create: (structure: unknown, unit: BondUnit, element: number) => Location };
+    Bundle: { fromLoci: (loci: Loci) => unknown };
   };
   StructureProperties: {
+    atom: { auth_atom_id: Property<string>; sourceIndex: Property<number> };
     residue: { auth_comp_id: Property<string>; auth_seq_id: Property<number> };
     chain: { auth_asym_id: Property<string> };
+    entity: { type: Property<string> };
+  };
+}
+interface PluginLib {
+  PluginConfig: { Viewport: { ShowIllumination: unknown; ShowXR: unknown } };
+  StateTransforms: {
+    Misc: { CreateGroup: unknown };
+    Model: { MultiStructureSelectionFromBundle: unknown };
+    Representation: { StructureSelectionsDistance3D: unknown };
   };
 }
 interface MolstarGlobal {
   Viewer: { create: (element: HTMLElement, options: Record<string, unknown>) => Promise<MolstarViewer> };
-  lib?: { structure?: StructureLib };
+  lib?: { structure?: StructureLib; plugin?: PluginLib };
 }
 
 declare global {
@@ -157,6 +189,25 @@ export type BackgroundName = keyof typeof BACKGROUNDS;
 export interface Residue {
   chain?: string | null;
   resnum: number;
+  /** Three-letter code when the reference named it ("ASN140"); tells file and UniProt numbering apart. */
+  resname?: string | null;
+}
+
+/** One protein-ligand contact drawn as a dashed line. */
+export interface ContactLine {
+  chain: string | null;
+  resnum: number;
+  /** Atom name, or several for a ring ("CG CD1 CD2"); the whole residue when null. */
+  receptorAtom: string | null;
+  ligandAtom: string | null;
+  /** 0-based among the ligand's atoms, used when the name is not found. */
+  ligandAtomIndex: number | null;
+  /** "#rrggbb". */
+  color: string;
+  /** Specific interactions get a thicker line than hydrophobic contacts. */
+  strong: boolean;
+  /** Text at the middle of the line, or null for none. */
+  label: string | null;
 }
 
 /** A residue picked by clicking in the viewport. */
@@ -170,6 +221,10 @@ export interface Picked {
 const ligand = (Q: QueryBuilder) =>
   Q.struct.generator.atomGroups({ "entity-test": Q.core.rel.eq([Q.ammp("entityType"), "non-polymer"]) });
 
+const FOCUS_BEHAVIOR = "ms-plugin.create-structure-focus-representation";
+const hexColor = (color: string) => Number.parseInt(color.replace("#", ""), 16) || 0x888888;
+const atomNames = (text: string | null) => (text ?? "").split(/[\s,;+/]+/).filter(Boolean);
+
 /**
  * One Mol* viewport. Wraps the few viewer calls the UI needs, so a Mol*
  * upgrade touches this class and nothing else.
@@ -180,11 +235,17 @@ export class StructureView {
   private loadToken = 0;
   private spinning = false;
   private subscriptions: { unsubscribe: () => void }[] = [];
+  /** The state node holding the contact dashes, while there are any. */
+  private contactsRef: string | null = null;
+  /** Contact redraws run one after another, so a quick second focus does not leave the first one's dashes. */
+  private contactsQueue: Promise<void> = Promise.resolve();
+  private background = 0x000000;
   style: ViewStyleName = "cartoon";
 
   static async create(host: HTMLElement, background: number): Promise<StructureView> {
     const molstar = await loadMolstar();
     const view = new StructureView();
+    view.background = background;
     view.viewer = await molstar.Viewer.create(host, {
       layoutIsExpanded: false,
       layoutShowControls: false,
@@ -194,21 +255,39 @@ export class StructureView {
       layoutShowRemoteState: false,
       collapseLeftPanel: true,
       collapseRightPanel: true,
-      viewportShowControls: true,
+      viewportShowControls: false,
+      viewportShowReset: false,
       viewportShowExpand: false,
+      viewportShowScreenshotControls: true,
       viewportShowSettings: true,
-      viewportShowSelectionMode: true,
+      viewportShowSelectionMode: false,
       viewportShowAnimation: false,
       viewportShowTrajectoryControls: false,
       viewportShowToggleFullscreen: false,
       viewportBackgroundColor: `#${background.toString(16).padStart(6, "0")}`,
       pdbProvider: "rcsb",
     });
+    // Focus shows the target and its neighbours as sticks; the contacts drawn
+    // are the profiler's (setContacts), not Mol*'s own, which include
+    // protein-protein ones.
+    const plugin = view.viewer.plugin;
+    await plugin.state.updateBehavior({ id: FOCUS_BEHAVIOR }, (old) => ({ ...old, components: ["target", "surroundings"] })).catch(() => undefined);
+    // The viewer options cannot hide these two; the screenshot and settings buttons stay.
+    const config = molstar.lib?.plugin?.PluginConfig.Viewport;
+    if (config) {
+      plugin.config.set(config.ShowIllumination, false);
+      plugin.config.set(config.ShowXR, "never");
+      plugin.layout.setProps({});
+    }
     return view;
   }
 
   private get plugin(): Plugin | null {
     return this.disposed ? null : (this.viewer?.plugin ?? null);
+  }
+
+  private get structureRef(): StructureRef | null {
+    return this.plugin?.managers.structure.hierarchy.current.structures[0] ?? null;
   }
 
   /** Load a file, replacing what is shown. False when a newer load won. */
@@ -217,6 +296,7 @@ export class StructureView {
     const viewer = this.viewer;
     if (!viewer) return false;
     await viewer.plugin.clear();
+    this.contactsRef = null;
     if (token !== this.loadToken || this.disposed) return false;
     await viewer.loadStructureFromUrl(url, format === "cif" ? "mmcif" : "pdb", false, { label });
     if (token !== this.loadToken || this.disposed) return false;
@@ -231,17 +311,38 @@ export class StructureView {
   /** The atoms an expression or a residue list picks in the loaded structure, or null if none. */
   private lociOf(query: { expression: (Q: QueryBuilder) => Expression } | { items: SchemaItem[] }): Loci | null {
     const lib = window.molstar?.lib?.structure;
-    const structure = this.plugin?.managers.structure.hierarchy.current.structures[0]?.cell.obj?.data;
+    const structure = this.structureRef?.cell.obj?.data;
     if (!lib || !structure) return null;
     const loci =
       "expression" in query ? lib.StructureElement.Loci.fromExpression(structure, query.expression) : lib.StructureElement.Loci.fromSchema(structure, query);
     return lib.StructureElement.Loci.isEmpty(loci) ? null : loci;
   }
 
+  /** The polymer residues of the loaded structure, in file order, for renumbering. */
+  residues(): { chain: string | null; resnum: number; resname: string }[] {
+    const lib = window.molstar?.lib?.structure;
+    const structure = this.structureRef?.cell.obj?.data;
+    if (!lib || !structure) return [];
+    const seen = new Set<string>();
+    const out: { chain: string | null; resnum: number; resname: string }[] = [];
+    const P = lib.StructureProperties;
+    lib.Structure.eachAtomicHierarchyElement(structure, {
+      residue: (location) => {
+        if (P.entity.type(location) !== "polymer") return;
+        const chain = P.chain.auth_asym_id(location) || null;
+        const resnum = P.residue.auth_seq_id(location);
+        const id = `${chain}:${resnum}`;
+        if (seen.has(id)) return;
+        seen.add(id);
+        out.push({ chain, resnum, resname: P.residue.auth_comp_id(location) });
+      },
+    });
+    return out;
+  }
+
   /**
-   * Mol*'s focus: the target and every residue within 5 Å as sticks, with
-   * the hydrogen bonds, stacking and other contacts between them drawn as
-   * dashes; then the camera frames it. A camera move alone shows a cartoon.
+   * Mol*'s focus: the target and every residue within 5 Å as sticks; then
+   * the camera frames it. A camera move alone shows a cartoon.
    */
   private focus(loci: Loci, extraRadius: number): void {
     const plugin = this.plugin;
@@ -249,6 +350,99 @@ export class StructureView {
     plugin.managers.interactivity.lociSelects.deselectAll();
     plugin.managers.structure.focus.setFromLoci(loci);
     plugin.managers.camera.focusLoci(loci, { extraRadius, durationMs: 400 });
+  }
+
+  /** Replace the contact dashes with *lines*; an empty list removes them. */
+  setContacts(lines: ContactLine[]): Promise<void> {
+    this.contactsQueue = this.contactsQueue.then(() => this.drawContacts(lines)).catch(() => undefined);
+    return this.contactsQueue;
+  }
+
+  private async drawContacts(lines: ContactLine[]): Promise<void> {
+    const plugin = this.plugin;
+    if (!plugin) return;
+    if (this.contactsRef) {
+      const ref = this.contactsRef;
+      this.contactsRef = null;
+      await plugin.state.data.build().delete(ref).commit({ doNotLogTiming: true });
+    }
+    const lib = window.molstar?.lib;
+    const cell = this.structureRef?.cell;
+    if (!lines.length || !lib?.structure || !lib.plugin || !cell?.obj?.data) return;
+    const { StructureElement, StructureProperties: P } = lib.structure;
+    const T = lib.plugin.StateTransforms;
+
+    const ligandAtoms: { name: string; index: number }[] = [];
+    const ligandLoci = this.lociOf({ expression: ligand });
+    if (ligandLoci) {
+      StructureElement.Loci.forEachLocation(ligandLoci, (location) =>
+        ligandAtoms.push({ name: P.atom.auth_atom_id(location), index: P.atom.sourceIndex(location) }),
+      );
+    }
+    const ligandSide = (line: ContactLine): Loci | null => {
+      const names = atomNames(line.ligandAtom);
+      const byName = names.map((name) => ligandAtoms.find((atom) => atom.name === name)).filter((atom) => atom !== undefined);
+      const atoms =
+        byName.length > 0
+          ? byName
+          : line.ligandAtomIndex !== null && line.ligandAtomIndex >= 0 && ligandAtoms[line.ligandAtomIndex]
+            ? [ligandAtoms[line.ligandAtomIndex]]
+            : [];
+      return atoms.length ? this.lociOf({ items: atoms.map((atom) => ({ atom_index: atom.index })) }) : null;
+    };
+    const receptorSide = (line: ContactLine): Loci | null => {
+      const residue: SchemaItem = line.chain ? { auth_asym_id: line.chain, auth_seq_id: line.resnum } : { auth_seq_id: line.resnum };
+      const names = atomNames(line.receptorAtom);
+      return (names.length ? this.lociOf({ items: names.map((name) => ({ ...residue, auth_atom_id: name })) }) : null) ?? this.lociOf({ items: [residue] });
+    };
+
+    const builder = plugin.state.data.build();
+    const group = builder.toRoot().apply(T.Misc.CreateGroup, { label: "Contacts" });
+    const parent = cell.transform.ref;
+    let drawn = 0;
+    for (const line of lines) {
+      const a = receptorSide(line);
+      const b = ligandSide(line);
+      if (!a || !b) continue;
+      const color = hexColor(line.color);
+      group
+        .apply(
+          T.Model.MultiStructureSelectionFromBundle,
+          {
+            selections: [
+              { key: "a", groupId: "a", ref: parent, bundle: StructureElement.Bundle.fromLoci(a) },
+              { key: "b", groupId: "b", ref: parent, bundle: StructureElement.Bundle.fromLoci(b) },
+            ],
+            isTransitive: true,
+            label: "Contact",
+          },
+          { dependsOn: [parent] },
+        )
+        .apply(T.Representation.StructureSelectionsDistance3D, {
+          unitLabel: "Å",
+          linesColor: color,
+          linesSize: line.strong ? 0.07 : 0.04,
+          dashLength: 0.12,
+          alpha: line.strong ? 1 : 0.8,
+          visuals: line.label ? ["lines", "text"] : ["lines"],
+          customText: line.label ?? "",
+          textColor: color,
+          textSize: 0.32,
+          borderWidth: 0.25,
+          borderColor: this.background,
+        });
+      drawn++;
+    }
+    if (!drawn) return;
+    await builder.commit({ doNotLogTiming: true });
+    this.contactsRef = group.ref;
+  }
+
+  /** A soft glow on residues, to show which ones a click picked. */
+  markResidues(residues: Residue[]): void {
+    const items = residues.map((r) => (r.chain ? { auth_asym_id: r.chain, auth_seq_id: r.resnum } : { auth_seq_id: r.resnum }));
+    const loci = items.length ? this.lociOf({ items }) : null;
+    if (loci) this.plugin?.managers.interactivity.lociSelects.selectOnly({ loci });
   }
 
   /** False when the structure has no ligand. */
@@ -265,14 +459,14 @@ export class StructureView {
     return loci !== null;
   }
 
-  /** Focus residues with their contacts, or only light them up. False when none is in the structure. */
+  /** Focus residues with their neighbours, or only light them up. False when none is in the structure. */
   focusResidues(residues: Residue[], action: "focus" | "highlight" = "focus"): boolean {
     if (!residues.length) return false;
     const items = residues.map((r) => (r.chain ? { auth_asym_id: r.chain, auth_seq_id: r.resnum } : { auth_seq_id: r.resnum }));
     const loci = this.lociOf({ items });
     if (!loci) return false;
     if (action === "focus") this.focus(loci, 3);
-    else this.plugin?.managers.interactivity.lociHighlights.highlight({ loci });
+    this.plugin?.managers.interactivity.lociSelects.selectOnly({ loci });
     return true;
   }
 
@@ -282,6 +476,7 @@ export class StructureView {
     plugin.managers.structure.focus.clear();
     plugin.managers.interactivity.lociSelects.deselectAll();
     plugin.managers.interactivity.lociHighlights.clearHighlights();
+    void this.setContacts([]);
   }
 
   async setStyle(style: ViewStyleName): Promise<void> {
@@ -304,6 +499,7 @@ export class StructureView {
   }
 
   setBackground(color: number): void {
+    this.background = color;
     this.plugin?.canvas3d?.setProps({ renderer: { backgroundColor: color } });
   }
 

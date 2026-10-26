@@ -36,6 +36,7 @@ import {
   type TtpSection,
   type TtpSummary,
 } from "../../lib/ttp";
+import { TtpBuilder } from "../TtpBuilder/TtpBuilder";
 import { TransformCurve } from "./TransformCurve";
 
 interface Props {
@@ -114,7 +115,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
             ? `Could not load TTP "${selectedId}": ${remote.error}`
             : list.state === "error"
               ? `Could not list TTPs: ${list.message}`
-              : "No TTP yet. Ask the agent to create a target product profile; its objectives, windows and weights appear here to edit."}
+              : "No TTP yet. Create one with + New TTP, or ask the agent to; its objectives, windows and weights appear here to edit."}
         </p>
       </Shell>
     );
@@ -356,6 +357,7 @@ function Shell({
   onRefresh: () => void;
   children: ReactNode;
 }) {
+  const [building, setBuilding] = useState(false);
   const items = list.state === "ready" ? list.items : [];
   const options = selectedId && !items.some((t) => t.id === selectedId) ? [{ id: selectedId, name: selectedId, version: 0 }, ...items] : items;
   return (
@@ -389,8 +391,26 @@ function Shell({
         >
           Refresh
         </button>
+        <button
+          type="button"
+          onClick={() => setBuilding(true)}
+          title="Define a new target product profile"
+          className="bg-inset text-body hover:bg-sunken shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold touch:min-h-11"
+        >
+          + New TTP
+        </button>
       </div>
       {children}
+      {building && (
+        <TtpBuilder
+          onClose={() => setBuilding(false)}
+          onCreated={(ttp) => {
+            setBuilding(false);
+            onSelect(ttp.id);
+            onRefresh();
+          }}
+        />
+      )}
     </div>
   );
 }

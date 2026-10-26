@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { Contact } from "../types/api";
+import type { ContactLine } from "./molstar";
 
 /** Interaction types of the profiler, with the colour each one has everywhere in the UI. */
 export const CONTACT_TYPES: Record<string, { label: string; color: string }> = {
@@ -40,13 +41,55 @@ export function contactColor(type: string, theme: "dark" | "light" = currentThem
 
 /** Types most worth reading first: specific interactions before generic contacts. */
 const ORDER = ["covalent", "ionic", "hbond", "halogen_bond", "pi_stacking", "pi_cation", "cation_pi", "metal", "water_bridge"];
+const rank = (type: string) => {
+  const index = ORDER.indexOf(type);
+  return index < 0 ? ORDER.length : index;
+};
 
 export function sortedTypes(counts: Record<string, number>): string[] {
-  const rank = (type: string) => {
-    const index = ORDER.indexOf(type);
-    return index < 0 ? ORDER.length : index;
-  };
   return Object.keys(counts).sort((a, b) => rank(a) - rank(b) || counts[b] - counts[a]);
+}
+
+/** The contact types a chip click leaves shown: none selected means all. */
+export function toggleType(selected: string[], type: string): string[] {
+  return selected.includes(type) ? selected.filter((t) => t !== type) : [...selected, type];
+}
+
+export const matchesTypes = (contact: Contact, selected: string[]) => selected.length === 0 || selected.includes(contact.type);
+
+/** Up to this many dashes carry their distance; more would be unreadable. */
+const LABELLED = 10;
+/** Contacts any close packing makes, as opposed to directed interactions. */
+const GENERIC = new Set(["hydrophobic", "vdw_contact"]);
+
+/**
+ * One dashed line per contact, the most specific type first when two share
+ * the same pair of atoms (a CH-π contact is also a hydrophobic one).
+ */
+export function contactLines(contacts: Contact[], theme: "dark" | "light"): ContactLine[] {
+  const seen = new Set<string>();
+  const kept: Contact[] = [];
+  const generic = (type: string) => (GENERIC.has(type) ? 1 : 0);
+  for (const c of [...contacts].sort((a, b) => generic(a.type) - generic(b.type) || rank(a.type) - rank(b.type))) {
+    const pair = `${c.chain}:${c.resnum}:${c.receptorAtom}|${c.ligandAtom ?? c.ligandAtomIndex}`;
+    if (c.resnum === null || seen.has(pair)) continue;
+    seen.add(pair);
+    kept.push(c);
+  }
+  return kept.map((c) => {
+    const strong = rank(c.type) < ORDER.length;
+    const labelled = strong || kept.length <= LABELLED;
+    return {
+      chain: c.chain,
+      resnum: c.resnum as number,
+      receptorAtom: c.receptorAtom,
+      ligandAtom: c.ligandAtom,
+      ligandAtomIndex: c.ligandAtomIndex,
+      color: contactColor(c.type, theme),
+      strong,
+      label: labelled && c.distance != null ? `${c.distance.toFixed(1)} Å` : null,
+    };
+  });
 }
 
 /** Distinct residues of a set of contacts, in the order they first appear. */

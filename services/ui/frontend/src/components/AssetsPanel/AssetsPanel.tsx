@@ -76,7 +76,7 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
           type="button"
           onClick={refresh}
           disabled={listing.state === "loading"}
-          className="bg-inset text-muted hover:text-body shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium disabled:cursor-default disabled:opacity-50 touch:min-h-11"
+          className="text-muted hover:text-body hover:bg-inset shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] disabled:cursor-default disabled:opacity-50 touch:min-h-11"
         >
           {listing.state === "loading" ? "Loading\u2026" : "Refresh"}
         </button>
@@ -92,36 +92,35 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
         />
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
         {listing.state === "error" && (
-          <p className="bg-sunken border-subtle rounded-lg border px-3 py-2 text-[11px]" style={{ color: "var(--color-accent)" }}>
+          <p className="border-subtle rounded-md border border-l-2 px-3 py-2 text-[11px]" style={{ borderLeftColor: "var(--color-accent)" }}>
             Could not list the shared volume: {listing.message}
           </p>
         )}
-        {listing.state === "ready" && listing.note && <p className="text-muted bg-sunken border-subtle rounded-lg border px-3 py-2 text-[11px]">{listing.note}</p>}
-        <p className="text-faint flex items-start gap-1.5 px-1 text-[10px] leading-snug">
-          <span aria-hidden="true" style={{ color: "var(--color-structure)" }}>{"\u24d8"}</span>
+        {listing.state === "ready" && listing.note && <p className="text-muted px-1 text-[11px]">{listing.note}</p>}
+        <p className="text-faint px-1 text-[11px] leading-snug">
           Paths are part of the service contract and cannot be fabricated by the UI. Insert one into the prompt to ground the agent.
         </p>
         {groups.map((group) => (
           <section key={group.folder}>
-            <h3 className="text-muted mb-1 px-1 font-mono text-[11px] font-semibold">
-              {group.folder} <span className="text-faint font-normal">{"\u00b7"} {group.assets.length}</span>
+            <h3 className="text-muted mb-1.5 px-1 font-mono text-[11px]">
+              {group.folder} <span className="text-faint">{"\u00b7"} {group.assets.length}</span>
             </h3>
-            <div className="bg-raised border-subtle shadow-card overflow-x-auto rounded-xl border">
+            <div className="border-subtle overflow-x-auto rounded-lg border">
               <table className="w-full min-w-[34rem] table-fixed border-collapse text-[11px]">
                 <colgroup>
                   <col />
-                  <col className="w-52" />
+                  <col className="w-48" />
                   <col className="w-28" />
                   <col className="w-40" />
                 </colgroup>
                 <thead>
-                  <tr className="text-faint border-subtle border-b text-left text-[10px] uppercase tracking-wide">
-                    <th className="px-3 py-1.5 font-medium">Path</th>
-                    <th className="px-2 py-1.5 font-medium">Type</th>
-                    <th className="px-2 py-1.5 font-medium">Producer</th>
-                    <th className="px-2 py-1.5 text-right font-medium">Actions</th>
+                  <tr className="text-faint border-subtle border-b text-left text-[10px]">
+                    <th className="px-3 py-1.5 font-normal">Path</th>
+                    <th className="px-2 py-1.5 font-normal">Type</th>
+                    <th className="px-2 py-1.5 font-normal">Producer</th>
+                    <th className="px-2 py-1.5 text-right font-normal">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -147,19 +146,20 @@ function AssetRow({ asset, onOpenStructure, onInsert }: { asset: Asset; onOpenSt
   const openable = canOpen(asset);
   const kind = ASSET_GROUPS.find((g) => g.kind === asset.kind);
   return (
-    <tr className="border-subtle border-b last:border-b-0">
+    <tr className="border-subtle group hover:bg-sunken border-b last:border-b-0">
       <td className="px-3 py-1.5">
         <div className="flex min-w-0 items-center gap-1">
           <span className="min-w-0 flex-1 truncate font-mono" title={asset.path} dir="rtl">
             &lrm;
             {asset.path}
           </span>
-          <CopyButton value={asset.path} label="Copy" />
+          <span className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 touch:opacity-100">
+            <CopyButton value={asset.path} label="Copy" />
+          </span>
         </div>
       </td>
       <td className="whitespace-nowrap px-2 py-1.5">
         <span className="inline-flex items-center gap-1.5">
-          <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: kind?.colour }} />
           <span className="text-muted">{kind?.label ?? asset.kind}</span>
           <span className="text-faint font-mono text-[10px] uppercase">{asset.ext}</span>
           {asset.queryLength !== null && <span className="text-faint font-mono text-[10px]">{"\u00b7"} {asset.queryLength} aa</span>}
@@ -171,8 +171,7 @@ function AssetRow({ asset, onOpenStructure, onInsert }: { asset: Asset; onOpenSt
           <button
             type="button"
             onClick={() => onOpenStructure(sharedRelative(asset.path) ?? asset.path)}
-            className="cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold text-white transition-opacity hover:opacity-90 touch:min-h-11"
-            style={{ background: "var(--color-accent)" }}
+            className="border-subtle hover:border-strong text-body cursor-pointer rounded-md border px-2 py-0.5 text-[11px] touch:min-h-11"
           >
             Open
           </button>
@@ -181,12 +180,12 @@ function AssetRow({ asset, onOpenStructure, onInsert }: { asset: Asset; onOpenSt
           type="button"
           onClick={() => onInsert(asset.path)}
           title="Insert the path into the prompt"
-          className="text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11"
+          className="text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 text-[11px] touch:min-h-11"
         >
           Insert
         </button>
         {asset.url && (
-          <a href={asset.url} download={asset.name} className="text-muted hover:text-body rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11">
+          <a href={asset.url} download={asset.name} className="text-muted hover:text-body hover:bg-inset rounded-md px-2 py-1 text-[11px] touch:min-h-11">
             Download
           </a>
         )}

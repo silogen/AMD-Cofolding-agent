@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from reinvent4_agent.web.artifacts import extract_panels
 from reinvent4_agent.web.events import WebSocketEventHandler
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,26 @@ def _now() -> str:
 def _new_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"s-{stamp}-{secrets.token_hex(3)}"
+
+
+def refresh_panels(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Derive the panels of recorded tool results that have none.
+
+    Panels are derived when a result arrives, so a conversation recorded
+    before the UI could show a kind of result (ADMET predictions, say) would
+    never show it.  Results with panels are left as recorded.
+    """
+    arguments: dict[str, Any] = {}
+    for event in events:
+        kind = event.get("type")
+        if kind == "tool_call":
+            arguments[event.get("id")] = event.get("arguments")
+        elif kind == "tool_result" and not event.get("panels") and not event.get("isError"):
+            result = event.get("result")
+            if isinstance(result, str):
+                called = arguments.get(event.get("id"))
+                event["panels"] = extract_panels(event.get("name", ""), result, called if isinstance(called, dict) else None)
+    return events
 
 
 class SessionStore:
@@ -126,7 +147,7 @@ class SessionStore:
                         events.append(json.loads(line))
         except FileNotFoundError:
             pass
-        return events
+        return refresh_panels(events)
 
     def delete(self, session_id: str) -> None:
         shutil.rmtree(self._dir(session_id), ignore_errors=True)
@@ -189,14 +210,21 @@ class LiveSession:
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self.subscribers.discard(queue)
 
-    def start_turn(self, content: str) -> bool:
-        """Start a turn.  False when one is already running."""
+    def start_turn(self, content: str, effort: str | None = None) -> bool:
+        """Start a turn.  False when one is already running.
+
+        *effort* sets the reasoning effort of this turn and the ones after
+        it, on backends that have one.
+        """
         if self.busy:
             return False
+        backend = getattr(self.agent, "backend", None)
+        if effort and hasattr(backend, "reasoning_effort"):
+            backend.reasoning_effort = effort
         if not self.meta.get("title"):
             first_line = content.strip().splitlines()[0] if content.strip() else ""
             self.meta["title"] = first_line[:_TITLE_CHARS]
-        self.publish({"type": "user_message", "content": content})
+        self.publish({"type": "user_message", "content": content, **({"effort": effort} if effort else {})})
         self.publish({"type": "status", "state": "busy"})
         self.meta["turns"] = sum(1 for event in self.events if event.get("type") == "user_message")
         self.meta["updated"] = _now()

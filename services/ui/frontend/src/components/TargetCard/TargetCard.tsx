@@ -4,6 +4,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { callTool } from "../../lib/api";
 import { sendToViewer } from "../../lib/viewerBus";
+import { openPdbEntry } from "../../lib/rcsb";
 import { hasTargetFacts, mergeUniprot, payloadError, pocketBySequence, type PocketResidue, type TargetFacts } from "../../lib/ttp";
 import { CopyButton } from "../CopyButton/CopyButton";
 
@@ -52,11 +53,22 @@ export function TargetCard({ facts, onAsk }: Props) {
     sendToViewer({
       action: {
         kind: "residues",
-        residues: residues.filter((r) => r.resnum !== null).map((r) => ({ chain: r.chain, resnum: r.resnum as number })),
+        residues: residues.filter((r) => r.resnum !== null).map((r) => ({ chain: r.chain, resnum: r.resnum as number, resname: r.resname })),
         mode: "focus",
       },
       source: "target",
     });
+
+  const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
+  const openEntry = async (id: string) => {
+    setOpening({ id });
+    try {
+      await openPdbEntry(id);
+      setOpening(null);
+    } catch (err) {
+      setOpening({ id, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
 
   const pocket = showPocket ? shown.pocket : shown.pocket.slice(0, POCKET_PREVIEW);
   const sequence = shown.sequence ?? "";
@@ -112,17 +124,35 @@ export function TargetCard({ facts, onAsk }: Props) {
               </h3>
               <div className="flex flex-wrap gap-1">
                 {shown.pdbIds.map((id) => (
-                  <a
-                    key={id}
-                    href={`https://www.rcsb.org/structure/${encodeURIComponent(id)}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="bg-sunken border-subtle hover:border-strong rounded-md border px-1.5 py-px font-mono text-[10px]"
-                  >
-                    {id}
-                  </a>
+                  <span key={id} className="bg-sunken group inline-flex items-center rounded-md font-mono text-[10px]">
+                    <button
+                      type="button"
+                      onClick={() => void openEntry(id)}
+                      disabled={opening?.id === id && !opening.error}
+                      title={`Open ${id} in the 3D viewer`}
+                      className="hover:bg-inset cursor-pointer rounded-l-md py-px pr-1 pl-1.5 disabled:cursor-wait disabled:opacity-60"
+                      style={{ color: "var(--color-structure)" }}
+                    >
+                      {id}
+                    </button>
+                    <a
+                      href={`https://www.rcsb.org/structure/${encodeURIComponent(id)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`${id} on rcsb.org`}
+                      aria-label={`${id} on rcsb.org`}
+                      className="text-faint hover:text-body rounded-r-md py-px pr-1.5 pl-0.5"
+                    >
+                      ↗
+                    </a>
+                  </span>
                 ))}
               </div>
+              {opening?.error && (
+                <p className="mt-1 text-[10px]" style={{ color: "var(--color-warn)" }}>
+                  {opening.error}
+                </p>
+              )}
             </div>
           )}
 

@@ -1,0 +1,17 @@
+/*
+ * Copyright Advanced Micro Devices, Inc.
+ * SPDX-License-Identifier: MIT
+ */
+
+/* Ketcher sizes itself from its container, which must have a height. */
+.ketcher-host > div {
+  height: 100%;
+}
+
+/*
+ * Ketcher has no dark theme. Inverting it and turning the hues back keeps
+ * element colours recognisable (O red, N blue) on a dark canvas.
+ */
+.ketcher-host.ketcher-dark > div {
+  filter: invert(0.9) hue-rotate(180deg);
+}

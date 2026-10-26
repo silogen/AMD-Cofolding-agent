@@ -53,11 +53,51 @@ export const STRUCTURE_KINDS: Record<StructureKind, { label: string; color: stri
 };
 
 /** What kind of structure a file is, inferred from its path; null when the path does not say. */
-export function structureKind(path: string, predictedMetrics = false): StructureKind | null {
+export function structureKind(path: string, predictedMetrics = false, tool?: string): StructureKind | null {
+  if (tool === "rcsb") return "experimental";
   const p = clean(path).toLowerCase();
   const name = p.slice(p.lastIndexOf("/") + 1);
   if (/(^|\/)(prep|prepared|structure_prep|prepped)[^/]*\/|_(prep|prepared|fixed|protonated|clean(ed)?)\.(pdb|cif|mmcif)$/.test(p)) return "prepared";
   if (/(^|\/)(predictions|boltz_results[^/]*|cofold[^/]*)\//.test(p) || predictedMetrics) return "predicted";
   if (/(^|\/)(rcsb|pdb|pdb_files)\//.test(p) || /^(pdb)?[0-9][a-z0-9]{3}\.(pdb|cif|mmcif|ent)(\.gz)?$/.test(name)) return "experimental";
   return null;
+}
+
+/** A structure in a one-line list: "JQ1 · 7aa793db · pose 2". */
+export function structureOption(title: string, path: string, run: string | null): string {
+  const { sample } = poseKey(path);
+  return [title, run, sample !== null && sample > 0 ? `pose ${sample + 1}` : null].filter(Boolean).join(" · ");
+}
+
+/** PoseBusters checks in plain words, by the names the tool reports. */
+const POSEBUSTERS: Record<string, string> = {
+  mol_pred_loaded: "Ligand file reads",
+  mol_true_loaded: "Reference ligand reads",
+  mol_cond_loaded: "Protein file reads",
+  sanitization: "Ligand chemistry is valid",
+  inchi_convertible: "Ligand converts to InChI",
+  all_atoms_connected: "All ligand atoms are connected",
+  bond_lengths: "Bond lengths are realistic",
+  bond_angles: "Bond angles are realistic",
+  internal_steric_clash: "No clash within the ligand",
+  aromatic_ring_flatness: "Aromatic rings are flat",
+  non_aromatic_ring_non_flatness: "Saturated rings are puckered",
+  double_bond_flatness: "Double bonds are flat",
+  internal_energy: "Ligand strain is reasonable",
+  protein_ligand_maximum_distance: "Ligand sits at the protein",
+  minimum_distance_to_protein: "No clash with the protein",
+  minimum_distance_to_organic_cofactors: "No clash with organic cofactors",
+  minimum_distance_to_inorganic_cofactors: "No clash with ions or metals",
+  minimum_distance_to_waters: "No clash with waters",
+  volume_overlap_with_protein: "No overlap with the protein",
+  volume_overlap_with_organic_cofactors: "No overlap with organic cofactors",
+  volume_overlap_with_inorganic_cofactors: "No overlap with ions or metals",
+  volume_overlap_with_waters: "No overlap with waters",
+};
+
+export function posebustersCheck(name: string): string {
+  const key = name.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (POSEBUSTERS[key]) return POSEBUSTERS[key];
+  const words = name.replace(/[_-]+/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
