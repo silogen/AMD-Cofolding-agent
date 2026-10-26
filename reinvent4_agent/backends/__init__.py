@@ -106,6 +106,36 @@ class LLMBackend(ABC):
     def reset(self, system_prompt: str) -> None:
         """Clear history and reinitialise with the system prompt."""
 
+    def export_history(self) -> list[dict[str, Any]]:
+        """The conversation as JSON-safe messages, without the system prompt.
+
+        Saved by the web gateway so a conversation survives a restart.
+        """
+        messages = getattr(self, "_messages", [])
+        return [jsonable(m) for m in messages if m.get("role") != "system"]
+
+    def import_history(self, messages: list[dict[str, Any]]) -> None:
+        """Replace the conversation with *messages* from ``export_history``.
+
+        The current system prompt is kept, so a restored conversation runs
+        under the prompt of the running version rather than a saved copy.
+        """
+        kept = [m for m in getattr(self, "_messages", []) if m.get("role") == "system"]
+        self._messages = kept + [m for m in messages if m.get("role") != "system"]
+
+
+def jsonable(value: Any) -> Any:
+    """Convert SDK objects (pydantic models) inside a message to plain data."""
+    if hasattr(value, "model_dump"):
+        return jsonable(value.model_dump(mode="json", exclude_none=True))
+    if isinstance(value, dict):
+        return {str(k): jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
 
 def connection_failure_report(
     exc: BaseException,

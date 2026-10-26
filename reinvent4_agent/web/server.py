@@ -11,10 +11,20 @@ volume and are fetched over ``/api/artifacts``.
 
 Endpoints
 ---------
-``GET  /api/health``           liveness and readiness.
-``GET  /api/session``          backend, model and available tools.
-``GET  /api/artifacts/{path}`` one file from the shared volume.
-``WS   /api/chat``             the conversation itself.
+``GET    /api/health``                       liveness and readiness.
+``GET    /api/session``                      backend, model and available tools.
+``GET    /api/artifacts/{path}``             one file from the shared volume.
+``GET    /api/sessions``                     saved conversations, newest first.
+``PATCH  /api/sessions/{id}``                rename one.
+``DELETE /api/sessions/{id}``                delete one.
+``GET    /api/sessions/{id}/events``         every event of one, for export.
+``POST   /api/tools/{name}``                 call one MCP tool without the LLM.
+``GET    /api/jobs/{job_id}/files/{name}``   a results, log or config file of a job.
+``WS     /api/chat?session=&after=``         the conversation itself.
+
+Conversations are sessions owned by the gateway (see ``sessions.py``): a turn
+keeps running when the browser goes away, and the socket replays the events a
+returning browser missed.
 """
 
 from __future__ import annotations
@@ -25,14 +35,17 @@ import hmac
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from reinvent4_agent.web.artifacts import resolve_artifact
+from reinvent4_agent.web.artifacts import extract_panels, parse_tool_result, resolve_artifact
 from reinvent4_agent.web.events import WebSocketEventHandler
+from reinvent4_agent.web.sessions import SessionManager, SessionStore, valid_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +62,43 @@ _ARTIFACT_MEDIA_TYPES = {
     ".smi": "text/plain",
     ".a3m": "text/plain",
 }
+
+
+#: Tools the UI panels may call directly.  Reads only, plus the three job and
+#: profile actions the panels offer behind a confirmation.  Everything else
+#: (creating or deleting profiles, scoring, launching training) stays with the
+#: agent, so it is part of a conversation and its record.
+DIRECT_TOOLS = frozenset(
+    {
+        "list_jobs",
+        "get_optimization_status",
+        "get_top_candidates",
+        "read_results",
+        "get_job_alerts",
+        "list_ttps",
+        "get_ttp",
+        "list_shared_assets",
+        "list_external_services",
+        "list_available_models",
+        "list_scoring_components",
+        "list_transforms",
+        "fetch_target_info",
+        "fetch_compound",
+        "predict_admet",
+        "predict_retrodmta",
+        "stop_optimization",
+        "update_ttp",
+        "run_optimization",
+    }
+)
+
+#: Where the job manager keeps one ``job_<id>`` directory per job.
+_JOBS_DIR_ENV = "REINVENT4_JOBS_DIR"
+_DEFAULT_JOBS_DIR = "/data/reinvent4_mcp/jobs"
+_JOB_ID = re.compile(r"^[0-9a-f]{6,32}$")
+#: Files of a job the browser may read.  Names, not patterns, except the
+#: numbered checkpoints and results REINVENT writes.
+_JOB_FILES = re.compile(r"^(reinvent\.log|config\.toml|job_metadata\.json|monitor_actions\.jsonl|[\w.-]+\.csv)$")
 
 
 def _env_flag(name: str) -> bool:
@@ -112,13 +162,6 @@ def token_ok(sent: str | None, expected: str | None) -> bool:
 
 
 @dataclass
-class _Session:
-    """State of one chat connection."""
-
-    running: asyncio.Task[str] | None = None
-
-
-@dataclass
 class WebConfig:
     """Gateway settings, read from the same environment as ``dd-agent``.
 
@@ -138,6 +181,15 @@ class WebConfig:
     max_tokens: int = field(default_factory=lambda: _env_int("REINVENT4_AGENT_MAX_TOKENS") or 4096)
     log_dir: str | None = field(default_factory=lambda: os.environ.get("REINVENT4_AGENT_LOG_DIR"))
     server_command: str = field(default_factory=lambda: os.environ.get("REINVENT4_MCP_COMMAND", "dd-mcp"))
+    session_dir: str | None = field(default_factory=lambda: os.environ.get("REINVENT4_WEB_SESSION_DIR"))
+
+    def resolved_session_dir(self) -> Path:
+        """Saved conversations go next to the transcripts unless set apart."""
+        if self.session_dir:
+            return Path(self.session_dir).expanduser()
+        if self.log_dir:
+            return Path(self.log_dir).expanduser() / "web_sessions"
+        return Path("~/.reinvent4_agent/web_sessions").expanduser()
 
     def resolved_api_key(self) -> str | None:
         """Mirror the terminal client's key resolution, without exiting."""
@@ -200,6 +252,12 @@ class AgentGateway:
     def tool_names(self) -> list[str]:
         return [tool["name"] for tool in self._tools]
 
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        """Call one tool on the shared MCP connection, outside any conversation."""
+        if self._mcp is None:
+            raise RuntimeError("MCP server is not running")
+        return await self._mcp.call_tool(name, arguments)
+
     def new_agent(self, handler: WebSocketEventHandler) -> Any:
         """Build an agent for one chat session, sharing the MCP connection."""
         from reinvent4_agent.agent import Agent
@@ -234,6 +292,8 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     """Build the gateway application."""
     settings = config or WebConfig()
     gateway = AgentGateway(settings)
+    sessions = SessionManager(SessionStore(settings.resolved_session_dir()), gateway.new_agent)
+    jobs_dir = Path(os.environ.get(_JOBS_DIR_ENV, _DEFAULT_JOBS_DIR))
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -241,6 +301,7 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await sessions.close()
             await gateway.stop()
 
     app = FastAPI(
@@ -288,6 +349,81 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         media_type = _ARTIFACT_MEDIA_TYPES.get(resolved.suffix.lower(), "application/octet-stream")
         return FileResponse(resolved, media_type=media_type, filename=resolved.name)
 
+    # -- saved conversations -------------------------------------------------
+
+    def _session_or_404(session_id: str) -> Any:
+        if not valid_session_id(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        try:
+            live = sessions.get(session_id)
+        except Exception as exc:
+            logger.exception("Could not load session %s", session_id)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if live is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return live
+
+    @app.get("/api/sessions")
+    async def list_sessions() -> list[dict[str, Any]]:
+        return sessions.list()
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(session_id: str, request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        title = body.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise HTTPException(status_code=422, detail="A non-empty title is required")
+        _session_or_404(session_id)
+        return sessions.rename(session_id, title) or {}
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict[str, Any]:
+        _session_or_404(session_id)
+        if not sessions.delete(session_id):
+            raise HTTPException(status_code=409, detail="Stop the running turn before deleting this conversation")
+        return {"deleted": session_id}
+
+    @app.get("/api/sessions/{session_id}/events")
+    async def session_events(session_id: str) -> dict[str, Any]:
+        live = _session_or_404(session_id)
+        return {"session": live.summary(), "events": live.events}
+
+    # -- direct tool calls and job files --------------------------------------
+
+    @app.post("/api/tools/{name}")
+    async def call_tool(name: str, request: Request) -> dict[str, Any]:
+        if name not in DIRECT_TOOLS:
+            raise HTTPException(status_code=403, detail=f"{name} can only be used through the agent")
+        if not gateway.ready:
+            raise HTTPException(status_code=503, detail="The MCP server is not ready")
+        if name not in gateway.tool_names:
+            raise HTTPException(status_code=404, detail=f"No tool named {name}")
+        body = await _json_body(request)
+        arguments = body.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise HTTPException(status_code=422, detail="arguments must be an object")
+        try:
+            raw = await gateway.call_tool(name, arguments)
+        except Exception as exc:
+            logger.warning("Direct call of %s failed: %s", name, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        parsed = parse_tool_result(raw)
+        return {
+            "name": name,
+            "result": parsed if parsed is not None else raw,
+            "panels": extract_panels(name, raw),
+        }
+
+    @app.get("/api/jobs/{job_id}/files/{name}")
+    async def job_file(job_id: str, name: str) -> FileResponse:
+        if not _JOB_ID.match(job_id) or not _JOB_FILES.match(name):
+            raise HTTPException(status_code=404, detail="File not found")
+        path = jobs_dir / f"job_{job_id}" / name
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        media_type = _ARTIFACT_MEDIA_TYPES.get(path.suffix.lower(), "text/plain")
+        return FileResponse(path, media_type=media_type, filename=name)
+
     @app.websocket("/api/chat")
     async def chat(websocket: WebSocket) -> None:
         if not token_ok(websocket.headers.get(TOKEN_HEADER), access_token):
@@ -312,11 +448,22 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
             await websocket.close()
             return
 
-        handler = WebSocketEventHandler()
+        requested = websocket.query_params.get("session")
         try:
-            agent = gateway.new_agent(handler)
+            after = max(0, int(websocket.query_params.get("after") or 0))
+        except ValueError:
+            after = 0
+
+        try:
+            live = sessions.get(requested) if valid_session_id(requested) else None
+            notice = None
+            if requested and live is None:
+                notice = "That conversation no longer exists, so a new one was started."
+                after = 0
+            if live is None:
+                live = sessions.create()
         except Exception as exc:
-            logger.exception("Could not create an agent for this session")
+            logger.exception("Could not open a session")
             await websocket.send_json({"type": "error", "message": str(exc)})
             await websocket.close()
             return
@@ -326,25 +473,29 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
                 "type": "ready",
                 "model": settings.model,
                 "backend": settings.backend,
+                "reasoningEffort": settings.reasoning_effort,
                 "tools": gateway.tool_names,
             }
         )
+        # Subscribe before taking the snapshot, so no event falls between the
+        # replay and the live stream; the sender skips what the replay sent.
+        queue = live.subscribe()
+        snapshot = live.last_seq
+        await websocket.send_json({"type": "session", **live.summary(), "lastSeq": snapshot})
+        if notice:
+            await websocket.send_json({"type": "notice", "message": notice})
+        for event in live.events_after(after):
+            await websocket.send_json(event)
 
-        session = _Session()
-        sender = asyncio.create_task(_forward_events(websocket, handler))
+        sender = asyncio.create_task(_forward_events(websocket, queue, snapshot))
         try:
-            await _receive_loop(websocket, agent, handler, session)
+            await _receive_loop(websocket, live)
         except WebSocketDisconnect:
-            logger.info("Client disconnected")
+            logger.info("Client disconnected from session %s", live.id)
         finally:
-            # Nobody reads the events of this agent any more, and the next
-            # connection gets a new agent, so a turn left running would only
-            # keep calling tools for no one.
-            if session.running is not None and not session.running.done():
-                logger.info("Cancelling the turn of a disconnected client")
-                session.running.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await session.running
+            # The turn goes on: its events are recorded, and the browser that
+            # comes back gets them on reconnect.
+            live.unsubscribe(queue)
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sender
@@ -352,28 +503,35 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     return app
 
 
-async def _forward_events(websocket: WebSocket, handler: WebSocketEventHandler) -> None:
-    """Send queued agent events to the browser until the task is cancelled."""
+async def _json_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="The body must be JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="The body must be a JSON object")
+    return body
+
+
+async def _forward_events(websocket: WebSocket, queue: asyncio.Queue[dict[str, Any]], after: int) -> None:
+    """Send the session's new events to the browser until cancelled."""
     while True:
-        event = await handler.drain()
+        event = await queue.get()
+        if event.get("seq", 0) <= after:
+            continue
         try:
             await websocket.send_json(event)
         except (WebSocketDisconnect, RuntimeError):
             return
 
 
-async def _receive_loop(
-    websocket: WebSocket,
-    agent: Any,
-    handler: WebSocketEventHandler,
-    session: _Session,
-) -> None:
-    """Read user messages and run one agent turn at a time.
+async def _receive_loop(websocket: WebSocket, live: Any) -> None:
+    """Read the browser's messages: a new question, or stop the current turn.
 
-    Turns are serialised per connection: the agent keeps conversation state,
-    so two overlapping turns would interleave tool calls into one history.
-    A message that arrives while a turn is running is rejected rather than
-    queued, so the user sees why nothing happened.
+    Turns are serialised per session: the agent keeps conversation state, so
+    two overlapping turns would interleave tool calls into one history.  A
+    question that arrives while a turn runs is refused rather than queued,
+    and only this browser is told, since it is not part of the conversation.
     """
     while True:
         raw = await websocket.receive_text()
@@ -382,48 +540,20 @@ async def _receive_loop(
         except ValueError:
             message = None
         if not isinstance(message, dict):
-            handler.emit({"type": "error", "message": "Malformed message."})
+            await websocket.send_json({"type": "notice", "message": "Malformed message."})
             continue
 
-        if message.get("type") != "user_message":
-            handler.emit({"type": "error", "message": f"Unknown message type: {message.get('type')!r}"})
+        kind = message.get("type")
+        if kind == "cancel":
+            if not live.cancel():
+                await websocket.send_json({"type": "notice", "message": "Nothing is running."})
+            continue
+        if kind != "user_message":
+            await websocket.send_json({"type": "notice", "message": f"Unknown message type: {kind!r}"})
             continue
 
         content = (message.get("content") or "").strip()
-        if not content:
-            continue
-
-        if session.running is not None and not session.running.done():
-            handler.emit(
-                {
-                    "type": "error",
-                    "message": "The agent is still working on the previous request.",
-                }
+        if content and not live.start_turn(content):
+            await websocket.send_json(
+                {"type": "notice", "message": "The agent is still working on the previous request."}
             )
-            continue
-
-        handler.emit({"type": "status", "state": "busy"})
-        session.running = asyncio.create_task(_run_turn(agent, handler, content))
-
-
-async def _run_turn(agent: Any, handler: WebSocketEventHandler, content: str) -> str:
-    """Run one agent turn, reporting the answer or the failure."""
-    try:
-        answer = await agent.chat(content)
-        handler.emit(
-            {
-                "type": "assistant_message",
-                "content": answer,
-                "inputTokens": getattr(agent, "total_input_tokens", 0),
-                "outputTokens": getattr(agent, "total_output_tokens", 0),
-            }
-        )
-        return answer
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        logger.exception("Agent turn failed")
-        handler.emit({"type": "error", "message": str(exc)})
-        return ""
-    finally:
-        handler.emit({"type": "status", "state": "idle"})

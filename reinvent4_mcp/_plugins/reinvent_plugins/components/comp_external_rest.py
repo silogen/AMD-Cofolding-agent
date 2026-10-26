@@ -303,4 +303,9 @@ class ExternalRESTScorer:
             } or None
         else:
             metadata = None
+        # Structure producers (Boltz) return one path per molecule, in input
+        # order; carried as metadata, the path stays with its molecule.
+        structures = (self.last_artifacts or {}).get("structures")
+        if isinstance(structures, list) and len(structures) == len(scores):
+            metadata = {**(metadata or {}), "structure_path": structures}
         return ComponentResults(scores=[scores], metadata=metadata)

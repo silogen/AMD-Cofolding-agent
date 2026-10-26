@@ -132,7 +132,11 @@ class TestExternalRESTScorer:
         result = scorer(["CCO", "c1ccccc1"])
 
         np.testing.assert_array_almost_equal(result.scores[0], [-6.2, -4.8])
-        assert result.metadata == {"confidence_score": [0.85, 0.62]}
+        # The structures also travel as metadata, so each stays with its molecule.
+        assert result.metadata == {
+            "confidence_score": [0.85, 0.62],
+            "structure_path": ["/p/m0.pdb", "/p/m1.pdb"],
+        }
         assert scorer.last_artifacts == {"structures": ["/p/m0.pdb", "/p/m1.pdb"]}
 
     @patch("reinvent_plugins.components.comp_external_rest.requests.post")

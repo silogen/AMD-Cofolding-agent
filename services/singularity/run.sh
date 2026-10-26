@@ -259,14 +259,22 @@ for _v in LLM_GATEWAY_KEY REINVENT4_AGENT_API_KEY \
 done
 
 if [ "${WEB}" -eq 1 ]; then
-    # shellcheck disable=SC2046,SC2086
-    run "${APPTAINER}" exec \
-        ${GPU_FLAG} \
-        $(gpu_env_flag "${REINVENT_GPU}") \
-        "${AGENT_ENV[@]}" \
-        "${AGENT_BINDS[@]}" \
-        "${AGENT_SIF}" dd-web --host "${DD_WEB_HOST:-127.0.0.1}" --port "${DD_WEB_PORT:-8000}"
-    exit 0
+    # The gateway is restarted whenever it exits, so a code change (DEV_SOURCE=1)
+    # needs only `pkill -f '[d]d-web --host'`, not a restart of the services.
+    # Ctrl-C or a TERM to this script ends the loop.
+    trap 'exit 0' INT TERM
+    while true; do
+        # shellcheck disable=SC2046,SC2086
+        run "${APPTAINER}" exec \
+            ${GPU_FLAG} \
+            $(gpu_env_flag "${REINVENT_GPU}") \
+            "${AGENT_ENV[@]}" \
+            "${AGENT_BINDS[@]}" \
+            "${AGENT_SIF}" dd-web --host "${DD_WEB_HOST:-127.0.0.1}" --port "${DD_WEB_PORT:-8000}" || true
+        [ "${DRY_RUN}" -eq 1 ] && exit 0
+        echo "dd-web exited at $(date +%T); restarting in 3 s" >&2
+        sleep 3
+    done
 fi
 
 # shellcheck disable=SC2046,SC2086

@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import time
+from collections.abc import Callable
 from typing import Any
 
 from reinvent4_agent.web.artifacts import extract_panels
@@ -32,16 +34,25 @@ class WebSocketEventHandler:
     """Implements ``AgentEventHandler`` by queueing JSON-serialisable events.
 
     One handler belongs to one chat session.  ``drain()`` yields events in the
-    order the agent produced them.
+    order the agent produced them.  With a *sink*, events go to the sink
+    instead of the queue; a saved session uses that to record them.
     """
 
-    def __init__(self, agent_label: str = "agent") -> None:
+    def __init__(
+        self,
+        agent_label: str = "agent",
+        sink: Callable[[dict[str, Any]], None] | None = None,
+        id_prefix: str = "call",
+    ) -> None:
         self.agent_label = agent_label
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._sink = sink
+        self._id_prefix = id_prefix
         self._ids = itertools.count(1)
-        #: Tool call name by id, so a result can be matched to its call even
-        #: when several calls are in flight in the same round.
+        #: Id of the open call per tool name.  The agent runs a round's calls
+        #: one after another, so at most one call per name is open.
         self._pending: dict[str, str] = {}
+        self._started: dict[str, float] = {}
 
     # -- AgentEventHandler ------------------------------------------------
 
@@ -49,8 +60,9 @@ class WebSocketEventHandler:
         self._emit({"type": "thinking", "content": text})
 
     def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
-        call_id = f"call-{next(self._ids)}"
+        call_id = f"{self._id_prefix}-{next(self._ids)}"
         self._pending[name] = call_id
+        self._started[call_id] = time.monotonic()
         self._emit(
             {
                 "type": "tool_call",
@@ -62,6 +74,7 @@ class WebSocketEventHandler:
 
     def on_tool_result(self, name: str, result: str, is_error: bool) -> None:
         call_id = self._pending.pop(name, None)
+        started = self._started.pop(call_id, None) if call_id else None
         panels = [] if is_error else extract_panels(name, result)
         excerpt = result if len(result) <= MAX_RESULT_CHARS else result[:MAX_RESULT_CHARS]
         self._emit(
@@ -73,6 +86,7 @@ class WebSocketEventHandler:
                 "truncated": len(result) > MAX_RESULT_CHARS,
                 "isError": is_error,
                 "panels": panels,
+                "elapsedMs": round((time.monotonic() - started) * 1000) if started is not None else None,
             }
         )
 
@@ -97,6 +111,9 @@ class WebSocketEventHandler:
 
     def _emit(self, event: dict[str, Any]) -> None:
         event.setdefault("agent", self.agent_label)
+        if self._sink is not None:
+            self._sink(event)
+            return
         try:
             self.queue.put_nowait(event)
         except Exception:  # pragma: no cover - unbounded queue does not reject

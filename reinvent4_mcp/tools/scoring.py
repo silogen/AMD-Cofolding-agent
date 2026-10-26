@@ -153,6 +153,48 @@ def _extract_raw_scores(
         return []
 
 
+#: Per-molecule values from external services that a reader needs to judge a
+#: score: Boltz confidence and affinity (the UI only shows an affinity when the
+#: confidence passes), the structure it came from, PoseBusters check counts,
+#: and ADMET spread and applicability domain.
+_DETAIL_KEYS = (
+    "affinity_pred_value",
+    "affinity_probability_binary",
+    "affinity_pred_value1",
+    "affinity_pred_value2",
+    "confidence_score",
+    "ligand_iptm",
+    "structure_path",
+    "n_checks_passed",
+    "n_checks_total",
+    "std",
+    "ad_pass",
+)
+
+
+def _component_details(md: dict[str, list], idx: int) -> dict[str, Any]:
+    """The detail values of one molecule from one component's metadata."""
+    details: dict[str, Any] = {}
+    for key in _DETAIL_KEYS:
+        vals = md.get(key)
+        if vals is None or idx >= len(vals):
+            continue
+        value = vals[idx]
+        if isinstance(value, float) and np.isnan(value):
+            continue
+        if value is not None and value != "None":
+            details[key] = value
+    # PoseBusters reports one boolean per check; name the ones that failed.
+    if "n_checks_total" in md:
+        failed = [
+            key for key, vals in md.items()
+            if key not in _DETAIL_KEYS and idx < len(vals) and vals[idx] is False
+        ]
+        if failed:
+            details["failed_checks"] = failed
+    return details
+
+
 def _format_results(
     score_results,
     smiles_list: list[str],
@@ -228,6 +270,9 @@ def _format_results(
                     "raw": raw,
                     "transform_type": transform_type,
                 }
+                details = _component_details(component_metadata.get(id(comp_result), {}), i)
+                if details:
+                    mol_data["components"][comp_name]["details"] = details
 
                 if i == 0:
                     n_components_total += 1

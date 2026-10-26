@@ -15,8 +15,10 @@ structured JSONL transcript file for post-hoc analysis.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +30,16 @@ from reinvent4_agent.mcp_client import MCPClient
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 20
+
+#: A turn ends once the same tool fails this often with the same arguments:
+#: the model is looping, and each retry costs a full LLM round.
+MAX_IDENTICAL_FAILURES = 3
+
+#: Longest tool result the model sees.  Some tools return tens of thousands
+#: of characters (every scoring component, a whole results file), which fills
+#: the context and slows every later round.  The event handler still gets the
+#: full text.
+MAX_TOOL_RESULT_CHARS = int(os.environ.get("REINVENT4_AGENT_MAX_TOOL_RESULT_CHARS") or 12000)
 
 
 @runtime_checkable
@@ -93,6 +105,11 @@ class Agent:
         self._seen_alerts: set[tuple[str, str]] = set()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        #: The LLM call in flight.  A cancelled turn cannot stop the thread it
+        #: runs in, and the backend appends the reply to the history when it
+        #: arrives, so the next turn waits for it to keep the history in order.
+        self._inflight: asyncio.Future[ChatResult] | None = None
+        self._failures: dict[tuple[str, str], int] = {}
 
     @property
     def total_tokens(self) -> int:
@@ -117,7 +134,16 @@ class Agent:
         This may involve multiple rounds of tool calls before the LLM
         produces its final answer.
         """
+        if self._inflight is not None and not self._inflight.done():
+            logger.info("Waiting for the reply of the stopped turn before starting the next one")
+            with contextlib.suppress(Exception):
+                await self._inflight
+        # A stopped turn can leave tool calls without results at the end of
+        # the history; they must be answered before the next user message.
+        self.backend.repair_dangling_tool_use()
+
         self._turn += 1
+        self._failures.clear()
         logger.info("Turn %d — user: %s", self._turn, user_message[:200])
         self._write_event("user_message", {"content": user_message})
 
@@ -128,7 +154,10 @@ class Agent:
             t0 = time.monotonic()
             # Off the event loop: a reasoning model can take minutes, and the
             # web gateway must keep answering WebSocket pings meanwhile.
-            result = await asyncio.to_thread(self.backend.complete, tools, self.max_tokens)
+            self._inflight = asyncio.ensure_future(
+                asyncio.to_thread(self.backend.complete, tools, self.max_tokens)
+            )
+            result = await asyncio.shield(self._inflight)
             elapsed = time.monotonic() - t0
 
             self.total_input_tokens += result.input_tokens
@@ -188,6 +217,17 @@ class Agent:
                         ))
                 self.backend.add_tool_results(tool_results)
 
+            looping = [key for key, count in self._failures.items() if count >= MAX_IDENTICAL_FAILURES]
+            if looping:
+                name = looping[0][0]
+                logger.warning("Turn %d — %s failed %d times with the same arguments", self._turn, name, MAX_IDENTICAL_FAILURES)
+                self._write_event("repeated_failure", {"tool": name, "count": MAX_IDENTICAL_FAILURES})
+                return (
+                    f"I stopped because `{name}` failed {MAX_IDENTICAL_FAILURES} times with the same "
+                    "arguments. The last error is in the tool results above. Tell me how to adjust "
+                    "the request, or check the service it depends on."
+                )
+
         msg = (
             "I've reached the maximum number of tool-call rounds. "
             "Please try breaking your request into smaller steps."
@@ -242,7 +282,7 @@ class Agent:
 
                 results.append(ToolResult(
                     tool_call_id=tc.id,
-                    content=result_text,
+                    content=_cap_for_model(result_text),
                 ))
             except Exception as exc:
                 elapsed = time.monotonic() - t0
@@ -264,6 +304,8 @@ class Agent:
                     "round": round_idx,
                 })
                 self._events.on_tool_result(tc.name, error_msg, is_error=True)
+                key = (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
+                self._failures[key] = self._failures.get(key, 0) + 1
                 results.append(ToolResult(
                     tool_call_id=tc.id,
                     content=error_msg,
@@ -442,6 +484,17 @@ def _init_transcript(log_dir: str | None, name: str = "agent") -> str | None:
     path = str(d / f"session_{ts}_{name}.jsonl")
     logger.info("Transcript file: %s", path)
     return path
+
+
+def _cap_for_model(text: str) -> str:
+    """Shorten a tool result to MAX_TOOL_RESULT_CHARS, saying so in the text."""
+    if len(text) <= MAX_TOOL_RESULT_CHARS:
+        return text
+    return (
+        text[:MAX_TOOL_RESULT_CHARS]
+        + f"\n\n[Result cut at {MAX_TOOL_RESULT_CHARS} of {len(text)} characters. "
+        "If you need the rest, ask the tool for less, for example fewer rows or one item.]"
+    )
 
 
 def _summarize_dict(d: dict[str, Any], max_len: int = 120) -> str:

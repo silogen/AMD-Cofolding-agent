@@ -192,8 +192,11 @@ class AnthropicBackend(LLMBackend):
         if not self._messages or self._messages[-1].get("role") != "assistant":
             return
         last = self._messages[-1]["content"]
+        # SDK blocks after a live reply, plain dicts after a restored session.
         ids = [
-            b.id for b in last if getattr(b, "type", None) == "tool_use"
+            b.get("id") if isinstance(b, dict) else b.id
+            for b in last
+            if (b.get("type") if isinstance(b, dict) else getattr(b, "type", None)) == "tool_use"
         ]
         if ids:
             self._messages.append({
