@@ -64,10 +64,11 @@ _ARTIFACT_MEDIA_TYPES = {
 }
 
 
-#: Tools the UI panels may call directly.  Reads only, plus the three job and
-#: profile actions the panels offer behind a confirmation.  Everything else
-#: (creating or deleting profiles, scoring, launching training) stays with the
-#: agent, so it is part of a conversation and its record.
+#: Tools the UI panels may call directly.  Reads only, plus the job and
+#: profile actions the panels offer behind a confirmation, and creating a
+#: profile from the TTP builder.  Everything else (deleting profiles,
+#: scoring, launching training) stays with the agent, so it is part of a
+#: conversation and its record.
 DIRECT_TOOLS = frozenset(
     {
         "list_jobs",
@@ -87,6 +88,7 @@ DIRECT_TOOLS = frozenset(
         "predict_admet",
         "predict_retrodmta",
         "stop_optimization",
+        "create_ttp",
         "update_ttp",
         "run_optimization",
     }

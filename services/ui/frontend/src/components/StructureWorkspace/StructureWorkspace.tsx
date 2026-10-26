@@ -31,6 +31,8 @@ interface Props {
   active: StructurePanel;
   onSelect: (panel: StructurePanel) => void;
   interactions: Sourced<InteractionsPanel>[];
+  /** The target's canonical UniProt sequence, when the conversation looked it up. */
+  targetSequence?: string | null;
   theme: Theme;
   /** Put a prompt in the composer. */
   onAsk: (text: string) => void;

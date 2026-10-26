@@ -20,6 +20,7 @@ import { parseViewerCommand, VIEWER_HELP, type ViewerAction } from "./lib/viewer
 import { download, sessionEvents } from "./lib/api";
 import { extractTargetFacts, toolEvents, type TargetFacts } from "./lib/ttp";
 import { sessionToMarkdown, slug } from "./lib/exportSession";
+import { useUserStructures, withUserStructures } from "./lib/userStructures";
 
 /** The conversation in the address, so a reload or a shared link reopens it. */
 function sessionFromHash(): string | null {
@@ -80,7 +81,8 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const composerRef = useRef<ComposerHandle>(null);
 
-  const artifacts = useMemo(() => collectArtifacts(transcript.turns), [transcript.turns]);
+  const userStructures = useUserStructures(session?.id ?? "new");
+  const artifacts = useMemo(() => withUserStructures(collectArtifacts(transcript.turns), userStructures), [transcript.turns, userStructures]);
   const [picked, setPicked] = useState<StructurePanel | null>(null);
   const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
   const [hints, setHints] = useState<{ id: number; message: string }[]>([]);

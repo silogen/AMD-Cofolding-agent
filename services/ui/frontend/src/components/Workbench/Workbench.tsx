@@ -348,6 +348,7 @@ function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
 
 function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, onAsk }: Props) {
   const list = artifacts.structures;
+  const sequence = useMemo(() => extractTargetFacts(toolEvents(artifacts.steps)).sequence, [artifacts.steps]);
   if (!activeStructure) {
     return <Empty>No structure yet. When the agent cofolds a complex with Boltz-2, it appears here.</Empty>;
   }
@@ -357,6 +358,7 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
       active={activeStructure}
       onSelect={onSelectStructure}
       interactions={artifacts.interactions}
+      targetSequence={sequence}
       theme={theme}
       onAsk={onAsk}
     />
