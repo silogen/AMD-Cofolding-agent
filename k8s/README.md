@@ -734,6 +734,26 @@ and forward every job to itself; the job endpoints additionally hold their own
 `JobManager` rather than going through the seam, so they cannot loop even if
 that env were lost.
 
+**Do not build a second `JobManager` inside this container.** Because
+`REINVENT_RUNNER_SELF=1` makes `runner_enabled()` false here, any extra process
+— a `kubectl exec ... python -c "...get_job_manager()..."` diagnostic, most
+obviously — constructs a real manager, and restoring the job table used to
+mark every job it found running as `failed` on disk. The assumption was that a
+job "is dead with the process that ran it", which is false: the worker is a
+separate `_run_worker.py` process whose pid is recorded in the same metadata.
+One diagnostic command buried three healthy jobs mid-Boltz-call, their logs
+still advancing, and the supervisors watching them abandoned the tasks and the
+GPUs they held.
+
+Restore now checks whether that pid is still running this job before declaring
+it dead, reading `/proc/<pid>/cmdline` for the job's own directory so a
+recycled pid is not mistaken for the worker — a real hazard here, since a
+restarted runner starts pids from 1 again. A live worker is adopted and keeps
+its concurrency slot; a dead one is still failed, which is what frees the slot.
+Diagnostics that only need job *state* should go through the conductor's tools
+(`get_optimization_status`, `list_jobs`), which cross the seam over HTTP and
+touch no manager, or read `job_metadata.json` with plain `sh`.
+
 **Verified on `demo-lux`**: `reinvent_importable: true`, 61 scoring components,
 9 priors and 8 transforms served over HTTP; a real 2-step RL job created through
 `POST /jobs` ran to completion; and driving it through the client seam gave the
@@ -843,6 +863,25 @@ Two decisions are worth knowing because they are easy to undo by accident:
   best value seen per objective, which would mix molecules and describe a
   compound nobody made — useless on a front whose whole job is to show
   achievable trade-offs.
+- **A task's `intent` is prose handed to the agent verbatim.** Weights,
+  transforms, fidelity, step count and a deadline are all the structured
+  fields can say, and some of what a run is *for* does not fit them. Holding a
+  chemotype is the standard example: that is a choice of generative prior, not
+  a weight, and the agent is better placed to make it than a seed field would
+  be — it can look the reference compound up with `fetch_compound` and pick a
+  model. Without a channel for it the agent generated de novo not because it
+  could not do better but because nothing asked it to. State the experiment,
+  not the tool calls.
+
+  A task carrying an `intent` also **turns off the de novo fallback**. When an
+  agent finishes without starting a run the supervisor normally starts one
+  itself, which is a faithful substitute only while every task is de novo. An
+  intent may well have asked for a different prior, and a substituted run
+  would post into the same Pareto front while measuring something else, so the
+  task fails and is retried instead. That guard is what caught an agent
+  calling `run_optimization` on two *other* tasks' TTPs: the TTP store is
+  shared, so every agent can see all N sibling variants, and nothing scopes it
+  to its own.
 
 If a task has a deadline, the supervisor stops the job when it is reached
 rather than letting it run: `stop_optimization` asks REINVENT4 to checkpoint,
@@ -854,6 +893,30 @@ default, so a couple of missed beats cost nothing, and a pod that is evicted
 mid-task has its task requeued when the lease lapses. On SIGTERM it stops
 claiming and lets the task in hand run out the 120 s grace; anything still held
 goes back on the queue the same way.
+
+**Presence is a second, separate beat, and the separation is the point.** A
+supervisor used to touch the ledger only when it *claimed* something, so an
+idle one — the only kind you can actually dispatch to — was indistinguishable
+from one that never started. Each supervisor now reports into a `supervisors`
+table every 45 s against a 120 s TTL, including on the passes that find the
+queue empty, and leaves the pool deliberately on shutdown so a drained pool
+does not read as N crashed pods for two minutes. Dead presences are swept on
+read, exactly like expired leases. That table is what `list_supervisors` and
+`get_pool_capacity` report, and `last_seen_seconds_ago` is what says whether
+to believe the state beside it.
+
+The beat is owned by the supervisor's lifetime, **not** by the task's lease
+heartbeat. Renewing presence inside the lease heartbeat ties the two together,
+and a supervisor whose task is taken from it — by a cancel, or by its campaign
+being finalized — keeps working on the job it already started while vanishing
+from the pool. Two did exactly that: alive, holding a GPU, invisible. That is
+the inverse of what presence exists to prevent, so if you ever move the
+renewal, keep it out of anything that can raise `LeaseLost`.
+
+One consequence worth internalising: presence is self-reported, so a pod that
+is running but wedged shows as **absent** rather than idle. That is the right
+answer for "can I dispatch to it", and it will disagree with `kubectl get
+pods` in exactly that case.
 
 ### The conductor
 
@@ -888,11 +951,39 @@ the easiest way to get a campaign wrong, because an objective the TTP does not
 have fails every task that references it — and the mistake surfaces minutes
 later as a task failure rather than as a typo.
 
-It also exposes eleven MCP tools so a conductor agent can do the same
+It also exposes thirteen MCP tools so a conductor agent can do the same
 conversationally: `start_campaign`, `get_campaign_state`, `list_campaigns`,
 `enqueue_task`, `list_supervisors`, `get_supervisor_result`,
-`get_pareto_front`, `set_concurrency`, `cancel_supervisor`,
-`get_pool_capacity`, `close_campaign` and `finalize_campaign`.
+`get_pareto_front`, `get_campaign_files`, `set_concurrency`,
+`cancel_supervisor`, `get_pool_capacity`, `close_campaign` and
+`finalize_campaign`.
+
+`get_campaign_files` is the one that is not about steering: it joins the
+ledger's task-to-job mapping to the runner's working directories, so "where
+are the results" is answerable without knowing the layout. It reports tasks
+newest first and carries no scores, so position in that list says nothing
+about which run was any good — `get_pareto_front` ranks tasks and
+`get_top_candidates` ranks molecules within one job.
+
+**Its TTP mount is writable, and the tool restriction beside it is half of
+one decision.** Defining the base TTP is the first step of a campaign on a new
+target, and the conductor is who opens campaigns — mounted read-only it could
+only ever conduct campaigns against profiles somebody else had made, and
+`create_ttp` failed with `EROFS`. What is actually worth preventing is
+*rewriting* a base TTP that tasks are already being measured against, which
+would silently change what earlier and later results mean. So the mount is
+writable and the Deployment sets
+`REINVENT4_AGENT_DENY_TOOLS: "update_ttp,delete_ttp"`, which the CLI turns
+into an allow-list computed from the live tool list — a deny-list, so a tool
+added later is available by default and only the exclusions are maintained.
+Relax either half alone and the guarantee is gone, which is why
+[`tests/test_k8s_manifests.py`](../tests/test_k8s_manifests.py) asserts them
+together. Job output and `/shared` stay read-only: the conductor reviews what
+the fleet produced, and the supervisors are what write it.
+
+The restriction lands on the agent, not the filesystem — the tool function
+still works, so an operator exec'ing in with `python` can still fix a TTP by
+hand. It is the LLM's authority that is withheld.
 
 **It needs its own ServiceAccount, and this is a correction to the original
 plan.** Scaling the supervisor pool is how concurrency is expressed, which
@@ -929,10 +1020,23 @@ Three things about how the loop behaves:
   that cannot be reached does not block the wind-down.
 - **It asks before it dispatches.** Boltz is the binding constraint, not the
   agent count, so the loop reads the gateway's queue depth and holds back when
-  it is above `max_queue_pressure` queued batches per healthy replica. A
-  gateway that does not answer is treated as *unknown*, not idle — but unknown
-  does not block dispatch, or an unreachable gateway would stall the campaign
+  it is above `max_queue_pressure` batches per healthy replica. A gateway that
+  does not answer is treated as *unknown*, not idle — but unknown does not
+  block dispatch, or an unreachable gateway would stall the campaign
   indefinitely.
+
+  Queue pressure counts **in-flight batches as well as queued ones**, which is
+  not an embellishment: the gateway caps its own upstream calls at the healthy
+  replica count, so work beyond capacity waits on a semaphore *inside* the
+  gateway rather than queueing at the proxy. Measured on queued alone it reads
+  ~0 with every replica saturated, which is no signal at all. One batch per
+  replica is a scorer that is busy and keeping up.
+
+  `get_pool_capacity` answers the same question for a conductor agent and
+  reports **both** constraints — idle supervisors and scorer room — with
+  `binding_limit` naming whichever said no. Either number alone misleads: an
+  idle supervisor handed work while Boltz is saturated only moves the wait,
+  and a quiet scorer is no use with nothing alive to dispatch to.
 
 The weight vectors come from a two-phase proposer. With no results it seeds the
 extremes — a balanced vector plus one per objective emphasised — because
@@ -1388,9 +1492,9 @@ Boltz answers through its gateway here, which is the path
 `ExternalRESTScorer` takes. The headless `dd-agentic-boltz` still resolves to
 the pods themselves if you want to reach one replica directly.
 
-The CPU scorers should each have exactly one ready address, and
-`dd-agentic-boltz` one per replica (`v1 Endpoints` is deprecated from
-Kubernetes 1.33, so this reads EndpointSlices):
+`dd-agentic-admet` should have three ready addresses, the other CPU scorers
+one each, and `dd-agentic-boltz` one per replica (`v1 Endpoints` is deprecated
+from Kubernetes 1.33, so this reads EndpointSlices):
 
 ```bash
 kubectl --namespace "${PROJECT}" get endpointslices \
@@ -1401,6 +1505,36 @@ Boltz also reports `no_kernels` on `/health`, but only once
 `boltz2-wrapper:local` has been rebuilt since that field was added — an older
 image returns `{"status": "ok"}` alone, and `ab-boltz-kernels.py` falls back to
 trusting the arm it asked for.
+
+**ADMET is three replicas at 32Gi because it is the one scorer a TTP calls
+more than once per step** — once per ADMET objective. At six concurrent jobs
+and three endpoints that is eighteen calls per step round, and a single
+replica at 8Gi was OOMKilled eight times (`exitCode 137`, one of them after
+eight minutes alive). It is also the most expensive call per unit of answer:
+`/score` predicts *every* endpoint for the whole batch and returns the one
+that was asked for, so three objectives cost twenty-one endpoint-predictions
+where three would do. The service is stateless with no `/shared` mount, so
+replicas need no coordination and a plain ClusterIP round-robin is enough —
+unlike Boltz, which needs the proxy to place batches.
+
+That OOM is worth recognising by its downstream shape, because none of the
+symptoms point at memory:
+
+- **Objectives go NaN unevenly.** One run had `Caco2` at 50% NaN,
+  `Solubility` at 99% and `logD` at 99%, while every non-ADMET component sat
+  at 0%. A failure confined to the objectives sharing one service is a
+  capacity problem, not a scoring one.
+- **The Pareto front comes back empty with everything ineligible.** A result
+  needs every declared objective to reach the front, so a dead scorer takes
+  all six results off it at once. `get_pareto_front`'s `ineligible` list names
+  the missing objectives — read that before concluding the run found nothing.
+- **The results CSV goes ragged and readers drop rows silently.** The header
+  is written from the first batch; a scorer that fails during step 1 reports
+  no metadata, then reports some later, and from that point every row is
+  wider than the header. 32 of 48 molecules were discarded without a word.
+  `ExternalRESTScorer` now fixes its metadata schema on the first batch
+  whether or not that batch succeeded, and `read_results` reports
+  `rows_skipped` with a warning rather than summarising what survived.
 
 ### Tool calls on vLLM-served models
 

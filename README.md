@@ -61,6 +61,16 @@ The agent spawns the MCP server as a subprocess over stdio. The server imports R
 
 External scoring services run as separate containers, each exposing a uniform `POST /score` REST API. The MCP server calls them through the `ExternalRESTScorer` REINVENT4 plugin when a TTP includes external objectives. A `PipelineAwareScorer` handles artifact passing: Boltz2 writes predicted structures to the shared volume, and PoseBusters and the Interaction Profiler read them downstream.
 
+That diagram is one agent driving one RL job, which is what Compose and
+Apptainer run. The Kubernetes deployment also supports a **fleet**: a
+conductor opens a campaign, N headless supervisors each claim a task and run
+their own RL job, and all of them share one pooled scorer tier. The agent
+container is the same image in all three roles — only the entrypoint differs —
+and REINVENT4 moves out to `reinvent-runner` so agent count and RL capacity
+scale independently. See
+[`k8s/README.md`](k8s/README.md#the-fleets-ledger-campaign-store) for that
+topology and the [campaign tools](#campaign-tools) that drive it.
+
 ## Current Status
 
 | Phase | Description | Status |
@@ -74,8 +84,10 @@ External scoring services run as separate containers, each exposing a uniform `P
 | 6 | ADMET, RetroDMTA, and Interaction Profiler services | Done |
 | 7 | Multi-agent Driver + Reviewer (handoff protocol, `/review`, campaign monitor) | Done |
 | 8 | Apptainer/Singularity stack (AMD + NVIDIA) | Done |
-| 9 | Per-molecule evaluation detail tools for the Reviewer (`get_evaluation_detail`, `read_structure_file`) | Planned |
-| 10 | OpenTelemetry tracing of agent turns + tool calls | Planned |
+| 9 | Conductor + supervisor fleet on Kubernetes (campaign ledger, pooled scorers, Pareto-driven dispatch) | Done |
+| 10 | Per-molecule evaluation detail tools for the Reviewer (`get_evaluation_detail`, `read_structure_file`) | Planned |
+| 11 | OpenTelemetry tracing of agent turns + tool calls | Planned |
+| 12 | Docker Compose parity for the fleet topology | Planned |
 
 ## Prerequisites
 
@@ -770,7 +782,13 @@ A global turn and token budget guarantees termination. The terminal shows per-ag
 
 ## MCP Tools
 
-24 tools are exposed to the Driver. The 10 marked read-only are also available to the Reviewer.
+37 tools are exposed to the Driver. The 10 marked read-only are also available to the Reviewer.
+
+The first 24 are the single-agent surface — designing a TTP, scoring, running
+one RL job and reading it back. The 13 [campaign tools](#campaign-tools) below
+are the fleet surface, used by a conductor steering N supervisors; they are
+present in every deployment but do nothing useful without a running
+[`campaign-store`](k8s/README.md#the-fleets-ledger-campaign-store).
 
 | Tool | Read-only | Description |
 |------|:---------:|-------------|
@@ -798,6 +816,43 @@ A global turn and token budget guarantees termination. The terminal shows per-ag
 | `read_results` | ✓ | Parse a REINVENT4 output CSV into summary statistics |
 | `list_jobs` | ✓ | List all tracked jobs and their states |
 | `get_job_alerts` | | Check running jobs for problems needing intervention |
+
+### Campaign tools
+
+A campaign is one goal explored in parallel: N supervisors each run a variant
+of the same TTP at different objective weights, and the Pareto front is what
+the campaign produces. These 13 tools are how a conductor opens one, watches
+it, steers it and closes it. The deployment topology is in
+[`k8s/README.md`](k8s/README.md#the-fleets-ledger-campaign-store).
+
+| Tool | Read-only | Description |
+|------|:---------:|-------------|
+| `start_campaign` | | Open a campaign: a goal, a base TTP, objectives, a pool size and a clock |
+| `list_campaigns` | | Every campaign newest first, with task counts, result counts and last activity |
+| `get_campaign_state` | | One campaign in full: task counts, who holds what, the front, time left |
+| `enqueue_task` | | Queue one weight vector by hand, optionally with an `intent` |
+| `list_supervisors` | | The pool: how many exist and how many could take work now |
+| `get_pool_capacity` | | Whether to dispatch, and which of the two limits says no |
+| `set_concurrency` | | Change how many supervisors the campaign holds in flight |
+| `cancel_supervisor` | | Take a task back from the supervisor running it |
+| `get_supervisor_result` | | What one finished task achieved: profile and molecules |
+| `get_pareto_front` | | The non-dominated results, plus the ones left off for missing an objective |
+| `get_campaign_files` | | Where each task's output is on disk, so results can be opened |
+| `close_campaign` | | Stop dispatching; let in-flight tasks finish |
+| `finalize_campaign` | | Close the books and abandon anything outstanding |
+
+Two of these repay a closer look, because their answers are easy to
+misread:
+
+- **`get_pareto_front` also returns `ineligible`.** A result only reaches the
+  front if it reports *every* declared objective, so a scorer that failed
+  takes its whole result off the front rather than placing it badly. Those
+  results are listed separately with the objectives they are missing — an
+  empty front with six ineligible entries means a broken scorer, not six bad
+  trade-offs.
+- **`get_pool_capacity` reports two constraints.** A supervisor must be free
+  *and* the scorer must have queue room. Either number alone misleads: an idle
+  supervisor handed work while Boltz is saturated only moves the wait.
 
 ---
 
