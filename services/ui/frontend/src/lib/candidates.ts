@@ -116,6 +116,11 @@ export function candidateValue(candidate: Candidate, key: string): number | unde
   return candidate.components[key];
 }
 
+/** A candidate's score and components by name, as the shortlist keeps them. */
+export function candidateNumbers(candidate: Candidate): Record<string, number> {
+  return { ...candidate.components, ...(candidate.score !== undefined ? { Score: candidate.score } : {}) };
+}
+
 /** Every numeric column at least one candidate has, as {key, label}. */
 export function numericColumns(candidates: Candidate[]): { key: string; label: string }[] {
   const columns: { key: string; label: string }[] = [];

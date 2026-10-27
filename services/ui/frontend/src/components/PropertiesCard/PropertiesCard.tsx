@@ -9,6 +9,7 @@ import { endpointLabel, endpointRange, endpointUnit, formatValue, serviceName } 
 import { radarData } from "../../lib/radar";
 import { ExportButtons } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { SmilesText } from "../MolDepiction/SmilesText";
 import { RadarChart } from "./RadarChart";
 
 const RADAR_MAX = 5;
@@ -36,7 +37,7 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
   const showRadar = view === "radar" && radar !== null;
 
   return (
-    <section className="bg-raised border-subtle shadow-card overflow-hidden rounded-xl border">
+    <section className="@container bg-raised border-subtle shadow-card overflow-hidden rounded-xl border">
       <header className="border-subtle flex flex-wrap items-center gap-2 border-b px-3 py-2">
         <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ background: "var(--color-table)" }} />
         <span className="truncate text-xs font-semibold">{serviceName(panel)} predictions</span>
@@ -62,7 +63,7 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
       </header>
       {showRadar && <RadarChart axes={radar.axes} series={radar.series} total={panel.molecules.filter((m) => m.ok).length} />}
       <div className={`overflow-x-auto ${showRadar ? "hidden" : ""}`}>
-        <table className="w-full text-[11px]">
+        <table className="w-full text-xs">
           <thead>
             <tr className="text-muted border-subtle border-b text-left">
               <th className="px-2 py-1.5 font-medium">Molecule</th>
@@ -82,20 +83,36 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
           </thead>
           <tbody>
             {rows.map((molecule, index) => (
-              <tr key={index} className="border-subtle border-b last:border-b-0">
+              <tr key={index} className={`group border-subtle border-b last:border-b-0 ${molecule.ok ? "" : "bg-sunken text-muted"}`}>
                 <td className="px-2 py-1">
                   {molecule.smiles ? (
-                    <button
-                      type="button"
-                      onClick={() => molecule.smiles && onOpenMolecule?.(molecule.smiles)}
-                      className="flex cursor-pointer items-center gap-2 text-left"
-                      title={molecule.smiles}
-                    >
-                      <MolDepiction smiles={molecule.smiles} theme={theme} width={120} height={80} className="h-10 w-14 shrink-0" />
-                      <span className="max-w-28 truncate font-mono text-[10px]">{molecule.label ?? molecule.smiles}</span>
-                    </button>
-                  ) : (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={!onOpenMolecule}
+                        onClick={() => molecule.smiles && onOpenMolecule?.(molecule.smiles)}
+                        title={onOpenMolecule ? "Open in the workbench" : undefined}
+                        aria-label={`Open ${molecule.label ?? molecule.smiles} in the workbench`}
+                        className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
+                      >
+                        <MolDepiction
+                          smiles={molecule.smiles}
+                          theme={theme}
+                          width={128}
+                          height={96}
+                          label={molecule.label ?? undefined}
+                          className={`size-full ${molecule.ok ? "" : "opacity-60"}`}
+                        />
+                      </button>
+                      <span className="flex min-w-0 flex-col">
+                        <SmilesText smiles={molecule.smiles} label={molecule.label} className="max-w-28 text-[10px] @xl:max-w-44" />
+                        {!molecule.ok && <FailureReason error={molecule.error} />}
+                      </span>
+                    </div>
+                  ) : molecule.ok ? (
                     <span className="text-faint">—</span>
+                  ) : (
+                    <FailureReason error={molecule.error} />
                   )}
                 </td>
                 {molecule.ok ? (
@@ -115,8 +132,9 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
                     );
                   })
                 ) : (
-                  <td colSpan={panel.endpoints.length} className="px-2 py-1" style={{ color: "var(--color-accent)" }}>
-                    {molecule.error ?? "Prediction failed"}
+                  <td colSpan={panel.endpoints.length} className="text-faint px-2 py-1">
+                    <span className="sr-only">No predictions</span>
+                    <span aria-hidden="true">—</span>
                   </td>
                 )}
                 <td className="px-2 py-1 text-center">
@@ -152,5 +170,15 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
         </footer>
       )}
     </section>
+  );
+}
+
+function FailureReason({ error }: { error: string | null }) {
+  const reason = error ?? "the prediction failed";
+  return (
+    <span className="mt-0.5 flex max-w-40 min-w-0 items-center gap-1 text-[10px] @xl:max-w-52" title={`Not predicted: ${reason}`}>
+      <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: "var(--color-warn)" }} />
+      <span className="truncate">Not predicted: {reason}</span>
+    </span>
   );
 }

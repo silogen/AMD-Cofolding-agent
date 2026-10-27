@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TablePanel } from "../../types/api";
+import { SmilesText } from "../MolDepiction/SmilesText";
 import { ExportButtons } from "./ExportButtons";
 
 interface Props {
@@ -13,6 +14,12 @@ type SortDirection = "asc" | "desc";
 
 /** How many rows to show before the user asks for the rest. */
 const PAGE = 25;
+
+/**
+ * SMILES get less room on a phone so the numbers, which are the point of the
+ * table, stay visible.
+ */
+const SMILES_COLUMN = /smiles/i;
 
 /**
  * Track whether a scroll container has content hidden to the right.
@@ -170,9 +177,17 @@ export function DataTable({ panel }: Props) {
           </thead>
           <tbody>
             {visible.map((row, index) => (
-              <tr key={index} className="hover:bg-sunken">
+              <tr key={index} className="group hover:bg-sunken">
                 {panel.columns.map((column) => {
                   const numeric = numericColumns.has(column);
+                  const value = row[column];
+                  if (SMILES_COLUMN.test(column) && typeof value === "string" && value) {
+                    return (
+                      <td key={column} className="border-subtle border-b px-2 py-1 sm:px-3">
+                        <SmilesText smiles={value} className="max-w-[7rem] text-xs sm:max-w-[18rem]" />
+                      </td>
+                    );
+                  }
                   return (
                     <td
                       key={column}
@@ -185,16 +200,12 @@ export function DataTable({ panel }: Props) {
                             // wrapped paragraph makes a row tall enough to push
                             // the rest of the table off the screen. The full
                             // value stays available on hover and in the raw
-                            // tool output. SMILES get less room on a phone so
-                            // the numbers, which are the point of the table,
-                            // stay visible.
-                            `max-w-[10rem] truncate sm:max-w-[22rem] ${
-                              column === "smiles" ? "max-w-[7rem] font-mono sm:max-w-[18rem]" : ""
-                            }`
+                            // tool output.
+                            "max-w-[10rem] truncate sm:max-w-[22rem]"
                       }`}
-                      title={numeric ? undefined : String(row[column] ?? "")}
+                      title={numeric ? undefined : String(value ?? "")}
                     >
-                      {formatCell(row[column])}
+                      {formatCell(value)}
                     </td>
                   );
                 })}

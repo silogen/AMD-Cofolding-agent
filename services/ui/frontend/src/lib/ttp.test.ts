@@ -40,6 +40,25 @@ import {
   serviceObjective,
   slugify,
   uniqueName,
+  advancedParams,
+  chatPrompt,
+  createdTimes,
+  curveDomain,
+  curveLabel,
+  defaultTransform,
+  filterTtps,
+  formFromTtp,
+  hasCofolding,
+  rangeFields,
+  rememberCreated,
+  retypeObjective,
+  setRange,
+  sortTtps,
+  targetSummary,
+  ttpFileName,
+  withCofolding,
+  versionDiff,
+  isSameVersion,
   type ToolEvent,
   type Ttp,
   type TtpForm,
@@ -438,6 +457,135 @@ describe("formProblems and buildTtp", () => {
     expect(createdTtp(JSON.stringify({ status: "created", id: "x", name: "X", version: 1 }))).toEqual({ id: "x", name: "X" });
     expect(createdTtp({ error: "Invalid TTP: boom" })).toEqual({ error: "Invalid TTP: boom" });
     expect(createdTtp("Tool failed")).toEqual({ error: "Tool failed" });
+  });
+
+  it("keeps constraints when given", () => {
+    expect(buildTtp(form({ constraints: [{ type: "custom_alerts", smarts: ["[N+](=O)[O-]"] }] })).constraints).toEqual([{ type: "custom_alerts", smarts: ["[N+](=O)[O-]"] }]);
+    expect(buildTtp(form({ constraints: [] })).constraints).toBeUndefined();
+  });
+});
+
+describe("curve editing", () => {
+  const services = parseServices(SERVICES);
+
+  it("labels curves and splits simple from advanced parameters", () => {
+    expect(curveLabel("reverse_sigmoid")).toBe("Lower is better");
+    expect(curveLabel(null)).toBe("Score as is");
+    expect(rangeFields("sigmoid").map((f) => f.key)).toEqual(["low", "high"]);
+    expect(rangeFields("right_step")).toEqual([{ key: "low", label: "at least" }]);
+    expect(advancedParams("sigmoid")).toEqual(["k"]);
+    expect(advancedParams("double_sigmoid")).toEqual(["coef_div", "coef_si", "coef_se"]);
+    expect(advancedParams("exponential_decay")).toEqual([]);
+  });
+
+  it("keeps a double sigmoid finite far from zero", () => {
+    const t = { type: "double_sigmoid", low: 200, high: 500, coef_div: 5, coef_si: 10, coef_se: 10 };
+    expect(evaluateTransform(t, 350)).toBeCloseTo(1);
+    expect(evaluateTransform(t, 900)).toBe(0);
+    expect(transformCurve(t).every((p) => Number.isFinite(p.y))).toBe(true);
+  });
+
+  it("samples a fixed domain while a threshold is dragged", () => {
+    const t = { type: "sigmoid", low: 0, high: 10, k: 0.5 };
+    expect(curveDomain(t)).toEqual({ from: -6, to: 16 });
+    const points = transformCurve({ ...t, high: 20 }, 4, { from: -6, to: 16 });
+    expect(points[0].x).toBe(-6);
+    expect(points[4].x).toBe(16);
+  });
+
+  it("starts each objective from its usual window", () => {
+    expect(defaultTransform(nativeObjective("MolecularWeight"))).toMatchObject({ low: 200, high: 500 });
+    expect(defaultTransform(nativeObjective("QED"))).toMatchObject({ type: "sigmoid", low: 0.4, high: 0.8 });
+    expect(defaultTransform(serviceObjective(services, "admet", "aqueous_solubility"))).toMatchObject({ low: -6, high: -3 });
+    expect(defaultTransform(serviceObjective(services, "boltz"))).toMatchObject({ type: "reverse_sigmoid", low: -3, high: 1 });
+    expect(defaultTransform(nativeObjective("Csp3"))).toMatchObject({ low: 0.2, high: 0.6 });
+  });
+
+  it("changes curve type without losing the window", () => {
+    const qed = nativeObjective("QED");
+    expect(retypeObjective(qed, "double_sigmoid")).toMatchObject({ type: "double_sigmoid", low: 0.4, high: 0.8, coef_div: 0.8 });
+    expect(retypeObjective(qed, null)).toBeNull();
+    const mw = nativeObjective("MolecularWeight");
+    expect(retypeObjective(mw, "right_step")).toEqual({ type: "right_step", low: 200 });
+  });
+
+  it("keeps a double sigmoid's coef_div in scale with its window", () => {
+    const t = { type: "double_sigmoid", low: 1, high: 5, coef_div: 5, coef_si: 10, coef_se: 10 };
+    expect(setRange(t, { high: 8 }).coef_div).toBe(8);
+    expect(setRange({ ...t, coef_div: 3 }, { high: 8 }).coef_div).toBe(3);
+    expect(setRange({ type: "sigmoid", low: 0, high: 1, k: 0.5 }, { low: 0.2 })).toEqual({ type: "sigmoid", low: 0.2, high: 1, k: 0.5 });
+  });
+
+  it("switches cofolding on and off", () => {
+    const base = presetObjectives("druglike", services);
+    const on = withCofolding(base, services, true);
+    expect(hasCofolding(on)).toBe(true);
+    expect(on.slice(0, 2).map((o) => [o.service, o.depends_on ?? null])).toEqual([
+      ["boltz", null],
+      ["posebusters", "Boltz affinity"],
+    ]);
+    expect(on[0].service_url).toBe("http://localhost:8091/score");
+    expect(withCofolding(on, services, true)).toBe(on);
+    const withContacts = [...on, serviceObjective(services, "interaction_profiler", "hbond")];
+    expect(withCofolding(withContacts, services, false)).toEqual(base);
+  });
+});
+
+describe("browsing stored TTPs", () => {
+  const items = [
+    { id: "a-old", name: "Alpha", version: 1 },
+    { id: "b-new", name: "Beta", version: 2 },
+    { id: "c-none", name: "Gamma solubility", version: 1 },
+  ];
+
+  it("searches name and id by every word", () => {
+    expect(filterTtps(items, "solub gam").map((t) => t.id)).toEqual(["c-none"]);
+    expect(filterTtps(items, "B-NEW").map((t) => t.id)).toEqual(["b-new"]);
+    expect(filterTtps(items, "  ")).toHaveLength(3);
+  });
+
+  it("puts the most recently used first, then by name", () => {
+    expect(sortTtps(items, { "a-old": "2026-10-01T00:00:00Z", "b-new": "2026-10-27T00:00:00Z" }).map((t) => t.id)).toEqual(["b-new", "a-old", "c-none"]);
+  });
+
+  it("remembers local creations", () => {
+    const store = memory();
+    rememberCreated("x", "2026-10-27T08:00:00Z", store);
+    rememberCreated("y", "2026-10-27T09:00:00Z", store);
+    expect(createdTimes(store)).toEqual({ x: "2026-10-27T08:00:00Z", y: "2026-10-27T09:00:00Z" });
+    store.setItem("cofold.ttp-created", "[1]");
+    expect(createdTimes(store)).toEqual({});
+  });
+
+  it("duplicates a stored TTP into a builder form", () => {
+    const copy = formFromTtp(ttp, ["brd4-lead-copy"]);
+    expect(copy).toMatchObject({ name: "BRD4 lead optimisation (copy)", id: "brd4-lead-copy-2", sequence: SEQ, pdbId: "3MXF", aggregation: "geometric_mean" });
+    expect(copy.objectives.map((o) => o.name)).toEqual(["QED", "MW", "Affinity"]);
+    expect(copy.constraints).toEqual(ttp.constraints);
+    expect(formProblems(copy)).toEqual([]);
+  });
+
+  it("diffs two versions", () => {
+    expect(isSameVersion(versionDiff(ttp, ttp))).toBe(true);
+    const next: Ttp = {
+      ...removeObjective(ttp, "pre_scoring", 0),
+      target: { protein_sequence: SEQ + "AAAA", pdb_id: "3MXF" },
+      scoring: { ...ttp.scoring, aggregation: "arithmetic_mean", objectives: [...ttp.scoring.objectives.slice(0, 1), { ...ttp.scoring.objectives[1], weight: 1.5, transform: { type: "double_sigmoid", low: -3, high: 1, coef_div: 3, coef_si: 10, coef_se: 10 } }, nativeObjective("SAScore")] },
+    };
+    const diff = versionDiff(ttp, next);
+    expect(diff.added).toEqual(["Synthetic accessibility"]);
+    expect(diff.removed).toEqual(["QED"]);
+    expect(diff.changed).toEqual([{ name: "Affinity", parts: ["weight 2 → 1.5", "curve Lower is better → Within a range"] }]);
+    expect(diff.other).toEqual([`target sequence ${SEQ.length} → ${SEQ.length + 4} aa`, "geometric mean → arithmetic mean"]);
+    const moved = versionDiff(ttp, patchObjective(ttp, "scoring", 0, { transform: { ...ttp.scoring.objectives[0].transform!, high: 550 } }));
+    expect(moved.changed).toEqual([{ name: "MW", parts: ["high 500 → 550"] }]);
+  });
+
+  it("describes a TTP for reading and reuse", () => {
+    expect(targetSummary(ttp)).toBe(`${SEQ.length} aa · PDB 3MXF`);
+    expect(targetSummary({ ...ttp, target: null })).toBeNull();
+    expect(chatPrompt(ttp)).toBe('Use the TTP "BRD4 lead optimisation" (brd4-lead)');
+    expect(ttpFileName(ttp)).toBe("brd4-lead-v2.json");
   });
 });
 

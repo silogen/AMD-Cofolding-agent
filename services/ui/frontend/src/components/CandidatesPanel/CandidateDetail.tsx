@@ -1,8 +1,11 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+import { useMemo } from "react";
 import type { Theme } from "../../hooks/useTheme";
-import { type Candidate, cofoldPrompt, METRIC_LABELS, type MolProps } from "../../lib/candidates";
+import { type Candidate, candidateNumbers, cofoldPrompt, METRIC_LABELS, type MolProps } from "../../lib/candidates";
+import type { Ttp } from "../../lib/ttp";
+import { ScoreWhy } from "../RunResults/ScoreWhy";
 import { affinityConcentration, affinityText, pIC50 } from "../../lib/gate";
 import type { StructureMetrics } from "../../types/api";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
@@ -18,13 +21,17 @@ interface Props {
   onOpenMolecule: (smiles: string) => void;
   onOpenStructure: (path: string) => void;
   onAsk: (prompt: string) => void;
+  /** The conversation's TTP, to explain the score with. */
+  ttp?: Ttp | null;
+  ttpId?: string | null;
 }
 
 const button =
   "border-subtle hover:bg-sunken inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Everything known about one candidate: drawing, scores, gate and where it came from. */
-export function CandidateDetail({ candidate: c, props: p, theme, onClose, onOpenMolecule, onOpenStructure, onAsk }: Props) {
+export function CandidateDetail({ candidate: c, props: p, theme, onClose, onOpenMolecule, onOpenStructure, onAsk, ttp, ttpId }: Props) {
+  const values = useMemo(() => candidateNumbers(c), [c]);
   const descriptorRows: [string, string][] = p
     ? [
         ["MW", `${p.mw.toFixed(1)} Da`],
@@ -109,6 +116,7 @@ export function CandidateDetail({ candidate: c, props: p, theme, onClose, onOpen
       </section>
 
       <div className="flex min-w-0 flex-col gap-3 sm:col-span-2 lg:col-span-1">
+      {(ttp || ttpId) && <ScoreWhy title="Why this score" values={values} ttp={ttp} ttpId={ttpId} />}
 
       <section className="flex flex-col gap-1.5">
         <h4 className="text-muted text-[11px] font-semibold tracking-wide uppercase">Score components</h4>

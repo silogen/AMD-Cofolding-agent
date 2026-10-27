@@ -72,20 +72,20 @@ export function Header({
         <h1 className="truncate text-sm font-semibold" title={title}>
           {title || "New conversation"}
         </h1>
-        <div className="mt-0.5 flex items-center gap-2 text-[11px]">
+        <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] whitespace-nowrap">
           {target ? (
             <button
               type="button"
               onClick={onShowTarget}
               title="Show the target"
-              className="border-subtle text-muted hover:text-body cursor-pointer rounded-full border px-2"
+              className="border-subtle text-muted hover:text-body min-w-0 cursor-pointer truncate rounded-full border px-2"
             >
               {target}
             </button>
           ) : (
             <span className="text-faint">No target yet</span>
           )}
-          {busy && <span className="text-faint">working…</span>}
+          {busy && <span className="text-faint shrink-0">working…</span>}
         </div>
       </div>
 
@@ -109,10 +109,12 @@ export function Header({
         <button
           type="button"
           onClick={onOpenPalette}
-          title="Commands (Ctrl+K)"
-          className="text-faint hover:text-body hidden cursor-pointer items-center rounded-md px-1.5 py-1 sm:flex"
+          title="Actions (Ctrl+K)"
+          aria-keyshortcuts="Control+K"
+          aria-haspopup="dialog"
+          className="text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2.5 py-1 text-xs touch:min-h-11"
         >
-          <kbd className="font-sans text-[11px]">Ctrl K</kbd>
+          Actions
         </button>
 
         <button
@@ -121,7 +123,8 @@ export function Header({
           aria-pressed={workbenchOpen}
           title={`${workbenchOpen ? "Hide" : "Show"} the workbench (Ctrl+B)`}
           aria-label={workbenchOpen ? "Hide the workbench" : "Show the workbench"}
-          className={`cursor-pointer rounded-md px-2.5 py-1 text-xs ${workbenchOpen ? "text-body bg-inset" : "text-muted hover:text-body"}`}
+          aria-keyshortcuts="Control+B"
+          className={`cursor-pointer rounded-md px-2.5 py-1 text-xs touch:min-h-11 ${workbenchOpen ? "text-body bg-inset" : "text-muted hover:text-body hover:bg-inset"}`}
         >
           Workbench
         </button>

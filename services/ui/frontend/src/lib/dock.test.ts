@@ -48,6 +48,12 @@ describe("persistence", () => {
     saveTabs("s1", ["structure", "candidates", "properties", "activity", "jobs"], store);
     expect(loadTabs("s1", DOCK_TABS, store)).toEqual(["structure", "molecules", "jobs"]);
   });
+  it("keeps the run results tab", () => {
+    const store = memory();
+    saveTabs("s1", ["jobs", "results"], store);
+    expect(loadTabs("s1", DOCK_TABS, store)).toEqual(["jobs", "results"]);
+    expect(dockTabOf("results")).toBe("results");
+  });
   it("tolerates garbage", () => {
     const store = memory();
     store.setItem("cofold.dock.tabs:s1", "{nope");

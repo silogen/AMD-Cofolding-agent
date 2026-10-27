@@ -8,6 +8,7 @@ import {
   admetPrompt,
   buildCandidates,
   type Candidate,
+  candidateNumbers,
   candidatesToCsv,
   candidatesToSdf,
   candidateValue,
@@ -20,7 +21,10 @@ import {
   ro5Violations,
 } from "../../lib/candidates";
 import { descriptors, withMol } from "../../lib/rdkit";
+import { latestTtp, toolEvents } from "../../lib/ttp";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { SmilesText } from "../MolDepiction/SmilesText";
+import { StarButton } from "../Shortlist/StarButton";
 import { CandidateDetail } from "./CandidateDetail";
 import { CandidateScatter } from "./CandidateScatter";
 import { GateBadge } from "./GateBadge";
@@ -77,6 +81,7 @@ function download(name: string, text: string, type: string) {
 export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStructure, onAsk }: Props) {
   const { rdkit } = useRDKit();
   const candidates = useMemo(() => buildCandidates(artifacts), [artifacts]);
+  const ttp = useMemo(() => latestTtp(toolEvents(artifacts.steps)), [artifacts.steps]);
   const props = useMemo(() => {
     const out = new Map<string, MolProps>();
     if (!rdkit) return out;
@@ -446,7 +451,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                     <tr
                       key={c.smiles}
                       onClick={() => setDetailKey(c.smiles)}
-                      className={`hover:bg-sunken cursor-pointer ${selected.has(c.smiles) ? "bg-sunken" : ""}`}
+                      className={`group hover:bg-sunken cursor-pointer ${selected.has(c.smiles) ? "bg-sunken" : ""}`}
                       style={isDetail ? { boxShadow: "inset 3px 0 0 var(--color-accent)" } : undefined}
                     >
                       <td className={`border-subtle border-b px-2 ${cellY}`} onClick={(e) => e.stopPropagation()}>
@@ -459,19 +464,15 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                         />
                       </td>
                       <td className={`border-subtle border-b px-2 ${cellY}`}>
-                        <MolDepiction
-                          smiles={c.smiles}
-                          theme={theme}
-                          width={120}
-                          height={80}
-                          label={c.name}
-                          className={dense ? "h-7 w-10" : "h-10 w-14"}
-                        />
+                        <MolDepiction smiles={c.smiles} theme={theme} width={128} height={96} label={c.name} className={dense ? "h-8 w-11" : "h-12 w-16"} />
                       </td>
-                      <td className={`border-subtle max-w-[14rem] border-b px-2 ${cellY}`}>
-                        {c.name && <span className="block truncate font-medium">{c.name}</span>}
-                        <span className="text-muted block truncate font-mono text-[10px]" title={c.smiles}>
-                          {c.smiles}
+                      <td className={`border-subtle border-b px-2 ${cellY}`}>
+                        <span className="flex items-center gap-1">
+                          <span className="flex min-w-0 flex-col">
+                            {c.name && <span className="max-w-44 truncate font-medium">{c.name}</span>}
+                            <SmilesText smiles={c.smiles} className="text-muted max-w-44 text-[10px]" />
+                          </span>
+                          <StarButton smiles={c.smiles} label={c.name} source="candidates" values={() => candidateNumbers(c)} />
                         </span>
                       </td>
                       {visible.map((col) => cell(c, col))}
@@ -497,6 +498,8 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
             onOpenMolecule={onOpenMolecule}
             onOpenStructure={onOpenStructure}
             onAsk={onAsk}
+            ttp={ttp.ttp}
+            ttpId={ttp.id}
           />
         </div>
       )}

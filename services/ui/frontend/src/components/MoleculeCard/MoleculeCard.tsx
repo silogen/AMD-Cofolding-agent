@@ -6,6 +6,7 @@ import type { Theme } from "../../hooks/useTheme";
 import { openSketcher } from "../../lib/sketcherBus";
 import { CopyButton } from "../CopyButton/CopyButton";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { StarButton } from "../Shortlist/StarButton";
 
 interface Props {
   panel: MoleculePanel;
@@ -31,6 +32,7 @@ export function MoleculeCard({ panel, theme, onOpen }: Props) {
         />
         <span className="truncate text-xs font-semibold">{panel.label ?? "Ligand"}</span>
         <span className="text-faint ml-auto text-[11px] whitespace-nowrap">2D structure</span>
+        <StarButton smiles={panel.smiles} label={panel.label} source={panel.tool} className="-mr-1" />
       </figcaption>
 
       <button

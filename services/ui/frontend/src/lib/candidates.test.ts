@@ -7,6 +7,7 @@ import type { MoleculePanel, StructurePanel, TablePanel } from "../types/api";
 import type { Artifacts, Sourced } from "./artifacts";
 import {
   buildCandidates,
+  candidateNumbers,
   candidateValue,
   candidatesToCsv,
   candidatesToSdf,
@@ -109,6 +110,14 @@ describe("numericColumns and candidateValue", () => {
     expect(candidateValue(candidates[0], "metric:confidence")).toBe(0.9);
     expect(candidateValue(candidates[0], "qed")).toBe(0.6);
     expect(candidateValue(candidates[0], "metric:plddt")).toBeUndefined();
+  });
+});
+
+describe("candidateNumbers", () => {
+  it("keeps the components and names the total Score", () => {
+    const [c] = buildCandidates({ ...empty(), tables: [table("t", ["smiles", "score", "QED"], [{ smiles: "CCO", score: 0.7, QED: 0.4 }])] });
+    expect(candidateNumbers(c)).toEqual({ ...c.components, Score: 0.7 });
+    expect(candidateNumbers({ ...c, score: undefined, components: { QED: 0.4 } })).toEqual({ QED: 0.4 });
   });
 });
 

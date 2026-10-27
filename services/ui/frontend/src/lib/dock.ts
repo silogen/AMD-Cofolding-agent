@@ -11,14 +11,14 @@ const TABS_KEY = "cofold.dock.tabs";
 const WIDTH_KEY = "cofold.dock.width";
 
 /** The tabs the dock can open. */
-export type DockTab = "structure" | "molecules" | "tables" | "jobs" | "target" | "ttp" | "assets";
+export type DockTab = "structure" | "molecules" | "tables" | "jobs" | "results" | "target" | "ttp" | "assets";
 /** What can be asked for: a tab, or a view inside one (e.g. "properties" is a view of the molecules tab). */
-export type DockView = DockTab | "candidates" | "properties" | "activity";
+export type DockView = DockTab | "candidates" | "properties" | "shortlist" | "activity";
 
-export const DOCK_TABS: readonly DockTab[] = ["structure", "molecules", "tables", "jobs", "target", "ttp", "assets"];
+export const DOCK_TABS: readonly DockTab[] = ["structure", "molecules", "tables", "jobs", "results", "target", "ttp", "assets"];
 
 /** Views that used to be tabs of their own; saved tab lists still name them. */
-const MERGED: Partial<Record<DockView, DockTab>> = { candidates: "molecules", properties: "molecules", activity: "jobs" };
+const MERGED: Partial<Record<DockView, DockTab>> = { candidates: "molecules", properties: "molecules", shortlist: "molecules", activity: "jobs" };
 
 /** The tab that shows `view`. */
 export function dockTabOf(view: DockView): DockTab {

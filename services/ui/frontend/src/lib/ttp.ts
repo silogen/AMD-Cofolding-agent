@@ -195,14 +195,61 @@ export function transformParams(type: string): (keyof Transform & string)[] {
     case "double_sigmoid":
       return ["low", "high", "coef_div", "coef_si", "coef_se"];
     case "step":
+      return ["low", "high"];
     case "right_step":
     case "left_step":
-      return ["low", "high"];
+      return ["low"];
     case "exponential_decay":
       return ["k"];
     default:
       return [];
   }
+}
+
+/** Plain-language names for the transform types. */
+export const CURVE_LABELS: Record<string, string> = {
+  sigmoid: "Higher is better",
+  reverse_sigmoid: "Lower is better",
+  double_sigmoid: "Within a range",
+  step: "Inside a window (hard)",
+  right_step: "At least (hard)",
+  left_step: "At most (hard)",
+  exponential_decay: "Decay from zero",
+  value_mapping: "Value mapping",
+};
+
+export const curveLabel = (type: string | null | undefined) => (type ? (CURVE_LABELS[normaliseType(type)] ?? type) : "Score as is");
+
+/** The parameters shown in the simple view, with the words that read them out. */
+export function rangeFields(type: string): { key: keyof Transform & string; label: string }[] {
+  switch (normaliseType(type)) {
+    case "sigmoid":
+    case "reverse_sigmoid":
+      return [
+        { key: "low", label: "from" },
+        { key: "high", label: "to" },
+      ];
+    case "double_sigmoid":
+    case "step":
+      return [
+        { key: "low", label: "between" },
+        { key: "high", label: "and" },
+      ];
+    case "right_step":
+      return [{ key: "low", label: "at least" }];
+    case "left_step":
+      return [{ key: "low", label: "at most" }];
+    case "exponential_decay":
+      return [{ key: "k", label: "rate" }];
+    default:
+      return [];
+  }
+}
+
+/** The parameters behind "more": steepness and the double sigmoid's coefficients. */
+export function advancedParams(type: string): (keyof Transform & string)[] {
+  const shown = new Set(rangeFields(type).map((f) => f.key));
+  return transformParams(type).filter((p) => !shown.has(p));
 }
 
 function normaliseType(type: string): string {
@@ -215,8 +262,8 @@ const DEFAULTS: Record<string, Partial<Transform>> = {
   reverse_sigmoid: { low: 0, high: 1, k: 0.5 },
   double_sigmoid: { low: 0, high: 1, coef_div: 1, coef_si: 10, coef_se: 10 },
   step: { low: 0, high: 1 },
-  right_step: { low: 0, high: 1 },
-  left_step: { low: 0, high: 1 },
+  right_step: { low: 0 },
+  left_step: { low: 0 },
   exponential_decay: { k: 1 },
 };
 
@@ -245,10 +292,9 @@ export function evaluateTransform(t: Transform, x: number): number | null {
       const div = num(t.coef_div) || 1;
       const si = num(t.coef_si) ?? 10;
       const se = num(t.coef_se) ?? 10;
-      const a = 10 ** ((se * x) / div);
-      const left = a / (a + 10 ** ((se * low) / div));
-      const b = 10 ** ((si * x) / div);
-      const right = b / (b + 10 ** ((si * high) / div));
+      // a / (a + c) written as 1 / (1 + c / a), so large x/div do not overflow to NaN.
+      const left = 1 / (1 + 10 ** ((se * (low - x)) / div));
+      const right = 1 / (1 + 10 ** ((si * (high - x)) / div));
       const y = left - right;
       return Number.isFinite(y) ? Math.min(1, Math.max(0, y)) : 0;
     }
@@ -265,21 +311,20 @@ export function evaluateTransform(t: Transform, x: number): number | null {
   }
 }
 
-/** Sampled curve of a transform over a range wide enough to show its shape. */
-export function transformCurve(t: Transform, samples = 48): { x: number; y: number }[] {
+/** The raw-value range that shows a transform's shape. */
+export function curveDomain(t: Transform): { from: number; to: number } {
+  const type = normaliseType(t.type);
+  if (type === "exponential_decay") return { from: 0, to: 5 / Math.max(num(t.k) ?? 1, 1e-3) };
+  const low = num(t.low) ?? 0;
+  const high = type === "right_step" || type === "left_step" ? low : (num(t.high) ?? 1);
+  const span = Math.abs(high - low) || Math.max(Math.abs(low), 1);
+  return { from: Math.min(low, high) - span * 0.6, to: Math.max(low, high) + span * 0.6 };
+}
+
+/** Sampled curve of a transform over `domain`, by default one wide enough to show its shape. */
+export function transformCurve(t: Transform, samples = 48, domain = curveDomain(t)): { x: number; y: number }[] {
   if (evaluateTransform(t, 0) === null) return [];
-  let from: number;
-  let to: number;
-  if (normaliseType(t.type) === "exponential_decay") {
-    from = 0;
-    to = 5 / Math.max(num(t.k) ?? 1, 1e-3);
-  } else {
-    const low = num(t.low) ?? 0;
-    const high = num(t.high) ?? 1;
-    const span = Math.abs(high - low) || Math.max(Math.abs(low), 1);
-    from = Math.min(low, high) - span * 0.6;
-    to = Math.max(low, high) + span * 0.6;
-  }
+  const { from, to } = domain;
   const points: { x: number; y: number }[] = [];
   for (let i = 0; i <= samples; i++) {
     const x = from + ((to - from) * i) / samples;
@@ -353,7 +398,10 @@ export function weightShares(ttp: Ttp): Map<string, number> {
  * 1, otherwise wide enough for the largest weight.
  */
 export function weightRange(ttp: Ttp): { min: number; max: number; step: number } {
-  const all = [...objectivesOf(ttp, "pre_scoring"), ...objectivesOf(ttp, "scoring")];
+  return weightRangeOf([...objectivesOf(ttp, "pre_scoring"), ...objectivesOf(ttp, "scoring")]);
+}
+
+export function weightRangeOf(all: Objective[]): { min: number; max: number; step: number } {
   const largest = all.reduce((m, o) => Math.max(m, o.weight), 0);
   if (largest <= 1) return { min: 0, max: 1, step: 0.01 };
   return { min: 0, max: Math.max(2, Math.ceil(largest * 2)), step: 0.05 };
@@ -366,6 +414,20 @@ export const KNOWN_SERVICES = new Set(["boltz", "posebusters", "admet", "retrodm
 export function objectiveSource(o: Pick<Objective, "type" | "service">): "native" | "service" | "external" {
   if (o.type === "native") return "native";
   return o.service && KNOWN_SERVICES.has(o.service) ? "service" : "external";
+}
+
+const SERVICE_LABELS: Record<string, string> = {
+  boltz: "Boltz-2",
+  posebusters: "PoseBusters",
+  admet: "ADMET",
+  retrodmta: "RetroDMTA",
+  interaction_profiler: "Interactions",
+};
+
+/** Where a score comes from, in a word: "RDKit", "Boltz-2", "ADMET", ... */
+export function sourceLabel(o: Pick<Objective, "type" | "service">): string {
+  if (o.type === "native") return "RDKit";
+  return (o.service && SERVICE_LABELS[o.service]) ?? o.service ?? "external";
 }
 
 /** When the TTP was created, if the payload says so. */
@@ -709,6 +771,65 @@ export function presetObjectives(preset: PresetId, services: Record<string, Serv
   }
 }
 
+/** Windows for scores that are already 0-1, used once a curve is chosen for them. */
+const UNIT_WINDOWS: Record<string, [number, number]> = {
+  QED: [0.4, 0.8],
+  Csp3: [0.2, 0.6],
+  posebusters: [0.5, 1],
+};
+
+/** The curve an objective starts from when its curve type is first set: its usual window. */
+export function defaultTransform(o: Objective): Transform | null {
+  const known =
+    o.type === "native"
+      ? NATIVE_TRANSFORMS[o.component ?? ""]
+      : o.service === "admet"
+        ? ADMET_TRANSFORMS[String(o.service_params?.endpoint ?? "")]
+        : o.service
+          ? serviceObjective({}, o.service, typeof o.service_params?.interaction_type === "string" ? o.service_params.interaction_type : undefined).transform
+          : null;
+  if (known) return { ...known };
+  const unit = UNIT_WINDOWS[o.component ?? o.service ?? ""];
+  return unit ? { type: "sigmoid", low: unit[0], high: unit[1], k: 0.5 } : null;
+}
+
+/** The double sigmoid's coef_div that keeps its steepness in scale with the window. */
+const scaleDiv = (t: Transform) => Math.max(Math.abs(num(t.low) ?? 0), Math.abs(num(t.high) ?? 0)) || 1;
+
+/** The objective's transform as another curve type, keeping its window; null for "score as is". */
+export function retypeObjective(o: Objective, type: string | null): Transform | null {
+  if (!type) return null;
+  const seed = o.transform ?? defaultTransform(o);
+  const next = retype(seed, type);
+  if (normaliseType(type) === "double_sigmoid" && typeof seed?.coef_div !== "number") next.coef_div = scaleDiv(next);
+  return next;
+}
+
+/** A transform with a new window; a double sigmoid's coef_div follows when it was in scale. */
+export function setRange(t: Transform, patch: Partial<Pick<Transform, "low" | "high" | "k">>): Transform {
+  const next = { ...t, ...patch };
+  if (normaliseType(t.type) === "double_sigmoid" && (typeof t.coef_div !== "number" || t.coef_div === scaleDiv(t))) next.coef_div = scaleDiv(next);
+  return next;
+}
+
+export const hasCofolding = (list: Objective[]) => list.some((o) => o.service === "boltz");
+
+/**
+ * Objectives with cofolding switched on (Boltz-2 affinity, then PoseBusters on
+ * its pose) or off (those and anything that runs after Boltz removed).
+ */
+export function withCofolding(list: Objective[], services: Record<string, ServiceInfo>, on: boolean): Objective[] {
+  if (on) {
+    if (hasCofolding(list)) return list;
+    const taken = list.map((o) => o.name);
+    const boltz = { ...serviceObjective(services, "boltz"), name: uniqueName(BOLTZ_NAME, taken) };
+    const pose = { ...serviceObjective(services, "posebusters"), weight: 0.6, depends_on: boltz.name };
+    return [boltz, { ...pose, name: uniqueName(pose.name, [...taken, boltz.name]) }, ...list];
+  }
+  const boltzNames = new Set(list.filter((o) => o.service === "boltz").map((o) => o.name));
+  return list.filter((o) => o.service !== "boltz" && o.service !== "posebusters" && !(o.depends_on && boltzNames.has(o.depends_on)));
+}
+
 /** An objective the "Add" menu offers. */
 export interface CatalogueEntry {
   key: string;
@@ -772,13 +893,33 @@ export interface TtpForm {
   pdbId: string;
   aggregation: "geometric_mean" | "arithmetic_mean";
   objectives: Objective[];
+  /** Carried over when a stored TTP is duplicated; the builder has no editor for them. */
+  constraints?: Constraint[] | null;
+}
+
+/** A form that recreates a stored TTP under a new id; pre-scoring components become objectives. */
+export function formFromTtp(ttp: Ttp, existingIds: string[] = []): TtpForm {
+  let id = `${ttp.id}-copy`.slice(0, 60);
+  for (let n = 2; existingIds.includes(id); n++) id = `${ttp.id}-copy-${n}`;
+  return {
+    name: `${ttp.name} (copy)`,
+    id,
+    description: ttp.scoring.comment ?? "",
+    sequence: ttp.target?.protein_sequence ?? "",
+    pdbId: ttp.target?.pdb_id ?? "",
+    aggregation: ttp.scoring.aggregation ?? "geometric_mean",
+    objectives: [...objectivesOf(ttp, "pre_scoring").map((o) => ({ ...o, type: "native" as const })), ...ttp.scoring.objectives].map((o) => ({ ...o })),
+    constraints: ttp.constraints ?? null,
+  };
 }
 
 /** What stops the form from making a TTP the server accepts. */
 export function formProblems(form: TtpForm, existingIds: string[] = []): string[] {
   const problems: string[] = [];
   if (!form.name.trim()) problems.push("Give the profile a name.");
-  if (!form.id) problems.push("The id is empty.");
+  if (!form.id) {
+    if (form.name.trim()) problems.push("The id is empty.");
+  }
   else if (!TTP_ID.test(form.id)) problems.push("The id may only hold lowercase letters, digits, - and _, starting with a letter or digit.");
   else if (existingIds.includes(form.id)) problems.push(`A TTP with id "${form.id}" already exists.`);
   const sequence = normaliseSequence(form.sequence);
@@ -829,7 +970,107 @@ export function buildTtp(form: TtpForm): Record<string, unknown> {
     scoring: { ...(form.description.trim() ? { comment: form.description.trim() } : {}), aggregation: form.aggregation, objectives },
   };
   if (sequence) ttp.target = { protein_sequence: sequence, ...(form.pdbId.trim() ? { pdb_id: form.pdbId.trim().toUpperCase() } : {}) };
+  if (form.constraints?.length) ttp.constraints = form.constraints;
   return ttp;
+}
+
+/** What "Use in chat" puts in the composer. */
+export const chatPrompt = (ttp: Pick<Ttp, "id" | "name">) => `Use the TTP "${ttp.name}" (${ttp.id})`;
+
+export const ttpFileName = (ttp: Pick<Ttp, "id" | "version">) => `${ttp.id}-v${ttp.version}.json`;
+
+/** Stored TTPs whose name or id holds every word of the query. */
+export function filterTtps<T extends TtpSummary>(items: T[], query: string): T[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return items.filter((t) => words.every((w) => t.name.toLowerCase().includes(w) || t.id.toLowerCase().includes(w)));
+}
+
+/**
+ * Most recently used or created first; list_ttps has no dates, so `activity`
+ * (ISO times by id: runs, local creations) orders them, then the name.
+ */
+export function sortTtps<T extends TtpSummary>(items: T[], activity: Record<string, string>): T[] {
+  return [...items].sort((a, b) => (activity[b.id] ?? "").localeCompare(activity[a.id] ?? "") || a.name.localeCompare(b.name));
+}
+
+const CREATED_KEY = "cofold.ttp-created";
+
+/** When this browser created each TTP, by id. */
+export function createdTimes(storage: KeyValueStore | null = browserStorage()): Record<string, string> {
+  try {
+    const value: unknown = JSON.parse(storage?.getItem(CREATED_KEY) ?? "{}");
+    return isRecord(value) ? (Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v === "string")) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function rememberCreated(id: string, at = new Date().toISOString(), storage: KeyValueStore | null = browserStorage()): void {
+  try {
+    storage?.setItem(CREATED_KEY, JSON.stringify({ ...createdTimes(storage), [id]: at }));
+  } catch {
+    // Storage full or disabled: the list falls back to name order.
+  }
+}
+
+export interface VersionDiff {
+  added: string[];
+  removed: string[];
+  /** Per objective: "weight 0.6 → 0.8", "low -6 → -5", "curve Higher is better → Within a range". */
+  changed: { name: string; parts: string[] }[];
+  /** Other changes in a phrase each: target, aggregation, constraints, name. */
+  other: string[];
+}
+
+const short = (v: unknown) => (typeof v === "number" ? String(+v.toPrecision(4)) : v == null ? "—" : String(v));
+
+/** What changed between two versions of a TTP, objectives matched by name. */
+export function versionDiff(from: Ttp, to: Ttp): VersionDiff {
+  const all = (t: Ttp) => new Map([...objectivesOf(t, "pre_scoring"), ...objectivesOf(t, "scoring")].map((o) => [o.name, o]));
+  const before = all(from);
+  const after = all(to);
+  const changed: VersionDiff["changed"] = [];
+  for (const [name, b] of after) {
+    const a = before.get(name);
+    if (!a) continue;
+    const parts: string[] = [];
+    if (a.weight !== b.weight) parts.push(`weight ${short(a.weight)} → ${short(b.weight)}`);
+    const ta = a.transform ?? null;
+    const tb = b.transform ?? null;
+    if ((ta?.type ?? null) !== (tb?.type ?? null)) parts.push(`curve ${curveLabel(ta?.type)} → ${curveLabel(tb?.type)}`);
+    else if (ta && tb) {
+      for (const key of transformParams(tb.type)) if (ta[key] !== tb[key]) parts.push(`${key} ${short(ta[key])} → ${short(tb[key])}`);
+    }
+    if (!same(a.params, b.params)) parts.push("parameters");
+    if (!same(a.service_params, b.service_params) || a.service_url !== b.service_url) parts.push("service settings");
+    if ((a.depends_on ?? null) !== (b.depends_on ?? null)) parts.push(`runs after ${short(b.depends_on)}`);
+    if (parts.length) changed.push({ name, parts });
+  }
+  const other: string[] = [];
+  if (from.name !== to.name) other.push(`renamed to "${to.name}"`);
+  const sa = from.target?.protein_sequence ?? "";
+  const sb = to.target?.protein_sequence ?? "";
+  if (sa !== sb) other.push(!sa ? `target added (${sb.length} aa)` : !sb ? "target removed" : `target sequence ${sa.length} → ${sb.length} aa`);
+  if ((from.target?.pdb_id ?? null) !== (to.target?.pdb_id ?? null)) other.push(`PDB ${short(from.target?.pdb_id)} → ${short(to.target?.pdb_id)}`);
+  const ga = from.scoring.aggregation ?? "geometric_mean";
+  const gb = to.scoring.aggregation ?? "geometric_mean";
+  if (ga !== gb) other.push(`${ga.replace("_", " ")} → ${gb.replace("_", " ")}`);
+  if (!same(from.constraints, to.constraints)) other.push("constraints changed");
+  return {
+    added: [...after.keys()].filter((n) => !before.has(n)),
+    removed: [...before.keys()].filter((n) => !after.has(n)),
+    changed,
+    other,
+  };
+}
+
+export const isSameVersion = (d: VersionDiff) => !d.added.length && !d.removed.length && !d.changed.length && !d.other.length;
+
+/** "1,362 aa · PDB 3MXF", or null without a target. */
+export function targetSummary(ttp: Ttp): string | null {
+  const target = ttp.target;
+  if (!target?.protein_sequence) return null;
+  return [`${target.protein_sequence.length.toLocaleString("en")} aa`, target.pdb_id && `PDB ${target.pdb_id}`, target.msa_path && "MSA"].filter(Boolean).join(" · ");
 }
 
 /** The id and name create_ttp answered with, or its error. */

@@ -71,12 +71,9 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
 
   return (
     <article className="flex flex-col gap-3" aria-busy={running}>
-      <header className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-faint text-[9.5px] font-bold tracking-[0.09em] uppercase">Agent</span>
-        <h3 className="text-body truncate text-[0.9375rem] leading-snug font-bold" title={title}>
-          {title}
-        </h3>
-      </header>
+      <h3 className="text-body truncate text-sm leading-snug font-semibold" title={title}>
+        {title}
+      </h3>
 
       {running && <LiveStatus steps={steps} thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null} now={now} />}
 
@@ -432,7 +429,7 @@ const COMPONENTS = { a: AnswerLink, blockquote: AnswerQuote };
 function AnswerBlock({ content, linkResidues }: { content: string; linkResidues: boolean }) {
   return (
     <div className="group relative">
-      <div className="markdown text-[0.9375rem]">
+      <div className="markdown">
         <Markdown remarkPlugins={linkResidues ? LINKED_PLUGINS : PLAIN_PLUGINS} components={COMPONENTS}>
           {content}
         </Markdown>

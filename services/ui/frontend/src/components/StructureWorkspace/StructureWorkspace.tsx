@@ -11,8 +11,10 @@ import {
   COLOR_THEMES,
   StructureView,
   VIEW_STYLES,
+  cssColor,
   type BackgroundName,
   type ColorName,
+  type Comparison,
   type Picked,
   type Residue,
   type ViewStyleName,
@@ -67,6 +69,7 @@ const COLOR_LABELS: Record<ColorName, string> = {
 };
 
 const OPEN_PDB = "\u0000open-pdb";
+type Side = "primary" | "other";
 
 const sameResidue = (r: { chain?: string | null; resnum: number }, c: Contact) =>
   c.resnum === r.resnum && (!r.chain || !c.chain || c.chain === r.chain);
@@ -84,6 +87,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
 
   const [viewReady, setViewReady] = useState(false);
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
+  const [loads, setLoads] = useState(0);
   const [error, setError] = useState<{ path: string | null; text: string } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [message, setMessage] = useState<Message | null>(null);
@@ -102,7 +106,11 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   const [fileResidues, setFileResidues] = useState<{ path: string; list: FileResidue[] } | null>(null);
   const [dashScope, setDashScope] = useState<DashScope | null>(null);
   const [flash, setFlash] = useState<{ keys: string[]; at: number } | null>(null);
-  const [pdbForm, setPdbForm] = useState(false);
+  const [pdbForm, setPdbForm] = useState<"open" | "compare" | null>(null);
+  /** The structure overlaid on *primary*; it goes when another structure is shown. */
+  const [compare, setCompare] = useState<{ primary: string; other: StructurePanel } | null>(null);
+  const [comparison, setComparison] = useState<{ key: string; result: Comparison | null; error?: string } | null>(null);
+  const [hiddenSides, setHiddenSides] = useState<{ key: string; sides: Side[] } | null>(null);
 
   const profile = useMemo(() => contactsFor(active, interactions), [active, interactions]);
   const verdict = useMemo(() => gate(active.metrics), [active.metrics]);
@@ -209,6 +217,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         if (color) await view.setColor(color);
         setFileResidues({ path: active.path, list: view.residues() });
         setLoadedPath(active.path);
+        setLoads((n) => n + 1);
         setError(null);
       })
       .catch((reason: unknown) => {
@@ -231,6 +240,69 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   useEffect(() => {
     if (loaded) void viewRef.current?.setContacts(contactLines(dashed, canvasTheme));
   }, [loaded, dashed, canvasTheme, backgroundValue]);
+
+  const comparing = compare && compare.primary === active.path ? compare.other : null;
+  const compareKey = comparing ? `${active.path}\u0000${comparing.path}` : null;
+  const compared = comparison && comparison.key === compareKey ? comparison : null;
+  const hidden = hiddenSides && hiddenSides.key === compareKey ? hiddenSides.sides : [];
+  const compareColors = () => {
+    const host = hostRef.current ?? document.documentElement;
+    return { primary: cssColor(host, "--color-molecule"), other: cssColor(host, "--color-structure"), ghost: cssColor(host, "--text-muted") };
+  };
+
+  // A new load clears the viewport, overlay included, so it is drawn again after each one.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !loaded) return;
+    if (!comparing || !compareKey) {
+      if (view.comparing) void view.endCompare();
+      return;
+    }
+    let stale = false;
+    view
+      .compare(comparing.url, comparing.format, structureTitle(comparing), compareColors())
+      .then((result) => {
+        if (!stale && result) setComparison({ key: compareKey, result });
+      })
+      .catch((reason: unknown) => {
+        if (!stale) setComparison({ key: compareKey, result: null, error: reason instanceof Error ? reason.message : String(reason) });
+      });
+    return () => {
+      stale = true;
+    };
+  }, [loaded, loads, comparing, compareKey]);
+
+  // The app switches the theme class after this renders.
+  const overlaid = Boolean(compared?.result);
+  useEffect(() => {
+    if (!overlaid) return;
+    const frame = requestAnimationFrame(() => void viewRef.current?.setCompareColors(compareColors()));
+    return () => cancelAnimationFrame(frame);
+  }, [theme, overlaid]);
+
+  const toggleSide = (side: Side) => {
+    if (!compareKey) return;
+    const sides = hidden.includes(side) ? hidden.filter((s) => s !== side) : [...hidden, side];
+    setHiddenSides({ key: compareKey, sides });
+    viewRef.current?.setCompareVisible(side, !sides.includes(side));
+  };
+
+  const compareWith = (panel: StructurePanel) => {
+    setCompare({ primary: active.path, other: panel });
+    setHiddenSides(null);
+  };
+
+  const comparePdb = async (id: string) => {
+    if (!isPdbId(id)) {
+      say(`“${id}” is not a PDB id: four characters starting with a digit, like 3MXF.`, "bad");
+      return;
+    }
+    try {
+      compareWith(await fetchPdbEntry(id, sessionId ?? "new"));
+    } catch (reason) {
+      say(reason instanceof Error ? reason.message : String(reason), "bad");
+    }
+  };
 
   useEffect(() => {
     if (!message) return;
@@ -448,18 +520,19 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
       <header className="border-subtle flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
         {pdbForm ? (
           <PdbForm
+            action={pdbForm === "compare" ? "Compare" : "Open"}
             onOpen={(id) => {
-              setPdbForm(false);
-              void openPdb(id);
+              setPdbForm(null);
+              void (pdbForm === "compare" ? comparePdb(id) : openPdb(id));
             }}
-            onCancel={() => setPdbForm(false)}
+            onCancel={() => setPdbForm(null)}
           />
         ) : (
           <select
             value={active.path}
             onChange={(event) => {
               if (event.target.value === OPEN_PDB) {
-                setPdbForm(true);
+                setPdbForm("open");
                 return;
               }
               const next = structures.find(({ item }) => item.path === event.target.value);
@@ -484,6 +557,34 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: STRUCTURE_KINDS[kind].color }} />
             <span className="text-muted">{STRUCTURE_KINDS[kind].label}</span>
           </span>
+        )}
+        {!pdbForm && (
+          <select
+            value=""
+            onChange={(event) => {
+              if (event.target.value === OPEN_PDB) {
+                setPdbForm("compare");
+                return;
+              }
+              const other = structures.find(({ item }) => item.path === event.target.value);
+              if (other) compareWith(other.item);
+            }}
+            aria-label="Compare with"
+            title="Overlay another structure, superposed by the protein"
+            className={`w-[4.6rem] shrink-0 cursor-pointer rounded-md px-1 py-1 text-[11px] outline-none ${comparing ? "bg-inset text-body" : "text-muted hover:text-body hover:bg-inset bg-transparent"}`}
+          >
+            <option value="" disabled hidden>
+              Compare
+            </option>
+            {structures
+              .filter(({ item }) => item.path !== active.path)
+              .map(({ item }) => (
+                <option key={item.path} value={item.path}>
+                  {structureOption(structureTitle(item), item.path, runOf(item.path))}
+                </option>
+              ))}
+            <option value={OPEN_PDB}>PDB entry…</option>
+          </select>
         )}
         <a href={active.url} download={active.name} className="text-muted hover:text-body hover:bg-inset shrink-0 rounded-md px-2 py-1 text-[11px]">
           Download
@@ -550,6 +651,18 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             )}
           </div>
         </div>
+
+        {comparing && loaded && (
+          <CompareLegend
+            names={{ primary: structureOption(title, active.path, runOf(active.path)), other: structureOption(structureTitle(comparing), comparing.path, runOf(comparing.path)) }}
+            paths={{ primary: active.path, other: comparing.path }}
+            result={compared?.result ?? null}
+            error={compared?.error ?? null}
+            hidden={hidden}
+            onToggle={toggleSide}
+            onClose={() => setCompare(null)}
+          />
+        )}
 
         {pickedHere && (
           <div className="bg-raised border-subtle shadow-card absolute bottom-2 left-2 z-20 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px]">
@@ -709,7 +822,81 @@ function GateStrip({ verdict, panel, onQuality }: { verdict: Gate; panel: Struct
   );
 }
 
-function PdbForm({ onOpen, onCancel }: { onOpen: (id: string) => void; onCancel: () => void }) {
+const SIDE_COLORS: Record<Side, string> = { primary: "var(--color-molecule)", other: "var(--color-structure)" };
+
+/** The two structures of an overlay, each a toggle, and how far apart they are. */
+function CompareLegend({
+  names,
+  paths,
+  result,
+  error,
+  hidden,
+  onToggle,
+  onClose,
+}: {
+  names: Record<Side, string>;
+  paths: Record<Side, string>;
+  result: Comparison | null;
+  error: string | null;
+  hidden: Side[];
+  onToggle: (side: Side) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="bg-raised border-subtle shadow-card absolute top-9 left-2 z-20 max-w-[min(18rem,calc(100%-1rem))] rounded-lg border py-1 pr-1 pl-2 text-[11px]">
+      <div className="flex items-start gap-1">
+        <div className="min-w-0 flex-1">
+          {(["primary", "other"] as const).map((side) => {
+            const off = hidden.includes(side);
+            return (
+              <button
+                key={side}
+                type="button"
+                aria-pressed={!off}
+                onClick={() => onToggle(side)}
+                title={`${off ? "Show" : "Hide"} ${paths[side]}`}
+                className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 py-px text-left"
+              >
+                <span
+                  aria-hidden="true"
+                  className="size-2 shrink-0 rounded-full"
+                  style={off ? { boxShadow: `inset 0 0 0 1.5px ${SIDE_COLORS[side]}` } : { background: SIDE_COLORS[side] }}
+                />
+                <span className={`truncate ${off ? "text-faint" : "text-body"}`}>{names[side]}</span>
+              </button>
+            );
+          })}
+        </div>
+        <button type="button" aria-label="Stop comparing" title="Back to one structure" onClick={onClose} className="text-muted hover:text-body cursor-pointer px-1 leading-none">
+          ×
+        </button>
+      </div>
+      <p className="text-faint pt-0.5 text-[10px] tabular-nums">
+        {error ? (
+          <span style={{ color: "var(--color-accent)" }}>{error}</span>
+        ) : !result ? (
+          "Superposing…"
+        ) : !result.superposed ? (
+          "Not superposed: the proteins share too little sequence"
+        ) : (
+          <>
+            {result.ligandRmsd !== null && (
+              <span title="Ligand heavy atoms, symmetry-corrected, after superposing the proteins">
+                ligand RMSD <span className="text-body font-mono">{result.ligandRmsd.toFixed(2)} Å</span>
+                {" · "}
+              </span>
+            )}
+            <span title={`CA atoms of ${result.core} of ${result.aligned} residues aligned by sequence`}>
+              CA <span className="font-mono">{result.caRmsd?.toFixed(2)} Å</span>
+            </span>
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
+function PdbForm({ action, onOpen, onCancel }: { action: string; onOpen: (id: string) => void; onCancel: () => void }) {
   const [value, setValue] = useState("");
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -729,7 +916,7 @@ function PdbForm({ onOpen, onCancel }: { onOpen: (id: string) => void; onCancel:
         className="bg-sunken border-subtle w-32 rounded-md border px-2 py-0.5 font-mono text-[11px] uppercase outline-none focus:border-[var(--color-accent)]"
       />
       <button type="submit" disabled={!isPdbId(value)} className="text-body hover:bg-inset cursor-pointer rounded-md px-2 py-0.5 text-[11px] font-semibold disabled:cursor-default disabled:opacity-50">
-        Open
+        {action}
       </button>
       <button type="button" onClick={onCancel} className="text-muted hover:text-body cursor-pointer rounded-md px-2 py-0.5 text-[11px]">
         Cancel

@@ -252,6 +252,37 @@ export function parseAlerts(result: unknown): JobAlert[] {
     .filter((a): a is JobAlert => a !== null);
 }
 
+const SEVERITY_RANK: Record<string, number> = { critical: 4, error: 4, high: 3, medium: 2, warning: 2, low: 1, info: 0 };
+
+/**
+ * One entry per message: get_job_alerts repeats the diagnostics' warnings,
+ * and repeats itself on every poll. The most severe report of a message wins.
+ */
+export function uniqueAlerts(items: readonly { severity: string; message: string; type?: string }[]): { severity: string; message: string; type: string }[] {
+  const byMessage = new Map<string, { severity: string; message: string; type: string }>();
+  for (const item of items) {
+    const key = item.message.trim().replace(/\s+/g, " ").toLowerCase();
+    const seen = byMessage.get(key);
+    const rank = SEVERITY_RANK[item.severity.toLowerCase()] ?? 2;
+    if (!seen || rank > (SEVERITY_RANK[seen.severity.toLowerCase()] ?? 2)) {
+      byMessage.set(key, { severity: item.severity, message: item.message.trim(), type: item.type ?? seen?.type ?? "alert" });
+    }
+  }
+  return [...byMessage.values()];
+}
+
+/** The line of a job error worth reading first: a traceback's last line, after what exited. */
+export function errorSummary(error: string): string {
+  const lines = error.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length <= 1 || !lines.some((line) => line.includes("Traceback"))) return lines[0] ?? "";
+  const head = lines[0].split(/\.?\s*Last stderr:/)[0].replace(/Traceback.*$/, "").trim();
+  const last = lines[lines.length - 1];
+  return head ? `${head}: ${last}` : last;
+}
+
+/** REINVENT 4 likelihood columns that get_top_candidates reports as if they were components. */
+const NOT_COMPONENTS = new Set(["agent", "prior", "target", "score"]);
+
 /** get_top_candidates: ranked unique molecules with their component scores. */
 export function parseCandidates(result: unknown): Candidate[] {
   return list(obj(result)?.candidates)
@@ -259,23 +290,42 @@ export function parseCandidates(result: unknown): Candidate[] {
       const d = obj(raw);
       const smiles = str(d?.smiles);
       if (!d || !smiles) return null;
+      const entries = Object.entries(obj(d.components) ?? {});
+      // REINVENT 4 names the total "Score", so it arrives among the components.
+      const score = entries.find(([name]) => name.toLowerCase() === "score");
+      const names = new Set(entries.map(([name]) => name));
+      // "std (<component>)" and the like describe a component rather than score.
+      const detail = (name: string) => names.has(/^.+?\s*\((.+)\)$/.exec(name)?.[1] ?? "");
       return {
         smiles,
-        total: num(d.total_score),
-        components: Object.entries(obj(d.components) ?? {}).map(([name, c]) => {
-          const e = obj(c);
-          return { name, transformed: num(e?.transformed), raw: num(e?.raw) };
-        }),
+        total: num(d.total_score) ?? num(obj(score?.[1])?.transformed) ?? num(obj(score?.[1])?.raw),
+        components: entries
+          .filter(([name]) => !NOT_COMPONENTS.has(name.toLowerCase()) && !detail(name))
+          .map(([name, c]) => {
+            const e = obj(c);
+            return { name, transformed: num(e?.transformed), raw: num(e?.raw) };
+          }),
       };
     })
     .filter((c): c is Candidate => c !== null);
+}
+
+/** A top candidate's scores by the results CSV's column names. */
+export function candidateScores(c: Candidate): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (c.total !== null) out.Score = c.total;
+  for (const { name, transformed, raw } of c.components) {
+    if (transformed !== null) out[name] = transformed;
+    if (raw !== null) out[`${name} (raw)`] = raw;
+  }
+  return out;
 }
 
 /**
  * The job's results CSV as a file name the gateway serves
  * (/api/jobs/<id>/files/<name>); REINVENT writes results_1.csv for a single stage.
  */
-export function resultsFile(job: JobSummary): string {
+export function resultsFile(job: Pick<JobSummary, "csvPath">): string {
   const name = job.csvPath?.split(/[\\/]/).pop() ?? "";
   return /^[\w.-]+\.csv$/.test(name) ? name : "results_1.csv";
 }
@@ -380,6 +430,8 @@ export interface RunOverrides {
   batchSize: number | null;
   sigma: number | null;
   learningRate: number | null;
+  /** Mol2Mol runs read their seeds from a smiles_file and load a mol2mol prior. */
+  mol2mol?: boolean;
 }
 
 export function parseRunConfig(toml: string): RunOverrides {
@@ -388,32 +440,80 @@ export function parseRunConfig(toml: string): RunOverrides {
     const n = match ? Number(match[1]) : NaN;
     return Number.isFinite(n) ? n : null;
   };
-  return { batchSize: value("batch_size"), sigma: value("sigma"), learningRate: value("rate") };
+  const prior = toml.match(/^\s*prior_file\s*=\s*"([^"]*)"/m)?.[1] ?? "";
+  return {
+    batchSize: value("batch_size"),
+    sigma: value("sigma"),
+    learningRate: value("rate"),
+    mol2mol: /mol2mol|m2m/i.test(prior) || /^\s*smiles_file\s*=/m.test(toml),
+  };
 }
 
 export function canResume(job: JobSummary): boolean {
-  return job.type === "optimization" && (job.state === "stopped" || job.state === "failed") && job.hasCheckpoint && !!job.ttpId && !!job.checkpointPath;
+  return (
+    job.type === "optimization" &&
+    (job.state === "stopped" || job.state === "failed" || job.state === "completed") &&
+    job.hasCheckpoint &&
+    !!job.ttpId &&
+    !!job.checkpointPath
+  );
+}
+
+export function isMol2Mol(job: Pick<JobSummary, "model">, config?: RunOverrides | null): boolean {
+  return !!config?.mol2mol || /mol2mol|m2m/i.test(job.model ?? "");
+}
+
+/** Steps the job finished: get_optimization_status reports the next step (last CSV step + 1). */
+export function stepsDone(job: JobSummary | JobStatus): number {
+  if (job.state === "completed" && job.maxSteps) return job.maxSteps;
+  const next = (job as Partial<JobStatus>).currentStep;
+  return next == null ? 0 : Math.max(0, next - 1);
 }
 
 /** Steps a resumed run still has to do, so it ends where the original would have. */
 export function remainingSteps(job: JobSummary | JobStatus): number {
   const max = job.maxSteps ?? 300;
-  const done = (job as Partial<JobStatus>).currentStep ?? 0;
-  return Math.max(1, max - done);
+  return Math.max(1, max - stepsDone(job));
+}
+
+/** Default length of a continuation: what is left of a stopped run, else 100 more. */
+export function continueSteps(job: JobSummary | JobStatus): number {
+  const left = (job.maxSteps ?? 0) - stepsDone(job);
+  return job.state !== "completed" && left > 0 ? left : 100;
+}
+
+export interface ContinueOptions {
+  steps?: number;
+  config?: RunOverrides | null;
+  /** The TTP at the job's version, sent inline so a newer saved version does not change the scoring. */
+  ttp?: unknown;
+  seeds?: string[];
 }
 
 /** Arguments of run_optimization that continue *job* from its checkpoint. */
-export function resumeArguments(job: JobSummary | JobStatus, config?: RunOverrides | null): Record<string, unknown> {
-  const args: Record<string, unknown> = {
-    ttp_id: job.ttpId,
-    max_steps: remainingSteps(job),
-    resume_from: job.checkpointPath,
-  };
+export function resumeArguments(job: JobSummary | JobStatus, { steps, config, ttp, seeds }: ContinueOptions = {}): Record<string, unknown> {
+  const args: Record<string, unknown> = ttp ? { ttp } : { ttp_id: job.ttpId };
+  args.max_steps = steps ?? remainingSteps(job);
+  args.resume_from = job.checkpointPath;
   if (job.model) args.model = job.model;
   if (config?.batchSize != null) args.batch_size = config.batchSize;
   if (config?.sigma != null) args.sigma = config.sigma;
   if (config?.learningRate != null) args.learning_rate = config.learningRate;
+  if (seeds?.length && isMol2Mol(job, config)) args.seed_smiles = seeds;
   return args;
+}
+
+/** What *steps* more cost: "6,400 molecules · ~8 min at the last pace". */
+export function continueCost(job: JobSummary | JobStatus, steps: number, batchSize: number | null): string {
+  const parts: string[] = [];
+  if (batchSize) parts.push(`${(steps * batchSize).toLocaleString()} molecules`);
+  const ms = runtimeMs(job);
+  const done = stepsDone(job);
+  if (ms && done > 0) {
+    const minutes = Math.max(1, Math.round((ms / done) * steps / 60_000));
+    parts.push(minutes >= 90 ? `~${(minutes / 60).toFixed(1)} h at the last pace` : `~${minutes} min at the last pace`);
+  }
+  return parts.join(" · ");
 }
 
 /** The job a run_optimization call started. */

@@ -5,6 +5,7 @@
 // is 5 MB and only needed once there is a structure to look at.
 import scriptUrl from "molstar/build/viewer/molstar.js?url";
 import styleUrl from "molstar/build/viewer/molstar.css?url";
+import { matchLigand, moveLigand, superposeCa, toMat4, type CaAtom, type Ligand } from "./superpose";
 
 /*
  * The small part of the Mol* viewer API used here. The bundle is a classic
@@ -30,19 +31,48 @@ interface SchemaItem {
 interface Observable<T> {
   subscribe: (next: (value: T) => void) => { unsubscribe: () => void };
 }
+interface Cell {
+  obj?: { data?: unknown };
+  transform: { ref: string; params?: Record<string, unknown> };
+}
 interface StructureRef {
-  cell: { obj?: { data?: unknown }; transform: { ref: string } };
-  components: unknown[];
+  cell: Cell;
+  components: { key?: string; representations: { cell: Cell }[] }[];
 }
 type Loci = unknown;
 interface StateBuilderNode {
   ref: string;
   apply: (transformer: unknown, params?: unknown, options?: { tags?: string; dependsOn?: string[] }) => StateBuilderNode;
+  /** *edit* changes an immer draft of the params in place. */
+  update: (edit: (draft: Record<string, unknown>) => void) => StateBuilderNode;
 }
 interface StateBuilder {
   toRoot: () => StateBuilderNode;
+  to: (ref: string) => StateBuilderNode;
   delete: (ref: string) => StateBuilder;
   commit: (options?: { doNotLogTiming?: boolean }) => Promise<unknown>;
+}
+interface Selector {
+  ref: string;
+  data?: unknown;
+}
+interface Builders {
+  data: { download: (params: { url: string; isBinary?: boolean; label?: string }) => Promise<Selector> };
+  structure: {
+    parseTrajectory: (data: Selector, format: string) => Promise<Selector>;
+    createModel: (trajectory: Selector) => Promise<Selector>;
+    createStructure: (model: Selector) => Promise<Selector>;
+    tryCreateComponentStatic: (structure: string, type: "polymer" | "ligand") => Promise<Selector | undefined>;
+    tryCreateComponent: (
+      structure: string,
+      params: { type: { name: "bundle"; params: unknown }; nullIfEmpty?: boolean; label?: string },
+      key: string,
+    ) => Promise<Selector | undefined>;
+    representation: {
+      applyPreset: (parent: unknown, preset: string) => Promise<unknown>;
+      addRepresentation: (structure: Selector, props: Record<string, unknown>) => Promise<Selector>;
+    };
+  };
 }
 interface Plugin {
   canvas3d?: { setProps: (props: Record<string, unknown>) => void; requestCameraReset?: (options?: object) => void };
@@ -62,14 +92,17 @@ interface Plugin {
     structure: {
       /** Shows the target and its surroundings as sticks. */
       focus: { setFromLoci: (loci: Loci) => void; clear: () => void };
-      hierarchy: { current: { structures: StructureRef[] } };
+      hierarchy: {
+        current: { structures: StructureRef[] };
+        toggleVisibility: (refs: { cell: Cell }[], action: "show" | "hide") => void;
+      };
       component: {
         clear: (structures: StructureRef[]) => Promise<void>;
         updateRepresentationsTheme: (components: unknown[], params: { color: string }) => Promise<void>;
       };
     };
   };
-  builders: { structure: { representation: { applyPreset: (parent: unknown, preset: string) => Promise<unknown> } } };
+  builders: Builders;
   behaviors: {
     interaction: { click: Observable<{ current: { loci: ClickLoci } }> };
     labels?: { highlight: { value: { labels: ReadonlyArray<string> } } };
@@ -95,8 +128,16 @@ interface ClickLoci {
   bonds?: { aUnit: BondUnit; aIndex: number }[];
 }
 type Property<T> = (location: Location) => T;
+/** An atomic unit, as far as reading a ligand's bonds goes: unit-local indices into the sorted *elements*. */
+interface AtomicUnit {
+  id: number;
+  elements: ArrayLike<number>;
+  bonds?: { offset: ArrayLike<number>; b: ArrayLike<number> };
+}
 interface StructureLib {
-  Structure: { eachAtomicHierarchyElement: (structure: unknown, visit: { residue?: (location: Location) => void }) => void };
+  Structure: {
+    eachAtomicHierarchyElement: (structure: unknown, visit: { residue?: (location: Location) => void; atom?: (location: Location) => void }) => void;
+  };
   StructureElement: {
     Loci: {
       is: (loci: unknown) => boolean;
@@ -110,7 +151,14 @@ interface StructureLib {
     Bundle: { fromLoci: (loci: Loci) => unknown };
   };
   StructureProperties: {
-    atom: { auth_atom_id: Property<string>; sourceIndex: Property<number> };
+    atom: {
+      auth_atom_id: Property<string>;
+      sourceIndex: Property<number>;
+      type_symbol: Property<string>;
+      x: Property<number>;
+      y: Property<number>;
+      z: Property<number>;
+    };
     residue: { auth_comp_id: Property<string>; auth_seq_id: Property<number> };
     chain: { auth_asym_id: Property<string> };
     entity: { type: Property<string> };
@@ -120,7 +168,7 @@ interface PluginLib {
   PluginConfig: { Viewport: { ShowIllumination: unknown; ShowXR: unknown } };
   StateTransforms: {
     Misc: { CreateGroup: unknown };
-    Model: { MultiStructureSelectionFromBundle: unknown };
+    Model: { MultiStructureSelectionFromBundle: unknown; TransformStructureConformation: unknown };
     Representation: { StructureSelectionsDistance3D: unknown };
   };
 }
@@ -218,11 +266,104 @@ export interface Picked {
   chain: string | null;
 }
 
+/** What overlaying a second structure measured. */
+export interface Comparison {
+  /** False when the proteins share too little sequence to superpose; both then stay in their own frames. */
+  superposed: boolean;
+  /** CA atoms the fit kept, of those paired by sequence. */
+  caRmsd: number | null;
+  core: number;
+  aligned: number;
+  /** Heavy atoms; null unless both hold the same ligand. */
+  ligandRmsd: number | null;
+}
+
+/** Carbon colours of the two ligands and the colour of the overlaid protein, "#rrggbb" read as numbers. */
+export interface CompareColors {
+  primary: number;
+  other: number;
+  ghost: number;
+}
+
+const carbonTheme = (value: number) => ({
+  name: "element-symbol",
+  params: {
+    carbonColor: { name: "uniform", params: { value, saturation: 0, lightness: 0 } },
+    saturation: 0,
+    lightness: 0,
+    colors: { name: "default", params: {} },
+  },
+});
+const uniformTheme = (value: number) => ({ name: "uniform", params: { value, saturation: 0, lightness: 0 } });
+const isLigandComponent = (key?: string) => Boolean(key?.includes("static-ligand"));
+
+/** Binary search in a sorted index array. */
+function indexIn(sorted: ArrayLike<number>, value: number): number {
+  let lo = 0;
+  let hi = sorted.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] === value) return mid;
+    if (sorted[mid] < value) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+type Residued<T> = T & { residue: SchemaItem };
+
+/** The CA trace and the ligands (heavy atoms and their bonds, largest first) of a structure. */
+function atomsOf(lib: StructureLib, structure: unknown): { ca: Residued<CaAtom>[]; ligands: Residued<Ligand>[] } {
+  const P = lib.StructureProperties;
+  const ca: Residued<CaAtom>[] = [];
+  const residues = new Set<string>();
+  const groups = new Map<string, { ligand: Residued<Ligand>; units: AtomicUnit[]; elements: number[] }>();
+  lib.Structure.eachAtomicHierarchyElement(structure, {
+    atom: (location) => {
+      const type = P.entity.type(location);
+      if (type !== "polymer" && type !== "non-polymer") return;
+      const id: SchemaItem = { auth_asym_id: P.chain.auth_asym_id(location), auth_seq_id: P.residue.auth_seq_id(location) };
+      const residue = `${id.auth_asym_id}:${id.auth_seq_id}:${P.residue.auth_comp_id(location)}`;
+      const pos: [number, number, number] = [P.atom.x(location), P.atom.y(location), P.atom.z(location)];
+      if (type === "polymer") {
+        if (P.atom.auth_atom_id(location) !== "CA" || residues.has(residue)) return;
+        residues.add(residue);
+        ca.push({ resname: P.residue.auth_comp_id(location), pos, residue: id });
+        return;
+      }
+      const element = P.atom.type_symbol(location);
+      if (/^(H|D)$/i.test(element)) return;
+      const group = groups.get(residue) ?? { ligand: { atoms: [], bonds: [], residue: id }, units: [], elements: [] };
+      groups.set(residue, group);
+      const { unit, element: index } = location as { unit: AtomicUnit; element: number };
+      group.ligand.atoms.push({ name: P.atom.auth_atom_id(location), element, pos });
+      group.units.push(unit);
+      group.elements.push(index);
+    },
+  });
+  for (const { ligand, units, elements } of groups.values()) {
+    const where = new Map(elements.map((element, i) => [`${units[i].id}:${element}`, i]));
+    elements.forEach((element, i) => {
+      const unit = units[i];
+      const bonds = unit.bonds;
+      const local = bonds ? indexIn(unit.elements, element) : -1;
+      if (!bonds || local < 0) return;
+      for (let k = bonds.offset[local]; k < bonds.offset[local + 1]; k++) {
+        const j = where.get(`${unit.id}:${unit.elements[bonds.b[k]]}`);
+        if (j !== undefined && j > i) ligand.bonds.push([i, j]);
+      }
+    });
+  }
+  return { ca, ligands: [...groups.values()].map((group) => group.ligand).sort((x, y) => y.atoms.length - x.atoms.length) };
+}
+
 const ligand = (Q: QueryBuilder) =>
   Q.struct.generator.atomGroups({ "entity-test": Q.core.rel.eq([Q.ammp("entityType"), "non-polymer"]) });
 
 const FOCUS_BEHAVIOR = "ms-plugin.create-structure-focus-representation";
 const hexColor = (color: string) => Number.parseInt(color.replace("#", ""), 16) || 0x888888;
+/** A "#rrggbb" CSS variable as it applies to *element*, in Mol*'s form. */
+export const cssColor = (element: Element, name: string) => hexColor(getComputedStyle(element).getPropertyValue(name).trim());
 const atomNames = (text: string | null) => (text ?? "").split(/[\s,;+/]+/).filter(Boolean);
 
 /**
@@ -240,6 +381,18 @@ export class StructureView {
   /** Contact redraws run one after another, so a quick second focus does not leave the first one's dashes. */
   private contactsQueue: Promise<void> = Promise.resolve();
   private background = 0x000000;
+  /** The second structure's download node, whose subtree is the whole overlay. */
+  private compareRef: string | null = null;
+  private compareStructure: string | null = null;
+  private compareReprs: { ref: string; ligand: boolean }[] = [];
+  /** The primary's ligand representations as they were coloured before the overlay. */
+  private tinted = new Map<string, unknown>();
+  /** A ligand drawn over the primary when its style has no ligand of its own to tint. */
+  private overlayLigand: string | null = null;
+  private compareColors: CompareColors | null = null;
+  private primaryHidden = false;
+  private compareToken = 0;
+  private compareQueue: Promise<unknown> = Promise.resolve();
   style: ViewStyleName = "cartoon";
 
   static async create(host: HTMLElement, background: number): Promise<StructureView> {
@@ -286,8 +439,13 @@ export class StructureView {
     return this.disposed ? null : (this.viewer?.plugin ?? null);
   }
 
+  /** The loaded structures other than the one overlaid for comparison. */
+  private get ownStructures(): StructureRef[] {
+    return (this.plugin?.managers.structure.hierarchy.current.structures ?? []).filter((s) => s.cell.transform.ref !== this.compareStructure);
+  }
+
   private get structureRef(): StructureRef | null {
-    return this.plugin?.managers.structure.hierarchy.current.structures[0] ?? null;
+    return this.ownStructures[0] ?? null;
   }
 
   /** Load a file, replacing what is shown. False when a newer load won. */
@@ -295,8 +453,10 @@ export class StructureView {
     const token = ++this.loadToken;
     const viewer = this.viewer;
     if (!viewer) return false;
+    this.compareToken++;
     await viewer.plugin.clear();
     this.contactsRef = null;
+    this.forgetCompare();
     if (token !== this.loadToken || this.disposed) return false;
     await viewer.loadStructureFromUrl(url, format === "cif" ? "mmcif" : "pdb", false, { label });
     if (token !== this.loadToken || this.disposed) return false;
@@ -436,6 +596,7 @@ export class StructureView {
     if (!drawn) return;
     await builder.commit({ doNotLogTiming: true });
     this.contactsRef = group.ref;
+    if (this.primaryHidden) plugin.managers.structure.hierarchy.toggleVisibility([{ cell: { transform: { ref: group.ref } } }], "hide");
   }
 
   /** A soft glow on residues, to show which ones a click picked. */
@@ -483,19 +644,227 @@ export class StructureView {
     const plugin = this.plugin;
     this.style = style;
     if (!plugin) return;
-    const structures = plugin.managers.structure.hierarchy.current.structures;
+    const structures = this.ownStructures;
+    await this.untint();
     await plugin.managers.structure.component.clear(structures);
     for (const structure of structures) {
       await plugin.builders.structure.representation.applyPreset(structure.cell, VIEW_STYLES[style].preset);
     }
+    await this.tint();
   }
 
   async setColor(color: ColorName): Promise<void> {
     const plugin = this.plugin;
     if (!plugin) return;
-    for (const structure of plugin.managers.structure.hierarchy.current.structures) {
+    for (const structure of this.ownStructures) {
       await plugin.managers.structure.component.updateRepresentationsTheme(structure.components, { color: COLOR_THEMES[color] });
     }
+    this.tinted.clear();
+    await this.tint();
+  }
+
+  /**
+   * Overlay a second structure, superposed on the loaded one by its protein:
+   * a faint cartoon and its ligand in *colors.other*, the loaded ligand in
+   * *colors.primary*. Null when superseded by a newer call or a new load.
+   */
+  compare(url: string, format: "cif" | "pdb", label: string, colors: CompareColors): Promise<Comparison | null> {
+    const token = ++this.compareToken;
+    const run = this.compareQueue.then(() => (token === this.compareToken ? this.drawCompare(url, format, label, colors, token) : null));
+    this.compareQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Back to the loaded structure alone. */
+  endCompare(): Promise<void> {
+    this.compareToken++;
+    const run = this.compareQueue.then(() => this.removeCompare());
+    this.compareQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  get comparing(): boolean {
+    return this.compareRef !== null;
+  }
+
+  private async drawCompare(url: string, format: "cif" | "pdb", label: string, colors: CompareColors, token: number): Promise<Comparison | null> {
+    const plugin = this.plugin;
+    const lib = window.molstar?.lib;
+    const primary = this.structureRef?.cell.obj?.data;
+    if (!plugin || !lib?.structure || !lib.plugin || !primary) return null;
+    await this.removeCompare();
+    const loadToken = this.loadToken;
+    const current = () => token === this.compareToken && loadToken === this.loadToken && !this.disposed;
+    const B = plugin.builders;
+
+    const data = await B.data.download({ url, isBinary: false, label });
+    this.compareRef = data.ref;
+    if (!current()) return this.abandonCompare();
+    const trajectory = await B.structure.parseTrajectory(data, format === "cif" ? "mmcif" : "pdb");
+    const structure = await B.structure.createStructure(await B.structure.createModel(trajectory));
+    this.compareStructure = structure.ref;
+    if (!current() || !structure.data) return this.abandonCompare();
+
+    const mine = atomsOf(lib.structure, primary);
+    const theirs = atomsOf(lib.structure, structure.data);
+    const fit = superposeCa(mine.ca, theirs.ca);
+    let parent = structure.ref;
+    if (fit) {
+      const builder = plugin.state.data.build();
+      const node = builder.to(structure.ref).apply(lib.plugin.StateTransforms.Model.TransformStructureConformation, {
+        transform: { name: "matrix", params: { data: toMat4(fit.transform), transpose: false } },
+      });
+      await builder.commit({ doNotLogTiming: true });
+      parent = node.ref;
+    }
+    const { StructureElement } = lib.structure;
+    const loaded = structure.data;
+    const component = (items: SchemaItem[], key: string, label: string) =>
+      B.structure.tryCreateComponent(
+        parent,
+        { type: { name: "bundle", params: StructureElement.Bundle.fromLoci(StructureElement.Loci.fromSchema(loaded, { items })) }, nullIfEmpty: true, label },
+        key,
+      );
+    const moved = fit ? theirs.ligands.map((l) => ({ ...moveLigand(l, fit.transform), residue: l.residue })) : [];
+    const match = fit ? matchLigand(mine.ligands, moved) : null;
+
+    // Only the stretch that aligned, and the one ligand that answers ours: a full-length model's other
+    // domains, or an entry's solvent and additives, would cloud the pocket.
+    const polymer = fit
+      ? await component(
+          theirs.ca.slice(fit.span[0], fit.span[1] + 1).map((r) => r.residue),
+          "compare-aligned",
+          "Aligned protein",
+        )
+      : await B.structure.tryCreateComponentStatic(parent, "polymer");
+    if (polymer) {
+      const repr = await B.structure.representation.addRepresentation(polymer, {
+        type: "cartoon",
+        typeParams: { alpha: 0.3 },
+        color: "uniform",
+        colorParams: uniformTheme(colors.ghost).params,
+      });
+      this.compareReprs.push({ ref: repr.ref, ligand: false });
+    }
+    const ligand = match ? await component([moved[match.index].residue], "compare-ligand", "Ligand") : await B.structure.tryCreateComponentStatic(parent, "ligand");
+    if (ligand) {
+      const repr = await B.structure.representation.addRepresentation(ligand, {
+        type: "ball-and-stick",
+        color: "element-symbol",
+        colorParams: carbonTheme(colors.other).params,
+      });
+      this.compareReprs.push({ ref: repr.ref, ligand: true });
+    }
+    if (!current()) return this.abandonCompare();
+    this.compareColors = colors;
+    await this.tint();
+
+    return {
+      superposed: fit !== null,
+      caRmsd: fit?.caRmsd ?? null,
+      core: fit?.core ?? 0,
+      aligned: fit?.aligned ?? 0,
+      ligandRmsd: match?.rmsd ?? null,
+    };
+  }
+
+  private async abandonCompare(): Promise<null> {
+    await this.removeCompare();
+    return null;
+  }
+
+  private forgetCompare(): void {
+    this.compareRef = null;
+    this.compareStructure = null;
+    this.compareReprs = [];
+    this.tinted.clear();
+    this.overlayLigand = null;
+    this.compareColors = null;
+    this.primaryHidden = false;
+  }
+
+  private async removeCompare(): Promise<void> {
+    const plugin = this.plugin;
+    const ref = this.compareRef;
+    if (!plugin) return;
+    if (this.primaryHidden) this.setCompareVisible("primary", true);
+    await this.untint();
+    this.forgetCompare();
+    if (ref) await plugin.state.data.build().delete(ref).commit({ doNotLogTiming: true });
+  }
+
+  /** Colour the primary's ligand carbons for the overlay, remembering how they were. */
+  private async tint(): Promise<void> {
+    const plugin = this.plugin;
+    const colors = this.compareColors;
+    const structure = this.structureRef;
+    if (!plugin || !colors || !structure) return;
+    const reprs = structure.components.filter((c) => isLigandComponent(c.key)).flatMap((c) => c.representations);
+    if (reprs.length) {
+      const builder = plugin.state.data.build();
+      for (const repr of reprs) {
+        const ref = repr.cell.transform.ref;
+        if (!this.tinted.has(ref)) this.tinted.set(ref, repr.cell.transform.params?.colorTheme);
+        builder.to(ref).update((draft) => {
+          draft.colorTheme = carbonTheme(colors.primary);
+        });
+      }
+      await builder.commit({ doNotLogTiming: true });
+      return;
+    }
+    if (this.overlayLigand) return;
+    const ligand = await plugin.builders.structure.tryCreateComponentStatic(structure.cell.transform.ref, "ligand");
+    if (!ligand) return;
+    this.overlayLigand = ligand.ref;
+    await plugin.builders.structure.representation.addRepresentation(ligand, {
+      type: "ball-and-stick",
+      typeParams: { sizeFactor: 0.22 },
+      color: "element-symbol",
+      colorParams: carbonTheme(colors.primary).params,
+    });
+  }
+
+  private async untint(): Promise<void> {
+    const plugin = this.plugin;
+    if (!plugin) return;
+    const builder = plugin.state.data.build();
+    const present = new Set(this.ownStructures.flatMap((s) => s.components.flatMap((c) => c.representations.map((r) => r.cell.transform.ref))));
+    for (const [ref, theme] of this.tinted) {
+      if (!present.has(ref) || !theme) continue;
+      builder.to(ref).update((draft) => {
+        draft.colorTheme = theme;
+      });
+    }
+    if (this.overlayLigand) builder.delete(this.overlayLigand);
+    this.tinted.clear();
+    this.overlayLigand = null;
+    await builder.commit({ doNotLogTiming: true });
+  }
+
+  /** New colours for the overlay, e.g. after a theme change. */
+  async setCompareColors(colors: CompareColors): Promise<void> {
+    const plugin = this.plugin;
+    if (!plugin || !this.comparing) return;
+    this.compareColors = colors;
+    const builder = plugin.state.data.build();
+    for (const { ref, ligand } of this.compareReprs) {
+      builder.to(ref).update((draft) => {
+        draft.colorTheme = ligand ? carbonTheme(colors.other) : uniformTheme(colors.ghost);
+      });
+    }
+    await builder.commit({ doNotLogTiming: true });
+    if (this.overlayLigand) await this.untint();
+    await this.tint();
+  }
+
+  /** Show or hide one side of the overlay. */
+  setCompareVisible(which: "primary" | "other", visible: boolean): void {
+    const plugin = this.plugin;
+    if (!plugin) return;
+    const refs = which === "primary" ? [this.structureRef?.cell.transform.ref, this.contactsRef] : [this.compareStructure];
+    if (which === "primary") this.primaryHidden = !visible;
+    const cells = refs.filter((ref): ref is string => Boolean(ref)).map((ref) => ({ cell: { transform: { ref } } }));
+    plugin.managers.structure.hierarchy.toggleVisibility(cells, visible ? "show" : "hide");
   }
 
   setBackground(color: number): void {
@@ -535,6 +904,9 @@ export class StructureView {
           listener(null);
           return;
         }
+        // Residues of the overlaid structure have no contacts or numbering here.
+        const modelOf = (structure: unknown) => (structure as { models?: unknown[] } | undefined)?.models?.[0];
+        if (this.comparing && loci.structure && modelOf(loci.structure) !== modelOf(this.structureRef?.cell.obj?.data)) return;
         let location: Location | undefined;
         if (lib?.StructureElement.Loci.is(loci)) {
           location = lib.StructureElement.Loci.getFirstLocation(loci);

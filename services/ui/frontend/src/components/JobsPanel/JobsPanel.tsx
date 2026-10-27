@@ -9,7 +9,9 @@ import { duration } from "../../lib/format";
 import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
   canResume,
+  candidateScores,
   convergenceTone,
+  errorSummary,
   fmt,
   healthTone,
   int,
@@ -18,32 +20,34 @@ import {
   parseAlerts,
   parseCandidates,
   parseJobs,
-  parseRunConfig,
   parseStatus,
   pct,
   progress,
-  remainingSteps,
   resultsFile,
-  resumeArguments,
   resumePrompt,
   reviewPrompt,
   runtimeMs,
   severityTone,
   shortDate,
-  startedJobId,
   stateTone,
+  stepsDone,
   toneColor,
   toolError,
   typeLabel,
+  uniqueAlerts,
   type Candidate,
   type JobAlert,
   type JobStatus,
   type JobSummary,
   type Tone,
 } from "../../lib/jobs";
+import { focusRun, notifyRunsChanged, openRun, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { SmilesText } from "../MolDepiction/SmilesText";
+import { StarButton } from "../Shortlist/StarButton";
 import { Badge } from "./Badge";
+import { ContinueRun } from "./ContinueRun";
 import { TrajectoryChart } from "./TrajectoryChart";
 
 interface Props {
@@ -83,11 +87,11 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const [jobs, setJobs] = useState<JobSummary[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<JobAlert[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedId = useFocusedRun();
   const [tick, setTick] = useState(0);
   const [status, setStatus] = useState<Loaded<JobStatus | null> | null>(null);
   const [candidates, setCandidates] = useState<Loaded<Candidate[]> | null>(null);
-  const [confirm, setConfirm] = useState<"stop" | "resume" | null>(null);
+  const [confirm, setConfirm] = useState<"stop" | "continue" | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
@@ -121,7 +125,9 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     let cancelled = false;
     callTool("get_optimization_status", { job_id: activeId })
       .then(({ result }) => {
-        if (!cancelled) setStatus({ id: activeId, value: parseStatus(result), error: toolError(result) });
+        // A failed job's status carries the job's own error; that is not a failure of the call.
+        const value = parseStatus(result);
+        if (!cancelled) setStatus({ id: activeId, value, error: value ? null : toolError(result) });
       })
       .catch((error: unknown) => {
         if (!cancelled) setStatus({ id: activeId, value: null, error: errorText(error) });
@@ -156,7 +162,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   }, [live]);
 
   function select(id: string) {
-    setSelectedId(id);
+    focusRun(id);
     setConfirm(null);
     setNotice(null);
   }
@@ -197,30 +203,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     } finally {
       setBusy(false);
       refresh();
-    }
-  }
-
-  async function resume(target: JobSummary | JobStatus) {
-    setConfirm(null);
-    setBusy(true);
-    try {
-      const config = await fetch(jobFileUrl(target.id, "config.toml"))
-        .then((response) => (response.ok ? response.text() : ""))
-        .catch(() => "");
-      const { result } = await callTool("run_optimization", resumeArguments(target, parseRunConfig(config)));
-      const error = toolError(result);
-      const started = startedJobId(result);
-      if (error || !started) {
-        setNotice({ tone: "bad", text: error ?? "The run did not start.", ask: resumePrompt(target) });
-      } else {
-        setNotice({ tone: "ok", text: `Resumed from the checkpoint of ${target.id} as job ${started}.` });
-        setSelectedId(started);
-      }
-    } catch (error) {
-      setNotice({ tone: "bad", text: errorText(error), ask: resumePrompt(target) });
-    } finally {
-      setBusy(false);
-      refresh();
+      notifyRunsChanged();
     }
   }
 
@@ -251,10 +234,10 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     );
   }
 
-  const jobAlerts = alerts.filter((a) => a.jobId === job.id);
   const s = current?.value ?? null;
   const share = progress(job);
   const diagnostics = s?.diagnostics ?? null;
+  const jobAlerts = uniqueAlerts([...(diagnostics?.warnings ?? []), ...alerts.filter((a) => a.jobId === job.id)]);
   const top = candidates && candidates.id === job.id ? candidates : null;
   const runtime = runtimeMs(job);
 
@@ -270,7 +253,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
         </div>
         {listError && <p className="px-1 pb-1 text-[10px]" style={{ color: "var(--color-accent)" }}>{listError}</p>}
         {jobs.map((j) => {
-          const count = alerts.filter((a) => a.jobId === j.id).length;
+          const count = uniqueAlerts(alerts.filter((a) => a.jobId === j.id)).length;
           return (
             <button
               key={j.id}
@@ -321,14 +304,17 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {job.type === "optimization" && (
+              <ActionButton onClick={() => openRun(job.id, "results")}>Results</ActionButton>
+            )}
             {job.state === "running" && job.type === "optimization" && (
               <ActionButton tone="bad" disabled={busy} onClick={() => setConfirm("stop")}>
                 <StopIcon /> Stop
               </ActionButton>
             )}
             {canResume(job) && (
-              <ActionButton tone="primary" disabled={busy} onClick={() => setConfirm("resume")}>
-                <PlayIcon /> Resume
+              <ActionButton disabled={busy} onClick={() => setConfirm(confirm === "continue" ? null : "continue")}>
+                <PlayIcon /> Continue
               </ActionButton>
             )}
             <ActionButton disabled={busy} onClick={() => onAsk(job.state === "stopped" ? resumePrompt(job) : reviewPrompt(job))}>
@@ -337,18 +323,17 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </div>
         </header>
 
-        {confirm && (
+        {confirm === "stop" && (
           <div className="bg-sunken border-subtle mt-2 flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2">
-            <span className="min-w-0 flex-1">
-              {confirm === "stop"
-                ? `Stop ${job.id}? REINVENT saves a checkpoint, so the run can be resumed later.`
-                : `Start a new run of ${job.ttpId} from the checkpoint of ${job.id} for ${remainingSteps(job)} more steps? Any running job is stopped first.`}
-            </span>
+            <span className="min-w-0 flex-1">Stop {job.id}? REINVENT saves a checkpoint, so the run can be continued later.</span>
             <ActionButton onClick={() => setConfirm(null)}>Cancel</ActionButton>
-            <ActionButton tone={confirm === "stop" ? "bad" : "primary"} onClick={() => void (confirm === "stop" ? stop(job) : resume(job))}>
-              {confirm === "stop" ? "Stop run" : "Resume run"}
+            <ActionButton tone="bad" onClick={() => void stop(job)}>
+              Stop run
             </ActionButton>
           </div>
+        )}
+        {confirm === "continue" && canResume(job) && (
+          <ContinueRun key={job.id} job={job} running={jobs.find((j) => isActive(j.state)) ?? null} onClose={() => setConfirm(null)} onAsk={onAsk} />
         )}
         {busy && <Note tone="info">Working… stopping a run waits for REINVENT to write its checkpoint.</Note>}
         {notice && (
@@ -369,7 +354,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
             value={
               job.type === "transfer_learning"
                 ? int(job.numEpochs)
-                : `${s?.currentStep ?? 0} / ${job.maxSteps ?? "—"}`
+                : `${stepsDone(job)} / ${job.maxSteps ?? "—"}`
             }
           />
           <Stat label="Molecules" value={int(s?.molecules)} />
@@ -384,7 +369,18 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
         </div>
 
         {current?.error && <Note tone="bad">{current.error}</Note>}
-        {job.error && <Note tone="bad">{job.error}</Note>}
+        {job.error && (
+          <Note tone="bad">
+            {errorSummary(job.error) === job.error.trim() ? (
+              job.error
+            ) : (
+              <details>
+                <summary className="cursor-pointer">{errorSummary(job.error)}</summary>
+                <pre className="text-faint mt-1 max-h-48 overflow-auto font-mono text-[10px] whitespace-pre-wrap">{job.error}</pre>
+              </details>
+            )}
+          </Note>
+        )}
 
         <Card title="Score trajectory · mean / best / components">
           {s ? <TrajectoryChart status={s} /> : <p className="text-faint py-8 text-center">{current ? "No status available." : "Loading status…"}</p>}
@@ -432,10 +428,6 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </div>
         )}
 
-        {diagnostics && diagnostics.warnings.length > 0 && (
-          <Note tone="warn">{diagnostics.warnings.map((w) => w.message).join(" · ")}</Note>
-        )}
-
         {diagnostics && diagnostics.recommendations.length > 0 && (
           <Card title="Recommendations">
             <ul className="list-disc space-y-1 pl-4">
@@ -450,14 +442,15 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
         )}
 
         {jobAlerts.length > 0 && (
-          <Card title="Alerts">
-            {jobAlerts.map((a, i) => (
-              <div key={`${a.type}-${i}`} className="flex items-start gap-2 py-0.5">
-                <Badge tone={severityTone(a.severity)}>{a.severity}</Badge>
-                <span className="min-w-0 flex-1">{a.message}</span>
-              </div>
+          <section className="mt-3">
+            <h3 className="text-faint mb-1 text-[10px] font-semibold tracking-wider uppercase">Alerts · {jobAlerts.length}</h3>
+            {jobAlerts.map((a) => (
+              <Note key={a.message} tone={severityTone(a.severity)}>
+                <span className="text-faint mr-1.5 text-[10px] uppercase">{a.severity}</span>
+                {a.message}
+              </Note>
             ))}
-          </Card>
+          </section>
         )}
 
         {hasResults && (
@@ -496,18 +489,23 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
                   </thead>
                   <tbody>
                     {top.value.map((c) => (
-                      <tr key={c.smiles} className="border-subtle border-b last:border-b-0">
+                      <tr key={c.smiles} className="group border-subtle border-b last:border-b-0">
                         <td className="px-3 py-1">
-                          <button
-                            type="button"
-                            onClick={() => onOpenMolecule?.(c.smiles)}
-                            disabled={!onOpenMolecule}
-                            className="flex items-center gap-2 text-left enabled:cursor-pointer"
-                            title={c.smiles}
-                          >
-                            <MolDepiction smiles={c.smiles} theme={theme} width={120} height={80} className="h-10 w-14 shrink-0" />
-                            <span className="max-w-40 truncate font-mono text-[10px]">{c.smiles}</span>
-                          </button>
+                          <span className="flex items-center gap-2">
+                            <StarButton smiles={c.smiles} source={job.id} values={() => candidateScores(c)} session={sessionId ?? "new"} />
+                            <button
+                              type="button"
+                              onClick={() => onOpenMolecule?.(c.smiles)}
+                              disabled={!onOpenMolecule}
+                              className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
+                              title="Open the 2D drawing"
+                            >
+                              <MolDepiction smiles={c.smiles} theme={theme} width={128} height={96} className="size-full" />
+                            </button>
+                            <span className="flex min-w-0 flex-col">
+                              <SmilesText smiles={c.smiles} className="max-w-28 text-[10px] @xl:max-w-44" />
+                            </span>
+                          </span>
                         </td>
                         <td className="px-2 py-1 text-right font-mono font-semibold tabular-nums">{fmt(c.total)}</td>
                         {top.value[0].components.map((col) => {
@@ -571,12 +569,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function Note({ tone, children }: { tone: Tone; children: ReactNode }) {
-  const color = toneColor(tone);
   return (
-    <div
-      className="mt-2 rounded-lg border px-3 py-2"
-      style={{ borderColor: `color-mix(in oklab, ${color} 35%, transparent)`, background: `color-mix(in oklab, ${color} 9%, transparent)` }}
-    >
+    <div className="text-muted mt-1.5 border-l-2 py-0.5 pl-2.5" style={{ borderLeftColor: toneColor(tone) }}>
       {children}
     </div>
   );

@@ -6,37 +6,55 @@ import { ApiError, callTool } from "../../lib/api";
 import {
   BOLTZ_NAME,
   PRESETS,
-  TRANSFORM_TYPES,
   asTtpList,
   buildTtp,
   createdTtp,
   emptyTargetFacts,
+  formFromTtp,
   formProblems,
+  hasCofolding,
   isAccession,
   mergeUniprot,
   normaliseSequence,
   objectiveCatalogue,
-  objectiveSource,
   parseComponents,
   parseServices,
   payloadError,
   presetObjectives,
+  rememberCreated,
   renameObjective,
-  retype,
   sequenceProblem,
   serviceObjective,
   slugify,
-  transformParams,
   uniqueName,
+  weightRangeOf,
+  withCofolding,
   type CatalogueEntry,
   type Objective,
   type PresetId,
   type ServiceInfo,
   type TargetFacts,
-  type Transform,
+  type Ttp,
   type TtpForm,
 } from "../../lib/ttp";
-import { TransformCurve } from "../TtpPanel/TransformCurve";
+import {
+  DEFAULT_RUN,
+  MAX_BATCH,
+  MAX_STEPS,
+  loadRunSettings,
+  modelLabel,
+  parseMol2MolModels,
+  runArguments,
+  runCost,
+  runModel,
+  runProblems,
+  saveRunSettings,
+  seedList,
+  startedRun,
+  type PriorModel,
+  type RunSettings,
+} from "../../lib/ttpRun";
+import { ObjectiveCard } from "../TtpPanel/ObjectiveCard";
 
 export interface CreatedTtp {
   id: string;
@@ -47,6 +65,10 @@ interface Props {
   onClose: () => void;
   /** Called once create_ttp has stored the profile. */
   onCreated: (ttp: CreatedTtp) => void;
+  /** Start from a copy of this stored TTP. */
+  initial?: Ttp;
+  /** Called after "Create and run" started a job; without it, onCreated is called. */
+  onStarted?: (ttp: CreatedTtp, jobId: string) => void;
 }
 
 interface Row {
@@ -58,47 +80,60 @@ interface Catalog {
   services: Record<string, ServiceInfo>;
   components: string[];
   ids: string[];
+  models: PriorModel[];
   loaded: boolean;
 }
 
 type Lookup = { state: "idle" } | { state: "busy" } | { state: "error"; message: string } | { state: "found"; facts: TargetFacts };
-type Submit = { state: "idle" } | { state: "busy" } | { state: "error"; message: string; forbidden: boolean };
+type Submit =
+  | { state: "idle" }
+  | { state: "busy"; label: string }
+  | { state: "error"; message: string; forbidden: boolean }
+  | { state: "run-error"; message: string; created: CreatedTtp };
 
 const ORGANISMS = ["human", "mouse", "rat", ""];
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const int = (n: number) => n.toLocaleString("en");
 
 let nextKey = 1;
 const rows = (objectives: Objective[]): Row[] => objectives.map((objective) => ({ key: nextKey++, objective }));
 
-/** A form to define a target product profile without asking the agent. */
-export function TtpBuilder({ onClose, onCreated }: Props) {
-  const [catalog, setCatalog] = useState<Catalog>({ services: {}, components: [], ids: [], loaded: false });
-  const [name, setName] = useState("");
-  const [id, setId] = useState<string | null>(null);
-  const [description, setDescription] = useState("");
-  const [sequence, setSequence] = useState("");
-  const [pdbId, setPdbId] = useState("");
-  const [aggregation, setAggregation] = useState<TtpForm["aggregation"]>("geometric_mean");
-  const [objectives, setObjectives] = useState<Row[]>([]);
-  const [preset, setPreset] = useState<PresetId | null>(null);
+/** A form to define a target product profile, and optionally start a run on it, without asking the agent. */
+export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
+  const [start] = useState(() => (initial ? formFromTtp(initial) : null));
+  const [catalog, setCatalog] = useState<Catalog>({ services: {}, components: [], ids: [], models: [], loaded: false });
+  const [name, setName] = useState(start?.name ?? "");
+  const [id, setId] = useState<string | null>(start?.id ?? null);
+  const [description, setDescription] = useState(start?.description ?? "");
+  const [sequence, setSequence] = useState(start?.sequence ?? "");
+  const [pdbId, setPdbId] = useState(start?.pdbId ?? "");
+  const [aggregation, setAggregation] = useState<TtpForm["aggregation"]>(start?.aggregation ?? "geometric_mean");
+  const [objectives, setObjectives] = useState<Row[]>(() => rows(start?.objectives ?? presetObjectives("druglike", {})));
+  const [preset, setPreset] = useState<PresetId | null>(start ? null : "druglike");
   const [query, setQuery] = useState("");
   const [organism, setOrganism] = useState("human");
   const [lookup, setLookup] = useState<Lookup>({ state: "idle" });
   const [attempted, setAttempted] = useState(false);
   const [submit, setSubmit] = useState<Submit>({ state: "idle" });
   const [copied, setCopied] = useState(false);
+  const [run, setRun] = useState<RunSettings>(() => loadRunSettings());
+  const [confirming, setConfirming] = useState(false);
+  const [options, setOptions] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.allSettled([callTool("list_external_services"), callTool("list_scoring_components"), callTool("list_ttps")]).then(([services, components, ttps]) => {
-      if (cancelled) return;
-      setCatalog({
-        services: services.status === "fulfilled" ? parseServices(services.value.result) : {},
-        components: components.status === "fulfilled" ? parseComponents(components.value.result) : [],
-        ids: ttps.status === "fulfilled" ? asTtpList(ttps.value.result).map((t) => t.id) : [],
-        loaded: true,
-      });
-    });
+    Promise.allSettled([callTool("list_external_services"), callTool("list_scoring_components"), callTool("list_ttps"), callTool("list_available_models")]).then(
+      ([services, components, ttps, models]) => {
+        if (cancelled) return;
+        setCatalog({
+          services: services.status === "fulfilled" ? parseServices(services.value.result) : {},
+          components: components.status === "fulfilled" ? parseComponents(components.value.result) : [],
+          ids: ttps.status === "fulfilled" ? asTtpList(ttps.value.result).map((t) => t.id) : [],
+          models: models.status === "fulfilled" ? parseMol2MolModels(models.value.result) : [],
+          loaded: true,
+        });
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -120,24 +155,40 @@ export function TtpBuilder({ onClose, onCreated }: Props) {
     pdbId,
     aggregation,
     objectives: objectives.map((r) => r.objective),
+    constraints: start?.constraints,
   };
   const problems = formProblems(form, catalog.ids);
+  const runIssues = runProblems(run);
   const catalogue = useMemo(() => objectiveCatalogue(catalog.services, catalog.components), [catalog]);
   const residues = normaliseSequence(sequence);
-  const needsTarget = form.objectives.some((o) => o.service === "boltz");
+  const cofold = hasCofolding(form.objectives);
+  const boltzMissing = catalog.loaded && Object.keys(catalog.services).length > 0 && !catalog.services.boltz;
+  const weights = weightRangeOf(form.objectives);
+  const total = form.objectives.reduce((sum, o) => sum + Math.max(0, o.weight), 0) || 1;
+  const installed = catalog.models.filter((m) => m.available);
+  const mol2mol = installed.length ? installed : [{ key: DEFAULT_RUN.model, label: modelLabel(DEFAULT_RUN.model), available: true }];
+  const effective: RunSettings = { ...run, model: mol2mol.some((m) => m.key === run.model) ? run.model : mol2mol[0].key };
+  const cost = runCost(run, cofold);
+  const busy = submit.state === "busy";
 
   const setList = (list: Objective[]) => setObjectives((previous) => list.map((objective, i) => ({ key: previous[i]?.key ?? nextKey++, objective })));
+  const replaceList = (list: Objective[]) => setObjectives(rows(list));
+  const updateRun = (patch: Partial<RunSettings>) => {
+    const next = { ...run, ...patch };
+    setRun(next);
+    saveRunSettings(next);
+  };
 
   const applyPreset = (value: PresetId) => {
     setPreset(value);
-    setObjectives(rows(presetObjectives(value, catalog.services)));
+    replaceList(withCofolding(presetObjectives(value, catalog.services), catalog.services, cofold));
   };
 
   const add = (entry: CatalogueEntry) => {
     const taken = form.objectives.map((o) => o.name);
     const added: Objective[] = [];
     const objective = entry.make();
-    if (objective.depends_on === BOLTZ_NAME && !form.objectives.some((o) => o.service === "boltz")) {
+    if (objective.depends_on === BOLTZ_NAME && !cofold) {
       added.push(serviceObjective(catalog.services, "boltz"));
       taken.push(BOLTZ_NAME);
     } else if (objective.depends_on === BOLTZ_NAME) {
@@ -145,6 +196,12 @@ export function TtpBuilder({ onClose, onCreated }: Props) {
     }
     added.push({ ...objective, name: uniqueName(objective.name, taken) });
     setObjectives((previous) => [...previous, ...rows(added)]);
+  };
+
+  const remove = (index: number) => {
+    const target = form.objectives[index];
+    if (target?.service === "boltz") replaceList(withCofolding(form.objectives, catalog.services, false));
+    else setObjectives((previous) => previous.filter((_, i) => i !== index));
   };
 
   const search = async () => {
@@ -162,24 +219,60 @@ export function TtpBuilder({ onClose, onCreated }: Props) {
       setLookup({ state: "found", facts });
       setSequence(facts.sequence);
       setPdbId("");
-      if (!name.trim() && facts.gene) setName(`${facts.gene.toUpperCase()} ${preset ? PRESETS.find((p) => p.id === preset)?.label : "profile"}`);
+      if (!name.trim() && facts.gene) setName(`${facts.gene.toUpperCase()} ${cofold ? "cofolding" : (PRESETS.find((p) => p.id === preset)?.label.toLowerCase() ?? "profile")}`);
     } catch (err) {
       setLookup({ state: "error", message: message(err) });
     }
   };
 
+  const createOnly = async (): Promise<CreatedTtp | null> => {
+    const response = await callTool("create_ttp", { ttp: buildTtp(form) });
+    const created = createdTtp(response.result);
+    if ("error" in created) {
+      setSubmit({ state: "error", message: created.error, forbidden: false });
+      return null;
+    }
+    rememberCreated(created.id);
+    return created;
+  };
+
+  const failed = (err: unknown) => setSubmit({ state: "error", message: message(err), forbidden: err instanceof ApiError && err.status === 403 });
+
   const create = async () => {
     setAttempted(true);
     if (problems.length) return;
-    setSubmit({ state: "busy" });
+    setSubmit({ state: "busy", label: "Creating…" });
     try {
-      const response = await callTool("create_ttp", { ttp: buildTtp(form) });
-      const created = createdTtp(response.result);
-      if ("error" in created) setSubmit({ state: "error", message: created.error, forbidden: false });
+      const created = await createOnly();
+      if (created) onCreated(created);
+    } catch (err) {
+      failed(err);
+    }
+  };
+
+  const askToRun = () => {
+    setAttempted(true);
+    if (problems.length || runIssues.length) return;
+    setSubmit({ state: "idle" });
+    setConfirming(true);
+  };
+
+  const createAndRun = async () => {
+    const already = submit.state === "run-error" ? submit.created : null;
+    setSubmit({ state: "busy", label: already ? "Starting the run…" : "Creating…" });
+    let created = already;
+    try {
+      created ??= await createOnly();
+      if (!created) return;
+      setSubmit({ state: "busy", label: "Starting the run…" });
+      const response = await callTool("run_optimization", runArguments(created.id, effective));
+      const started = startedRun(response.result);
+      if ("error" in started) setSubmit({ state: "run-error", message: started.error, created });
+      else if (onStarted) onStarted(created, started.jobId);
       else onCreated(created);
     } catch (err) {
-      const forbidden = err instanceof ApiError && err.status === 403;
-      setSubmit({ state: "error", message: message(err), forbidden });
+      if (created) setSubmit({ state: "run-error", message: message(err), created });
+      else failed(err);
     }
   };
 
@@ -194,223 +287,385 @@ export function TtpBuilder({ onClose, onCreated }: Props) {
   };
 
   const groups = [...new Set(catalogue.map((e) => e.group))];
+  const shown = attempted ? [...problems, ...runIssues] : [];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div role="dialog" aria-modal="true" aria-label="New target product profile" className="bg-raised border-subtle shadow-card flex max-h-[92vh] w-full max-w-2xl flex-col rounded-xl border text-xs">
-        <header className="border-subtle flex items-center gap-2 border-b px-4 py-3">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={initial ? `Duplicate ${initial.name}` : "New target product profile"}
+        className="bg-raised border-subtle shadow-card flex max-h-[92vh] w-full max-w-2xl flex-col rounded-xl border text-xs"
+      >
+        <header className="border-subtle flex items-center gap-2 border-b px-4 py-2.5">
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold">New target product profile</h2>
-            <p className="text-faint text-[11px]">What REINVENT optimises for: a target, the objectives and how much each counts.</p>
+            <h2 className="text-sm font-semibold">{confirming ? "Start a REINVENT run?" : initial ? `Duplicate ${initial.name}` : "New target product profile"}</h2>
+            <p className="text-faint text-[11px]">
+              {confirming ? "Check what this will cost before it starts." : "What REINVENT optimises for: a target, the objectives and how much each counts."}
+            </p>
           </div>
           <button type="button" onClick={onClose} aria-label="Close" className="text-faint hover:text-body cursor-pointer px-1 text-lg leading-none">
             ×
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
-          <Section title="Profile">
-            <div className="grid gap-2 sm:grid-cols-[1fr_12rem]">
-              <Labelled label="Name">
-                <input
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="e.g. BRD4 cofolding lead optimisation"
-                  autoFocus
-                  className={BLOCK}
-                />
-              </Labelled>
-              <Labelled label="Id" hint="lowercase, - and _">
-                <input value={form.id} onChange={(event) => setId(event.target.value)} placeholder="brd4-cofolding" className={`${BLOCK} font-mono`} spellCheck={false} />
-              </Labelled>
-            </div>
-            <Labelled label="Description" hint="optional">
-              <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What this profile is for" className={BLOCK} />
-            </Labelled>
-          </Section>
-
-          <Section title="Target" hint={needsTarget ? "required for Boltz" : "optional unless you score with Boltz"}>
-            <form
-              className="flex flex-wrap gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void search();
-              }}
-            >
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Gene or UniProt accession, e.g. BRD4 or O60885"
-                aria-label="Gene or UniProt accession"
-                className={`${INPUT} min-w-48 flex-1`}
-              />
-              <select value={organism} onChange={(event) => setOrganism(event.target.value)} aria-label="Organism" className={INPUT} disabled={isAccession(query)}>
-                {ORGANISMS.map((o) => (
-                  <option key={o} value={o}>
-                    {o || "any organism"}
-                  </option>
-                ))}
-              </select>
-              <button type="submit" disabled={!query.trim() || lookup.state === "busy"} className={SECONDARY}>
-                {lookup.state === "busy" ? "Looking up…" : "Look up"}
-              </button>
-            </form>
-            {lookup.state === "error" && <p style={{ color: "var(--color-accent)" }}>{lookup.message}</p>}
-            {lookup.state === "found" && (
-              <div className="bg-sunken border-subtle rounded-lg border px-3 py-2">
-                <p className="font-medium">
-                  {lookup.facts.name ?? lookup.facts.entryName}
-                  <span className="text-faint font-normal">
-                    {[lookup.facts.gene, lookup.facts.organism, lookup.facts.uniprot, `${lookup.facts.sequenceLength ?? lookup.facts.sequence?.length} aa`].filter(Boolean).map((part) => ` · ${part}`)}
-                  </span>
-                </p>
-                {lookup.facts.pdbIds.length > 0 && (
-                  <div className="mt-1 flex flex-wrap items-center gap-1">
-                    <span className="text-faint text-[10px]">PDB</span>
-                    {lookup.facts.pdbIds.slice(0, 8).map((pdb) => (
-                      <button
-                        key={pdb}
-                        type="button"
-                        onClick={() => setPdbId(pdbId === pdb ? "" : pdb)}
-                        aria-pressed={pdbId === pdb}
-                        className={`cursor-pointer rounded-md border px-1.5 py-px font-mono text-[10px] ${pdbId === pdb ? "border-strong text-body" : "border-subtle text-muted hover:text-body"}`}
-                      >
-                        {pdb}
-                      </button>
-                    ))}
-                  </div>
+        {confirming ? (
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <dl className="bg-sunken border-subtle grid grid-cols-[6.5rem_1fr] gap-x-3 gap-y-2 rounded-lg border px-3 py-2.5 text-[11px]">
+              <dt className="text-muted">Profile</dt>
+              <dd>
+                <span className="font-semibold">{form.name.trim()}</span> <span className="text-faint font-mono">{form.id}</span>
+                <span className="text-faint"> · {submit.state === "run-error" ? "already created" : "created first"}</span>
+              </dd>
+              <dt className="text-muted">Prior</dt>
+              <dd>
+                {modelLabel(runModel(effective))}
+                {run.prior === "mol2mol" && <span className="text-faint"> · {seedList(run.seeds).length} seed SMILES</span>}
+              </dd>
+              <dt className="text-muted">Size</dt>
+              <dd>
+                <span className="font-mono tabular-nums">
+                  {int(run.maxSteps)} steps × {int(run.batchSize)}
+                </span>{" "}
+                = <span className="font-semibold">{int(cost.molecules)} molecules</span> generated and scored
+              </dd>
+              <dt className="text-muted">Cofolding</dt>
+              <dd>
+                {cofold ? (
+                  <>
+                    <span className="font-semibold" style={{ color: "var(--color-warn)" }}>
+                      On
+                    </span>{" "}
+                    — up to {int(cost.cofolds)} Boltz-2 cofolds plus PoseBusters checks. This is the slow, GPU-heavy part.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold">Off</span> — fast ligand-only scoring.
+                  </>
                 )}
-              </div>
+              </dd>
+              <dt className="text-muted">Objectives</dt>
+              <dd>
+                {form.objectives.length} · {aggregation === "geometric_mean" ? "geometric mean" : "arithmetic mean"}
+              </dd>
+            </dl>
+            <p className="text-muted text-[11px]">The run starts on LUMI right away and shows up under Jobs. You can stop it from there.</p>
+            {submit.state === "run-error" && (
+              <Alert title={`"${submit.created.name}" was created, but the run did not start.`} detail={submit.message} />
             )}
-            <Labelled label="Protein sequence" hint={residues ? `${residues.length} residues` : "or paste one (FASTA is fine)"}>
+            {submit.state === "error" && <Alert title="The server did not accept the profile." detail={submit.message} />}
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
+            <Labelled label="Name" hint={form.id ? `id ${form.id}` : undefined}>
+              <input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. BRD4 cofolding lead optimisation" autoFocus className={BLOCK} />
+            </Labelled>
+
+            <Section title="Target" hint={cofold ? "required for cofolding" : "optional without cofolding"}>
+              <form
+                className="flex flex-wrap gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void search();
+                }}
+              >
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Gene or UniProt accession, e.g. BRD4 or O60885"
+                  aria-label="Gene or UniProt accession"
+                  className={`${INPUT} min-w-48 flex-1`}
+                />
+                <select value={organism} onChange={(event) => setOrganism(event.target.value)} aria-label="Organism" className={INPUT} disabled={isAccession(query)}>
+                  {ORGANISMS.map((o) => (
+                    <option key={o} value={o}>
+                      {o || "any organism"}
+                    </option>
+                  ))}
+                </select>
+                <button type="submit" disabled={!query.trim() || lookup.state === "busy"} className={SECONDARY}>
+                  {lookup.state === "busy" ? "Looking up…" : "Look up"}
+                </button>
+              </form>
+              {lookup.state === "error" && <p style={{ color: "var(--color-accent)" }}>{lookup.message}</p>}
+              {lookup.state === "found" && (
+                <div className="bg-sunken border-subtle rounded-lg border px-3 py-2">
+                  <p className="font-medium">
+                    {lookup.facts.name ?? lookup.facts.entryName}
+                    <span className="text-faint font-normal">
+                      {[lookup.facts.gene, lookup.facts.organism, lookup.facts.uniprot, `${lookup.facts.sequenceLength ?? lookup.facts.sequence?.length} aa`].filter(Boolean).map((part) => ` · ${part}`)}
+                    </span>
+                  </p>
+                  {lookup.facts.pdbIds.length > 0 && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      <span className="text-faint text-[10px]">PDB</span>
+                      {lookup.facts.pdbIds.slice(0, 8).map((pdb) => (
+                        <button
+                          key={pdb}
+                          type="button"
+                          onClick={() => setPdbId(pdbId === pdb ? "" : pdb)}
+                          aria-pressed={pdbId === pdb}
+                          className={`cursor-pointer rounded-md border px-1.5 py-px font-mono text-[10px] ${pdbId === pdb ? "border-strong text-body" : "border-subtle text-muted hover:text-body"}`}
+                        >
+                          {pdb}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <textarea
                 value={sequence}
                 onChange={(event) => setSequence(event.target.value)}
-                rows={3}
+                rows={2}
                 spellCheck={false}
-                placeholder="MSAESGPGTRLRNLPVMGDGLETSQ…"
+                aria-label="Protein sequence"
+                placeholder="…or paste the protein sequence (FASTA is fine)"
                 className={`${BLOCK} resize-y font-mono text-[10px] break-all`}
               />
-            </Labelled>
-            {residues && sequenceProblem(residues) && <p style={{ color: "var(--color-accent)" }}>{sequenceProblem(residues)}</p>}
-            <Labelled label="PDB id" hint="optional">
-              <input value={pdbId} onChange={(event) => setPdbId(event.target.value)} placeholder="e.g. 3MXF" className={`${INPUT} w-28 font-mono`} spellCheck={false} />
-            </Labelled>
-          </Section>
+              {residues && <p className="text-faint text-[10px]">{sequenceProblem(residues) ?? `${residues.length} residues`}</p>}
+            </Section>
 
-          <Section title="Objectives" hint={`${objectives.length} · each scored 0–1, then combined by weight`}>
-            <div className="grid gap-2 sm:grid-cols-3">
-              {PRESETS.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => applyPreset(p.id)}
-                  aria-pressed={preset === p.id}
-                  className={`hover:border-strong cursor-pointer rounded-lg border px-3 py-2 text-left ${preset === p.id ? "border-strong bg-sunken" : "border-subtle"}`}
-                >
-                  <span className="block font-semibold">{p.label}</span>
-                  <span className="text-faint block text-[10px] leading-snug">{p.hint}</span>
-                </button>
-              ))}
+            <div className="border-subtle flex items-start gap-3 rounded-lg border px-3 py-2.5">
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold">Cofold with Boltz-2</p>
+                <p className="text-faint text-[11px] leading-snug">
+                  {boltzMissing
+                    ? "Boltz-2 is not configured on this server."
+                    : cofold
+                      ? "Each molecule is cofolded with the target: Boltz-2 binding affinity, then PoseBusters checks the pose. Much slower."
+                      : "Off: molecules are scored on ligand properties only. Turn on to score binding to the target."}
+                </p>
+                {cofold && !residues && (
+                  <p className="mt-0.5 text-[11px]" style={{ color: "var(--color-warn)" }}>
+                    Needs the target's protein sequence: look it up above.
+                  </p>
+                )}
+              </div>
+              <Switch
+                on={cofold}
+                label="Cofold with Boltz-2"
+                disabled={!catalog.loaded || (boltzMissing && !cofold)}
+                onChange={(on) => replaceList(withCofolding(form.objectives, catalog.services, on))}
+              />
             </div>
-            {objectives.length === 0 && <p className="text-faint">Start from a preset above, or add objectives one by one below.</p>}
-            <ul className="space-y-1.5">
-              {objectives.map((row, index) => (
-                <ObjectiveEditor
-                  key={row.key}
-                  objective={row.objective}
-                  onChange={(patch) => setList(form.objectives.map((o, i) => (i === index ? { ...o, ...patch } : o)))}
-                  onRename={(value) => setList(renameObjective(form.objectives, index, value))}
-                  onRemove={() => setObjectives((previous) => previous.filter((_, i) => i !== index))}
-                />
-              ))}
-            </ul>
-            <select
-              value=""
-              onChange={(event) => {
-                const entry = catalogue.find((e) => e.key === event.target.value);
-                if (entry) add(entry);
-              }}
-              aria-label="Add an objective"
-              className={INPUT}
-            >
-              <option value="">+ Add an objective…</option>
-              {groups.map((group) => (
-                <optgroup key={group} label={group}>
-                  {catalogue
-                    .filter((e) => e.group === group)
-                    .map((e) => (
-                      <option key={e.key} value={e.key}>
-                        {e.label}
+
+            <Section title="Objectives" hint="each scored 0–1, then combined by weight">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-faint text-[11px]">Start from</span>
+                {PRESETS.filter((p) => p.id !== "cofolding").map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => applyPreset(p.id)}
+                    aria-pressed={preset === p.id}
+                    title={p.hint}
+                    className={`cursor-pointer rounded-full border px-2 py-px text-[11px] ${preset === p.id ? "border-strong bg-sunken text-body font-medium" : "border-subtle text-muted hover:text-body"}`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              {objectives.length === 0 && <p className="text-faint">Pick a starting set above, or add objectives one by one below.</p>}
+              <ul className="space-y-1.5">
+                {objectives.map((row, index) => (
+                  <ObjectiveCard
+                    key={row.key}
+                    objective={row.objective}
+                    weights={weights}
+                    share={Math.max(0, row.objective.weight) / total}
+                    onChange={(patch) => setList(form.objectives.map((o, i) => (i === index ? { ...o, ...patch } : o)))}
+                    onRename={(value) => setList(renameObjective(form.objectives, index, value))}
+                    onRemove={() => remove(index)}
+                  />
+                ))}
+              </ul>
+              <select
+                value=""
+                onChange={(event) => {
+                  const entry = catalogue.find((e) => e.key === event.target.value);
+                  if (entry) add(entry);
+                }}
+                aria-label="Add an objective"
+                className={INPUT}
+              >
+                <option value="">+ Add an objective…</option>
+                {groups.map((group) => (
+                  <optgroup key={group} label={group}>
+                    {catalogue
+                      .filter((e) => e.group === group)
+                      .map((e) => (
+                        <option key={e.key} value={e.key}>
+                          {e.label}
+                        </option>
+                      ))}
+                  </optgroup>
+                ))}
+              </select>
+              {!catalog.loaded && <span className="text-faint ml-2">Loading the services…</span>}
+            </Section>
+
+            <Section title="Run" hint="remembered for next time">
+              <div className="flex flex-wrap items-end gap-3">
+                <Labelled label="Steps">
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_STEPS}
+                    step={50}
+                    value={run.maxSteps}
+                    onChange={(event) => updateRun({ maxSteps: Math.round(Number(event.target.value)) })}
+                    className={`${INPUT} w-20 font-mono tabular-nums`}
+                  />
+                </Labelled>
+                <Labelled label="Batch size">
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_BATCH}
+                    step={8}
+                    value={run.batchSize}
+                    onChange={(event) => updateRun({ batchSize: Math.round(Number(event.target.value)) })}
+                    className={`${INPUT} w-20 font-mono tabular-nums`}
+                  />
+                </Labelled>
+                <p className="text-faint pb-1 text-[11px]">
+                  = {int(cost.molecules)} molecules{cofold ? `, each cofolded` : ""}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted text-[11px]">Prior</span>
+                <div role="radiogroup" aria-label="Prior" className="bg-sunken border-subtle inline-flex rounded-md border p-0.5">
+                  {(
+                    [
+                      ["reinvent", "Reinvent · de novo"],
+                      ["mol2mol", "Mol2Mol · from seeds"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={run.prior === value}
+                      onClick={() => updateRun({ prior: value })}
+                      className={`cursor-pointer rounded px-2 py-0.5 text-[11px] ${run.prior === value ? "bg-raised text-body shadow-card font-medium" : "text-muted hover:text-body"}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {run.prior === "mol2mol" && mol2mol.length > 1 && (
+                  <select value={effective.model} onChange={(event) => updateRun({ model: event.target.value })} aria-label="Mol2Mol prior" className={INPUT}>
+                    {mol2mol.map((m) => (
+                      <option key={m.key} value={m.key}>
+                        {m.label}
                       </option>
                     ))}
-                </optgroup>
-              ))}
-            </select>
-            {!catalog.loaded && <span className="text-faint ml-2">Loading the services…</span>}
-          </Section>
+                  </select>
+                )}
+              </div>
+              {run.prior === "mol2mol" && (
+                <textarea
+                  value={run.seeds}
+                  onChange={(event) => updateRun({ seeds: event.target.value })}
+                  rows={2}
+                  spellCheck={false}
+                  aria-label="Seed SMILES"
+                  placeholder="Seed SMILES, one per line: the molecules Mol2Mol starts from"
+                  className={`${BLOCK} resize-y font-mono text-[10px]`}
+                />
+              )}
+            </Section>
 
-          <Section title="Combine">
-            <label className="text-muted flex flex-wrap items-center gap-2">
-              <select value={aggregation} onChange={(event) => setAggregation(event.target.value as TtpForm["aggregation"])} className={INPUT}>
-                <option value="geometric_mean">Geometric mean</option>
-                <option value="arithmetic_mean">Arithmetic mean</option>
-              </select>
-              <span className="text-faint text-[11px]">
-                {aggregation === "geometric_mean"
-                  ? "A molecule must do reasonably on every objective: one zero sinks the total."
-                  : "Objectives trade off: a strong score can make up for a weak one."}
-              </span>
-            </label>
-          </Section>
-        </div>
+            <div>
+              <button type="button" onClick={() => setOptions((v) => !v)} aria-expanded={options} className="text-muted hover:text-body cursor-pointer text-[11px] font-medium">
+                {options ? "▾" : "▸"} More options <span className="text-faint font-normal">id, description, PDB, how scores combine</span>
+              </button>
+              {options && (
+                <div className="mt-2 space-y-2">
+                  <div className="grid gap-2 sm:grid-cols-[12rem_1fr]">
+                    <Labelled label="Id" hint="lowercase, - and _">
+                      <input value={form.id} onChange={(event) => setId(event.target.value)} placeholder="brd4-cofolding" className={`${BLOCK} font-mono`} spellCheck={false} />
+                    </Labelled>
+                    <Labelled label="Description" hint="optional">
+                      <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What this profile is for" className={BLOCK} />
+                    </Labelled>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <Labelled label="PDB id" hint="optional">
+                      <input value={pdbId} onChange={(event) => setPdbId(event.target.value)} placeholder="e.g. 3MXF" className={`${INPUT} w-24 font-mono`} spellCheck={false} />
+                    </Labelled>
+                    <Labelled label="Combine scores">
+                      <select value={aggregation} onChange={(event) => setAggregation(event.target.value as TtpForm["aggregation"])} className={INPUT}>
+                        <option value="geometric_mean">Geometric mean</option>
+                        <option value="arithmetic_mean">Arithmetic mean</option>
+                      </select>
+                    </Labelled>
+                    <p className="text-faint min-w-48 flex-1 pb-1 text-[11px]">
+                      {aggregation === "geometric_mean"
+                        ? "A molecule must do reasonably on every objective: one zero sinks the total."
+                        : "Objectives trade off: a strong score can make up for a weak one."}
+                    </p>
+                  </div>
+                  {(start?.constraints?.length ?? 0) > 0 && <p className="text-faint text-[11px]">Keeps the {start?.constraints?.length} structural constraint(s) of the original.</p>}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
-        {submit.state === "error" && (
-          <div className="mx-4 mb-2 rounded-lg border px-3 py-2" style={{ borderColor: "color-mix(in oklab, var(--color-accent) 35%, transparent)", background: "color-mix(in oklab, var(--color-accent) 8%, transparent)" }}>
+        {!confirming && submit.state === "error" && (
+          <div className="mx-4 mb-2">
             {submit.forbidden ? (
-              <>
-                <p className="font-medium">Creating profiles from the UI is not enabled on this server yet.</p>
-                <p className="text-muted mt-0.5 text-[11px]">
-                  The gateway does not allow create_ttp as a direct tool ({submit.message}). Copy the JSON and ask the agent to create it, or try again once the update is deployed.
-                </p>
-              </>
+              <Alert
+                title="Creating profiles from the UI is not enabled on this server yet."
+                detail={`The gateway does not allow create_ttp as a direct tool (${submit.message}). Copy the JSON and ask the agent to create it.`}
+              />
             ) : (
-              <>
-                <p className="font-medium">The server did not accept the profile.</p>
-                <p className="text-muted mt-0.5 font-mono text-[10px] break-words whitespace-pre-wrap">{submit.message}</p>
-              </>
+              <Alert title="The server did not accept the profile." detail={submit.message} />
             )}
           </div>
         )}
 
         <footer className="border-subtle flex flex-wrap items-center gap-2 border-t px-4 py-2.5">
-          <div className="min-w-0 flex-1 text-[11px]">
-            {attempted && problems.length > 0 ? (
-              <ul style={{ color: "var(--color-accent)" }}>
-                {problems.slice(0, 3).map((p) => (
-                  <li key={p}>{p}</li>
-                ))}
-                {problems.length > 3 && <li>…and {problems.length - 3} more.</li>}
-              </ul>
-            ) : (
-              <span className="text-faint">{problems.length === 0 ? "Ready to create." : `${problems.length} thing${problems.length === 1 ? "" : "s"} left to fill in.`}</span>
-            )}
-          </div>
-          <button type="button" onClick={() => void copyJson()} title="Copy the create_ttp JSON" className={GHOST}>
-            {copied ? "Copied" : "Copy JSON"}
-          </button>
-          <button type="button" onClick={onClose} className={GHOST}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void create()}
-            disabled={submit.state === "busy"}
-            className="cursor-pointer rounded-md px-3 py-1 font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-50 touch:min-h-11"
-            style={{ background: "var(--color-accent)" }}
-          >
-            {submit.state === "busy" ? "Creating…" : "Create profile"}
-          </button>
+          {confirming ? (
+            <>
+              <span className="text-faint min-w-0 flex-1 text-[11px]">{busy ? submit.label : `${int(cost.molecules)} molecules${cofold ? ", cofolded" : ""}`}</span>
+              <button type="button" onClick={() => setConfirming(false)} disabled={busy} className={GHOST}>
+                Back
+              </button>
+              <button type="button" onClick={() => void createAndRun()} disabled={busy} className={PRIMARY} style={{ background: "var(--color-accent)" }}>
+                {busy ? submit.label : submit.state === "run-error" ? "Try starting the run again" : "Create and start run"}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="min-w-0 flex-1 text-[11px]">
+                {shown.length > 0 ? (
+                  <ul style={{ color: "var(--color-accent)" }}>
+                    {shown.slice(0, 3).map((p) => (
+                      <li key={p}>{p}</li>
+                    ))}
+                    {shown.length > 3 && <li>…and {shown.length - 3} more.</li>}
+                  </ul>
+                ) : (
+                  <span className="text-faint">{problems.length === 0 ? "Ready to create." : `${problems.length} thing${problems.length === 1 ? "" : "s"} left to fill in.`}</span>
+                )}
+              </div>
+              <button type="button" onClick={() => void copyJson()} title="Copy the create_ttp JSON" className={GHOST}>
+                {copied ? "Copied" : "Copy JSON"}
+              </button>
+              <button type="button" onClick={onClose} className={GHOST}>
+                Cancel
+              </button>
+              <button type="button" onClick={() => void create()} disabled={busy} title="Save the profile without starting a run" className={SECONDARY}>
+                {busy ? submit.label : "Create only"}
+              </button>
+              <button type="button" onClick={askToRun} disabled={busy} title="Create the profile and start a REINVENT run with the settings above" className={PRIMARY} style={{ background: "var(--color-accent)" }}>
+                Create and run…
+              </button>
+            </>
+          )}
         </footer>
       </div>
     </div>
@@ -420,7 +675,8 @@ export function TtpBuilder({ onClose, onCreated }: Props) {
 const INPUT = "bg-sunken border-subtle focus:border-strong rounded-md border px-2 py-1 text-xs outline-none";
 const BLOCK = `${INPUT} w-full`;
 const SECONDARY = "bg-inset text-body hover:bg-sunken border-subtle cursor-pointer rounded-md border px-2.5 py-1 font-medium disabled:cursor-default disabled:opacity-50 touch:min-h-11";
-const GHOST = "text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 font-medium touch:min-h-11";
+const GHOST = "text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 font-medium disabled:opacity-50 touch:min-h-11";
+const PRIMARY = "cursor-pointer rounded-md px-3 py-1 font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-50 touch:min-h-11";
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
@@ -439,134 +695,38 @@ function Labelled({ label, hint, children }: { label: string; hint?: string; chi
     <label className="block space-y-0.5">
       <span className="text-muted flex gap-2 text-[11px]">
         {label}
-        {hint && <span className="text-faint">{hint}</span>}
+        {hint && <span className="text-faint font-mono">{hint}</span>}
       </span>
       {children}
     </label>
   );
 }
 
-function ObjectiveEditor({
-  objective,
-  onChange,
-  onRename,
-  onRemove,
-}: {
-  objective: Objective;
-  onChange: (patch: Partial<Objective>) => void;
-  onRename: (name: string) => void;
-  onRemove: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const transform = objective.transform ?? null;
-  const source = objectiveSource(objective);
-  const colour = source === "native" ? "var(--color-ok)" : "var(--color-structure)";
-  const params = objective.service_params ?? {};
-  const selector = [params.endpoint, params.target, params.interaction_type].filter((v): v is string => typeof v === "string" && v !== "");
-  const what = [objective.component ?? objective.service, ...selector, objective.depends_on && `after ${objective.depends_on}`].filter(Boolean).join(" · ");
-  const reference = Array.isArray(objective.params?.smiles) ? String(objective.params.smiles[0] ?? "") : "";
-
-  const setTransform = (next: Transform | null) => onChange({ transform: next });
-
+function Switch({ on, label, disabled, onChange }: { on: boolean; label: string; disabled?: boolean; onChange: (on: boolean) => void }) {
   return (
-    <li className="border-subtle rounded-lg border">
-      <div className="flex items-center gap-2 px-2.5 pt-1.5">
-        <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} title={source} />
-        <input
-          value={objective.name}
-          onChange={(event) => onRename(event.target.value)}
-          aria-label="Objective name"
-          className="hover:bg-sunken focus:bg-sunken min-w-0 flex-1 rounded px-1 py-0.5 text-xs font-semibold outline-none"
-        />
-        <span className="text-faint hidden max-w-56 truncate text-[10px] sm:block" title={objective.comment ?? what}>
-          {what}
-        </span>
-        <button type="button" onClick={onRemove} aria-label={`Remove ${objective.name}`} title="Remove" className="text-faint hover:text-body cursor-pointer px-1 text-sm leading-none">
-          ×
-        </button>
-      </div>
-      {objective.component === "TanimotoSimilarity" && (
-        <label className="flex items-center gap-2 px-2.5 pt-1">
-          <span className="text-faint w-12 shrink-0 text-[10px]">reference</span>
-          <input
-            value={reference}
-            onChange={(event) => onChange({ params: { ...(objective.params ?? {}), smiles: event.target.value.trim() ? [event.target.value.trim()] : [] } })}
-            placeholder="SMILES to stay close to"
-            spellCheck={false}
-            className={`${BLOCK} py-0.5 font-mono text-[10px]`}
-          />
-        </label>
-      )}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-2.5 py-1.5">
-        <label className="flex min-w-44 flex-1 items-center gap-2">
-          <span className="text-faint w-12 shrink-0 text-[10px]">weight</span>
-          <input
-            type="range"
-            min={0.05}
-            max={1}
-            step={0.05}
-            value={Math.min(1, objective.weight)}
-            onChange={(event) => onChange({ weight: Number(event.target.value) })}
-            aria-label={`${objective.name} weight`}
-            className="min-w-0 flex-1 accent-[var(--color-table)]"
-          />
-          <span className="w-8 shrink-0 text-right font-mono text-[11px] tabular-nums">{objective.weight.toFixed(2)}</span>
-        </label>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          title="How the raw value becomes a 0–1 score"
-          className="bg-sunken border-subtle hover:border-strong flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-2 py-px font-mono text-[10px]"
-        >
-          {transform ? transform.type : "raw score"}
-          <span aria-hidden="true">{open ? "▴" : "▾"}</span>
-        </button>
-      </div>
-      {open && (
-        <div className="border-subtle bg-sunken flex flex-wrap items-start gap-3 border-t px-2.5 py-2">
-          <div className="min-w-0 flex-1 space-y-1.5">
-            <label className="text-muted flex items-center gap-2 text-[11px]">
-              <span className="w-14 shrink-0">transform</span>
-              <select
-                value={transform?.type ?? ""}
-                onChange={(event) => setTransform(event.target.value ? retype(transform, event.target.value) : null)}
-                className="bg-raised border-subtle min-w-0 flex-1 rounded-md border px-1 py-0.5 font-mono text-[11px]"
-              >
-                <option value="">none (score is already 0–1)</option>
-                {TRANSFORM_TYPES.filter((t) => t !== "value_mapping").map((type) => (
-                  <option key={type} value={type}>
-                    {type}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {transform &&
-              transformParams(transform.type).map((param) => (
-                <label key={`${transform.type}:${param}`} className="text-muted flex items-center gap-2 text-[11px]">
-                  <span className="w-14 shrink-0 font-mono">{param}</span>
-                  <input
-                    type="number"
-                    step="any"
-                    defaultValue={typeof transform[param] === "number" ? String(transform[param]) : ""}
-                    onChange={(event) => {
-                      const value = Number.parseFloat(event.target.value);
-                      setTransform({ ...transform, [param]: Number.isFinite(value) ? value : undefined });
-                    }}
-                    className="bg-raised border-subtle w-24 rounded-md border px-1.5 py-0.5 font-mono text-[11px] tabular-nums"
-                  />
-                </label>
-              ))}
-            {objective.comment && <p className="text-faint text-[10px]">{objective.comment}</p>}
-          </div>
-          {transform && <TransformCurve transform={transform} />}
-        </div>
-      )}
-      {!open && transform && (
-        <div className="px-2.5 pb-1.5">
-          <TransformCurve transform={transform} width={220} height={28} />
-        </div>
-      )}
-    </li>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      className="relative mt-0.5 h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors disabled:cursor-default disabled:opacity-50"
+      style={{ background: on ? "var(--color-structure)" : "var(--border-strong)" }}
+    >
+      <span className="absolute top-0.5 size-4 rounded-full bg-white shadow transition-all" style={{ left: on ? "1.125rem" : "0.125rem" }} />
+    </button>
+  );
+}
+
+function Alert({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div
+      className="rounded-lg border px-3 py-2"
+      style={{ borderColor: "color-mix(in oklab, var(--color-accent) 35%, transparent)", background: "color-mix(in oklab, var(--color-accent) 8%, transparent)" }}
+    >
+      <p className="font-medium">{title}</p>
+      <p className="text-muted mt-0.5 font-mono text-[10px] break-words whitespace-pre-wrap">{detail}</p>
+    </div>
   );
 }

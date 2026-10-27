@@ -36,9 +36,13 @@ import { extractTargetFacts, toolEvents } from "../../lib/ttp";
 import { buildCandidates } from "../../lib/candidates";
 import { CandidatesPanel } from "../CandidatesPanel/CandidatesPanel";
 import { JobsPanel } from "../JobsPanel/JobsPanel";
+import { RunResults } from "../RunResults/RunResults";
 import { TtpPanel } from "../TtpPanel/TtpPanel";
 import { TargetCard } from "../TargetCard/TargetCard";
 import { AssetsPanel } from "../AssetsPanel/AssetsPanel";
+import { ShortlistPanel } from "../Shortlist/ShortlistPanel";
+import { StarButton } from "../Shortlist/StarButton";
+import { useShortlist } from "../../lib/shortlist";
 
 /** A tab, or a view inside one: "candidates" and "properties" open in Molecules, "activity" in Jobs. */
 export type WorkbenchTab = DockView;
@@ -67,6 +71,7 @@ const LABEL: Record<DockTab, string> = {
   molecules: "Molecules",
   tables: "Tables",
   jobs: "Jobs",
+  results: "Results",
   target: "Target",
   ttp: "TTP",
   assets: "Assets",
@@ -76,6 +81,7 @@ const MOLECULE_VIEWS = [
   { id: "candidates", label: "Candidates" },
   { id: "molecules", label: "All" },
   { id: "properties", label: "Properties" },
+  { id: "shortlist", label: "Shortlist" },
 ] as const;
 const JOB_VIEWS = [
   { id: "jobs", label: "Jobs" },
@@ -106,12 +112,15 @@ export function Workbench(props: Props) {
   }, [isSheet, onClose]);
 
   const candidateCount = useMemo(() => buildCandidates(artifacts).length, [artifacts]);
+  const starred = useShortlist(sessionId ?? "new").length;
   const counts: Record<WorkbenchTab, number> = {
     structure: artifacts.structures.length,
     candidates: candidateCount,
     molecules: artifacts.molecules.length,
     properties: artifacts.properties.length,
+    shortlist: starred,
     jobs: 0,
+    results: 0,
     ttp: 0,
     target: 0,
     assets: 0,
@@ -298,6 +307,15 @@ export function Workbench(props: Props) {
             {tab === "candidates" && <CandidatesTab {...props} />}
             {tab === "molecules" && <MoleculesTab {...props} />}
             {tab === "properties" && <PropertiesTab {...props} />}
+            {tab === "shortlist" && (
+              <ShortlistPanel
+                artifacts={props.artifacts}
+                theme={props.theme}
+                sessionId={props.sessionId}
+                onOpenMolecule={(smiles) => openMolecule(props, smiles)}
+                onAsk={props.onAsk}
+              />
+            )}
           </>
         )}
         {active === "jobs" && (
@@ -310,6 +328,11 @@ export function Workbench(props: Props) {
             )}
             {tab === "activity" && <ActivityTab {...props} />}
           </>
+        )}
+        {active === "results" && (
+          <div className="min-h-0 flex-1">
+            <RunResults artifacts={props.artifacts} theme={props.theme} sessionId={props.sessionId} onOpenMolecule={(smiles) => openMolecule(props, smiles)} onAsk={props.onAsk} />
+          </div>
         )}
         {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
         {active === "tables" && <TablesTab {...props} />}
@@ -405,7 +428,7 @@ function PropertiesTab({ artifacts, theme, onSelectSmiles, onTabChange }: Props)
   );
 }
 
-function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk }: Props) {
+function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk, sessionId }: Props) {
   const [query, setQuery] = useState("");
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -437,7 +460,8 @@ function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         <ul className="grid grid-cols-2 gap-2 xl:grid-cols-3">
           {shown.map(({ item, tool }) => (
-            <li key={item.smiles}>
+            <li key={item.smiles} className="relative">
+              <StarButton smiles={item.smiles} label={item.label} source={tool} session={sessionId ?? "new"} className="absolute top-1 right-1 z-10" />
               <button
                 type="button"
                 onClick={() => onSelectSmiles(item.smiles)}

@@ -9,6 +9,7 @@ import { Header } from "./components/Header/Header";
 import { SessionRail } from "./components/SessionRail/SessionRail";
 import { Transcript } from "./components/Transcript/Transcript";
 import { Composer, type ComposerHandle } from "./components/Composer/Composer";
+import { RunBar } from "./components/RunBar/RunBar";
 import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
 import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
 import type { Effort, SessionSummary, StructurePanel } from "./types/api";
@@ -19,8 +20,9 @@ import { onWorkbenchRequest } from "./lib/workbenchBus";
 import { parseViewerCommand, VIEWER_HELP, type ViewerAction } from "./lib/viewerCommands";
 import { download, sessionEvents } from "./lib/api";
 import { extractTargetFacts, toolEvents, type TargetFacts } from "./lib/ttp";
-import { sessionToMarkdown, slug } from "./lib/exportSession";
+import { downloadReport, printReport, sessionToMarkdown, slug } from "./lib/exportSession";
 import { useUserStructures, withUserStructures } from "./lib/userStructures";
+import { setShortlistSession } from "./lib/shortlist";
 
 /** The conversation in the address, so a reload or a shared link reopens it. */
 function sessionFromHash(): string | null {
@@ -82,6 +84,7 @@ export default function App() {
   const composerRef = useRef<ComposerHandle>(null);
 
   const userStructures = useUserStructures(session?.id ?? "new");
+  useEffect(() => setShortlistSession(session?.id ?? "new"), [session?.id]);
   const artifacts = useMemo(() => withUserStructures(collectArtifacts(transcript.turns), userStructures), [transcript.turns, userStructures]);
   const [picked, setPicked] = useState<StructurePanel | null>(null);
   const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
@@ -208,6 +211,8 @@ export default function App() {
         ? [
             { id: "export-md", group: "Conversation", label: "Export as Markdown", run: () => void exportCurrent("md") },
             { id: "export-json", group: "Conversation", label: "Export as JSON", run: () => void exportCurrent("json") },
+            { id: "export-report", group: "Conversation", label: "Export report", hint: "HTML", run: () => void downloadReport(session.id).catch((reason) => hint(`Could not export the report: ${reason instanceof Error ? reason.message : reason}`)) },
+            { id: "print-report", group: "Conversation", label: "Print / Save as PDF", hint: "Report", run: () => void printReport(session.id).catch((reason) => hint(`Could not print the report: ${reason instanceof Error ? reason.message : reason}`)) },
           ]
         : []),
       { id: "tab-structure", group: "Workbench", label: "Show the structure", run: () => showWorkbench("structure") },
@@ -216,6 +221,7 @@ export default function App() {
       { id: "tab-properties", group: "Workbench", label: "Show predicted properties", hint: "Molecules", run: () => showWorkbench("properties") },
       { id: "tab-tables", group: "Workbench", label: "Show tables", run: () => showWorkbench("tables") },
       { id: "tab-jobs", group: "Workbench", label: "Show REINVENT jobs", hint: "/jobs", run: () => showWorkbench("jobs") },
+      { id: "tab-results", group: "Workbench", label: "Show run results", run: () => showWorkbench("results") },
       { id: "tab-activity", group: "Workbench", label: "Show tool activity", hint: "Jobs", run: () => showWorkbench("activity") },
       { id: "tab-target", group: "Workbench", label: "Show the target", run: () => showWorkbench("target") },
       { id: "tab-ttp", group: "Workbench", label: "Show the target product profile", run: () => showWorkbench("ttp") },
@@ -267,7 +273,7 @@ export default function App() {
       })),
     ];
     return items;
-  }, [open, busy, chat.cancel, session, exportCurrent, showWorkbench, artifacts.structures, view, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
+  }, [open, busy, chat.cancel, session, exportCurrent, hint, showWorkbench, artifacts.structures, view, railOpen, workbenchOpen, theme, toggle, agent, ask, sessions.sessions]);
 
   const workbenchProps = {
     tab,
@@ -357,6 +363,7 @@ export default function App() {
               </button>
             )}
           </div>
+          <RunBar sessionId={session?.id ?? null} steps={artifacts.steps} onNotice={hint} />
           <Composer
             ref={composerRef}
             value={draft}

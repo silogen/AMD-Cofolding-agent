@@ -4,7 +4,11 @@
 import { describe, expect, it } from "vitest";
 import {
   canResume,
+  continueCost,
+  continueSteps,
+  errorSummary,
   isActive,
+  isMol2Mol,
   linePath,
   linear,
   parseAlerts,
@@ -18,8 +22,10 @@ import {
   runningBest,
   scoreDomain,
   startedJobId,
+  stepsDone,
   ticks,
   toolError,
+  uniqueAlerts,
 } from "./jobs";
 
 const job = {
@@ -158,27 +164,91 @@ describe("alerts and candidates", () => {
     expect(c).toEqual([{ smiles: "CCO", total: 0.8, components: [{ name: "QED", transformed: 0.7, raw: 0.42 }] }]);
     expect(parseCandidates({ error: "no CSV" })).toEqual([]);
   });
+
+  it("takes REINVENT 4's Score as the total and drops likelihoods and component details", () => {
+    const [c] = parseCandidates({
+      candidates: [
+        {
+          smiles: "CCO",
+          components: {
+            Agent: { transformed: 4.16 },
+            Prior: { transformed: 4.16 },
+            Target: { transformed: 71.5 },
+            Score: { transformed: 0.59 },
+            "Aqueous solubility": { transformed: 0.59, raw: -4.4 },
+            "std (Aqueous solubility)": { transformed: 0.38 },
+          },
+        },
+      ],
+    });
+    expect(c).toEqual({ smiles: "CCO", total: 0.59, components: [{ name: "Aqueous solubility", transformed: 0.59, raw: -4.4 }] });
+  });
+
+  it("shows each alert message once, at its most severe", () => {
+    const merged = uniqueAlerts([
+      { severity: "medium", message: "Plateaued since step 90", type: "score_plateau" },
+      { severity: "high", message: "Plateaued  since step 90 " },
+      { severity: "low", message: "Validity is low" },
+    ]);
+    expect(merged).toEqual([
+      { severity: "high", message: "Plateaued  since step 90", type: "score_plateau" },
+      { severity: "low", message: "Validity is low", type: "alert" },
+    ]);
+  });
+
+  it("summarises a traceback by its last line", () => {
+    const error =
+      'Process exited with code 1. Last stderr: Traceback (most recent call last):\n  File "x.py", line 62, in <module>\n    main()\nRuntimeError: No HIP GPUs are available\n';
+    expect(errorSummary(error)).toBe("Process exited with code 1: RuntimeError: No HIP GPUs are available");
+    expect(errorSummary("Traceback (most recent call last):\n  File x\nValueError: bad")).toBe("ValueError: bad");
+    expect(errorSummary("Server restarted while job was running")).toBe("Server restarted while job was running");
+  });
 });
 
 describe("resume", () => {
   it("reads the learning settings back from config.toml", () => {
     const toml = `[parameters]\nbatch_size = 64\n\n[learning_strategy]\ntype = "dap"\nsigma = 128\nrate = 0.0001\n`;
-    expect(parseRunConfig(toml)).toEqual({ batchSize: 64, sigma: 128, learningRate: 0.0001 });
-    expect(parseRunConfig("")).toEqual({ batchSize: null, sigma: null, learningRate: null });
+    expect(parseRunConfig(toml)).toEqual({ batchSize: 64, sigma: 128, learningRate: 0.0001, mol2mol: false });
+    expect(parseRunConfig("")).toEqual({ batchSize: null, sigma: null, learningRate: null, mol2mol: false });
+    const m2m = `[parameters]\nprior_file = "/app/priors/mol2mol_medium_similarity.prior"\nsmiles_file = "/data/seed.smi"\n`;
+    expect(parseRunConfig(m2m).mol2mol).toBe(true);
   });
 
   it("continues for the remaining steps from the checkpoint", () => {
+    // current_step is the next step to run: 120 means 119 are done.
     const s = parseStatus({ ...job, trajectory: { current_step: 120, max_steps: 300 } })!;
     expect(canResume(s)).toBe(true);
-    expect(resumeArguments(s, { batchSize: 64, sigma: null, learningRate: 0.0001 })).toEqual({
+    expect(stepsDone(s)).toBe(119);
+    expect(continueSteps(s)).toBe(181);
+    expect(resumeArguments(s, { config: { batchSize: 64, sigma: null, learningRate: 0.0001 } })).toEqual({
       ttp_id: "jak2-lead",
       model: ".reinvent",
-      max_steps: 180,
+      max_steps: 181,
       resume_from: "/data/jobs/job_a1b2c3d4/stage.chkpt",
       batch_size: 64,
       learning_rate: 0.0001,
     });
     expect(startedJobId({ job_id: "deadbeef", working_dir: "/x" })).toBe("deadbeef");
+  });
+
+  it("extends a completed run with the same TTP and Mol2Mol seeds", () => {
+    const [done] = parseJobs([{ ...job, state: "completed", model: ".m2m_medium", started_at: "2026-10-27T07:00:00Z", finished_at: "2026-10-27T07:30:00Z" }]);
+    expect(canResume(done)).toBe(true);
+    expect(continueSteps(done)).toBe(100);
+    const ttp = { id: "jak2-lead", version: 2, scoring: { objectives: [] } };
+    expect(resumeArguments(done, { steps: 50, ttp, seeds: ["CCO"], config: { batchSize: 64, sigma: 128, learningRate: null, mol2mol: true } })).toEqual({
+      ttp,
+      max_steps: 50,
+      resume_from: "/data/jobs/job_a1b2c3d4/stage.chkpt",
+      model: ".m2m_medium",
+      batch_size: 64,
+      sigma: 128,
+      seed_smiles: ["CCO"],
+    });
+    expect(isMol2Mol(done)).toBe(true);
+    // 300 steps took 30 min, so 100 more take ~10.
+    expect(continueCost(done, 100, 64)).toBe(`${(6400).toLocaleString()} molecules · ~10 min at the last pace`);
+    expect(continueCost(done, 100, null)).toBe("~10 min at the last pace");
   });
 
   it("is not offered without a checkpoint or while running", () => {

@@ -75,7 +75,7 @@ export function Transcript({ turns, theme, openStructurePath, onOpenMolecule, on
 function UserBubble({ content, at }: { content: string; at: number }) {
   return (
     <div className="flex flex-col items-end gap-1">
-      <p className="bg-inset max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-[0.9375rem] whitespace-pre-wrap">
+      <p className="bg-inset max-w-[85%] rounded-2xl rounded-br-sm px-3.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
         {content}
       </p>
       <span className="text-faint text-[10px]">{clock(at)}</span>

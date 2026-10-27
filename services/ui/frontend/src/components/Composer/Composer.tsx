@@ -14,6 +14,7 @@ import { ACCEPTED_FILES, fileKind, moleculesFromFile } from "../../lib/dropFiles
 import { uploadedStructure, uploadFile } from "../../lib/uploads";
 import { addUserStructure } from "../../lib/userStructures";
 import { sendToViewer } from "../../lib/viewerBus";
+import { notifyRunsChanged, openRun } from "../../lib/workbenchBus";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 
 const Sketcher = lazy(() => import("../Sketcher/Sketcher").then((module) => ({ default: module.Sketcher })));
@@ -410,7 +411,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
             }}
             placeholder={placeholder}
             aria-label="Message the agent"
-            className="max-h-[220px] min-h-[24px] w-full resize-none bg-transparent px-3.5 pt-2.5 pb-1 text-base outline-none disabled:cursor-not-allowed sm:text-[0.9375rem]"
+            className="max-h-[220px] min-h-[24px] w-full resize-none bg-transparent px-3.5 pt-2.5 pb-1 text-base outline-none disabled:cursor-not-allowed sm:text-[13px]"
           />
 
           <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
@@ -545,6 +546,12 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
               onCreated={(ttp) => {
                 setTtpOpen(false);
                 insert(`Use the TTP "${ttp.name}" (${ttp.id})`, true);
+              }}
+              onStarted={(ttp, jobId) => {
+                setTtpOpen(false);
+                insert(`I started REINVENT job ${jobId} on the TTP "${ttp.name}" (${ttp.id}).`, true);
+                notifyRunsChanged();
+                openRun(jobId, "jobs");
               }}
             />
           </Suspense>,

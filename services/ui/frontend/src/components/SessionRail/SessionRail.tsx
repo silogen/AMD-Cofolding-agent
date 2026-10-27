@@ -5,7 +5,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { SessionSummary } from "../../types/api";
 import type { AgentInfo } from "../../hooks/useSession";
 import { download, sessionEvents } from "../../lib/api";
-import { sessionToMarkdown, slug } from "../../lib/exportSession";
+import { downloadReport, printReport, sessionToMarkdown, slug } from "../../lib/exportSession";
 
 interface Props {
   sessions: SessionSummary[];
@@ -171,6 +171,7 @@ function SessionItem({
   const [draft, setDraft] = useState(session.title);
   const [menu, setMenu] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState(false);
   const title = session.title || "Untitled conversation";
 
   const fail = (reason: unknown) => setProblem(reason instanceof Error ? reason.message : String(reason));
@@ -190,6 +191,19 @@ function SessionItem({
       else download(`${name}.json`, JSON.stringify({ session: summary, events }, null, 2), "application/json");
     } catch (reason) {
       fail(reason);
+    }
+  }
+
+  async function report(print: boolean) {
+    setMenu(false);
+    setProblem(null);
+    setPreparing(true);
+    try {
+      await (print ? printReport(session.id) : downloadReport(session.id));
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      setPreparing(false);
     }
   }
 
@@ -280,6 +294,12 @@ function SessionItem({
           >
             Rename
           </MenuItem>
+          <MenuItem onClick={() => report(false)} disabled={preparing}>
+            Export report
+          </MenuItem>
+          <MenuItem onClick={() => report(true)} disabled={preparing}>
+            Print / Save as PDF
+          </MenuItem>
           <MenuItem onClick={() => exportAs("md")}>Export as Markdown</MenuItem>
           <MenuItem onClick={() => exportAs("json")}>Export as JSON</MenuItem>
           <MenuItem onClick={remove} danger disabled={session.busy}>
@@ -288,6 +308,7 @@ function SessionItem({
         </div>
       )}
 
+      {preparing && <p className="text-faint px-2 pb-1 text-[10px]">Preparing the report…</p>}
       {problem && (
         <p role="alert" className="px-2 pb-1 text-[10px]" style={{ color: "var(--color-accent)" }}>
           {problem}

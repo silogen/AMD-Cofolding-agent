@@ -17,7 +17,7 @@ const ICON: Record<CalloutTone, string> = { info: "ⓘ", warn: "⚠", bad: "⚠"
 export function Callout({ tone, title, children }: { tone: CalloutTone; title?: string | null; children: ReactNode }) {
   return (
     <div
-      className="my-3 flex items-start gap-2 border-l-2 py-0.5 pl-3 text-[0.875rem]"
+      className="my-3 flex items-start gap-2 border-l-2 py-0.5 pl-3 text-[13px]"
       style={{ borderLeftColor: COLOR[tone] }}
       role={tone === "warn" || tone === "bad" ? "note" : undefined}
     >
