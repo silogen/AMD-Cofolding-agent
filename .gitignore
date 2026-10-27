@@ -12,6 +12,11 @@ __pycache__/
 dist/
 build/
 
+# Node -- the dashboard SPA's dependencies. The bundle is built inside the
+# image (services/dashboard/Dockerfile), so neither the tree nor the output
+# belongs in the repo.
+node_modules/
+
 # Logs
 logs/
 *.log
