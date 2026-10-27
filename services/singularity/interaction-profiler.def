@@ -24,9 +24,9 @@ From: mambaorg/micromamba:1.5.8
 
     apt-get update && apt-get install -y --no-install-recommends curl \
         && rm -rf /var/lib/apt/lists/*
-
+    
     micromamba install -y -n base -c conda-forge \
-        python=3.11 rdkit openmm pdbfixer mdanalysis numpy scipy pandas
+        python=3.11 rdkit openmm pdbfixer mdanalysis=2.11.0 numpy scipy pandas
     micromamba clean --all --yes
 
     /opt/conda/bin/python -m pip install --no-cache-dir \
