@@ -413,6 +413,36 @@ override if that filesystem is too small).
 
 `load-images.sh --node` must match this machine's `hostname`.
 
+### When the node is not reachable over ssh
+
+`load-images.sh` has to run *on* the node, which rules it out without shell
+access there. [`scripts/image-importer.yaml`](scripts/image-importer.yaml) is
+the way in: a throwaway root pod, pinned to the same node as the fleet, that
+mounts the node's containerd socket and the node's own `ctr` binary. An image
+tar copied into it lands in the same containerd the kubelet pulls from.
+
+```bash
+docker save --output structure-prep.tar structure-prep:local
+
+kubectl apply -f k8s/scripts/image-importer.yaml
+kubectl -n "${PROJECT}" wait --for=condition=Ready pod/image-importer --timeout=5m
+kubectl cp structure-prep.tar "${PROJECT}/image-importer:/tmp/structure-prep.tar"
+kubectl -n "${PROJECT}" exec image-importer -- \
+    /host-bin/ctr --address /run/k3s/containerd/containerd.sock \
+      --namespace k8s.io images import --digests=false /tmp/structure-prep.tar
+```
+
+`ctr` comes from the node, not the container, because the client has to match
+the server. Delete the pod when the transfer is done.
+
+This path makes the architecture caveat unavoidable rather than theoretical:
+the images can only be built off-node, so they must be built **for** amd64.
+Confirm before copying -- a 2 GB tar is a slow way to find out:
+
+```bash
+docker image inspect --format '{{.Architecture}}' structure-prep:local   # must say amd64
+```
+
 ```bash
 chmod +x k8s/build-images.sh k8s/load-images.sh k8s/apply.sh
 
