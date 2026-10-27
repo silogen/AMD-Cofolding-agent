@@ -294,6 +294,8 @@
     padding: 0.3rem 0.55rem;
     text-align: left;
     vertical-align: top;
+    /* Without a floor the columns squeeze to one word each instead of scrolling. */
+    min-width: 6rem;
   }
   /* Callouts sit in and next to answers, so they share the answer's size. */
   .callout-body {

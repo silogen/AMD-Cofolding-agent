@@ -24,6 +24,7 @@ import {
   startedJobId,
   stepsDone,
   ticks,
+  trajectoryPoints,
   toolError,
   uniqueAlerts,
 } from "./jobs";
@@ -111,6 +112,18 @@ describe("parseStatus", () => {
       },
     },
   };
+
+  it("charts the total score component when the run reports no score trajectory", () => {
+    const raw = { ...status, trajectory: { ...status.trajectory, score_trajectory: [], per_component_trajectory: { Score: [{ step: 2, mean_score: 0.7 }], QED: [{ step: 2, mean_score: 0.5 }] } } };
+    const fallback = trajectoryPoints(parseStatus(raw)!);
+    expect(fallback.from).toBe("Score");
+    expect(fallback.points).toEqual([{ step: 2, mean: 0.7, max: null, molecules: null }]);
+
+    const direct = trajectoryPoints(parseStatus(status)!);
+    expect(direct.from).toBeNull();
+    expect(direct.points.map((p) => p.step)).toEqual([0, 10]);
+    expect(trajectoryPoints(parseStatus({ ...status, trajectory: {} })!)).toEqual({ points: [], from: null });
+  });
 
   it("reads the trajectory, sorted by step, skipping malformed points", () => {
     const s = parseStatus(status)!;

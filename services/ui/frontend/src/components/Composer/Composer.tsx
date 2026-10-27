@@ -499,8 +499,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
                 onClick={submit}
                 disabled={!connected || (!value.trim() && attachments.length === 0)}
                 aria-label="Send"
-                className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-xl text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 touch:size-11"
-                style={{ background: "var(--color-accent)" }}
+                className="bg-accent hover:bg-accent-strong disabled:bg-inset disabled:text-faint grid size-8 shrink-0 cursor-pointer place-items-center rounded-xl text-white transition-colors disabled:cursor-not-allowed touch:size-11"
               >
                 <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
                   <path d="M12 19V5M5 12l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />

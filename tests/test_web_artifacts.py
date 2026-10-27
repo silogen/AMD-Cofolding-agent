@@ -357,6 +357,16 @@ def test_scores_reported_as_text_are_read_as_numbers(shared_root):
     assert structure["metrics"] == {"confidence": 0.98, "ligandIptm": 0.97, "posebustersPassed": 18, "posebustersTotal": 22}
 
 
+def test_the_first_heading_of_an_answer_is_read_without_its_marks():
+    from reinvent4_agent.web.sessions import first_heading
+
+    assert first_heading("## Score: `c1ccccc1`\n\nbody") == "Score: c1ccccc1"
+    assert first_heading("Some text\n\n### **Top candidates** ###\n") == "Top candidates"
+    assert first_heading("No heading here, just prose.") is None
+    assert first_heading("#\n") is None
+    assert first_heading("") is None
+
+
 def test_results_recorded_without_panels_get_them_on_load():
     from reinvent4_agent.web.sessions import refresh_panels
 

@@ -13,6 +13,7 @@ import {
   createdTimes,
   curveLabel,
   filterTtps,
+  hasCofolding,
   isDirty,
   latestTtp,
   loadDraft,
@@ -44,6 +45,7 @@ import {
 } from "../../lib/ttp";
 import { modelLabel } from "../../lib/ttpRun";
 import { onRunsChanged, openRun } from "../../lib/workbenchBus";
+import { RunCard } from "../TtpBuilder/RunFields";
 import { ObjectiveCard } from "./ObjectiveCard";
 import { TransformCurve } from "./TransformCurve";
 
@@ -246,6 +248,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
         onServer={onServer}
         inSession={fromSession.id === base.id}
         runs={runs}
+        onAsk={onAsk}
         onUse={() => onAsk(chatPrompt(base))}
         onDuplicate={() => setBuilder({ initial: base })}
         onDownload={() => download(ttpFileName(base), JSON.stringify(base, null, 2), "application/json")}
@@ -481,6 +484,7 @@ function TtpReadView({
   inSession,
   runs,
   saved,
+  onAsk,
   onUse,
   onDuplicate,
   onDownload,
@@ -491,11 +495,13 @@ function TtpReadView({
   inSession: boolean;
   runs: JobSummary[];
   saved: number | null;
+  onAsk: (prompt: string) => void;
   onUse: () => void;
   onDuplicate: () => void;
   onDownload: () => void;
   onEdit: () => void;
 }) {
+  const [running, setRunning] = useState(false);
   const shares = weightShares(ttp);
   const all = [...objectivesOf(ttp, "pre_scoring"), ...objectivesOf(ttp, "scoring")];
   const largest = all.reduce((m, o) => Math.max(m, o.weight), 0) || 1;
@@ -520,6 +526,9 @@ function TtpReadView({
           <button type="button" onClick={onUse} title="Put a reference to this TTP in the message box" className={ACTION} style={{ borderColor: "var(--color-accent)", color: "var(--color-accent)" }}>
             Use in chat
           </button>
+          <button type="button" onClick={() => setRunning(!running)} aria-expanded={running} title="Put a REINVENT run request in the message box" className={ACTION}>
+            Run…
+          </button>
           <button type="button" onClick={onDuplicate} title="Open a copy in the builder" className={ACTION}>
             Duplicate and edit
           </button>
@@ -530,6 +539,11 @@ function TtpReadView({
             Edit weights
           </button>
         </div>
+        {running && (
+          <div className="mt-2">
+            <RunCard key={ttp.id} ttp={ttp} cofold={hasCofolding(all)} onAsk={onAsk} onClose={() => setRunning(false)} />
+          </div>
+        )}
       </div>
 
       <Block title="Target">

@@ -10,8 +10,20 @@ vi.stubGlobal("localStorage", {
   removeItem: (k: string) => void store.delete(k),
 });
 
-const { clearShortlist, isStarred, removeStar, setShortlistSession, shortlistColumns, shortlistPrompt, shortlistSdf, shortlistSession, shortlistSheet, toggleStar } =
-  await import("./shortlist");
+const {
+  admetPrompt,
+  clearShortlist,
+  isStarred,
+  removeStar,
+  setShortlistSession,
+  shortlistColumns,
+  shortlistPrompt,
+  shortlistSdf,
+  shortlistSeeds,
+  shortlistSession,
+  shortlistSheet,
+  toggleStar,
+} = await import("./shortlist");
 
 describe("shortlist", () => {
   beforeEach(() => {
@@ -64,5 +76,15 @@ describe("shortlist", () => {
     ]);
     expect(prompt.startsWith("Cofold these 2 molecules")).toBe(true);
     expect(prompt.endsWith("\nCCO\nCCN")).toBe(true);
+  });
+
+  it("asks for ADMET and lists the seeds", () => {
+    const entries = [
+      { smiles: "CCO", at: 1 },
+      { smiles: "CCN", at: 2 },
+    ];
+    expect(admetPrompt(entries)).toBe("Predict ADMET for these 2 molecules: CCO, CCN");
+    expect(admetPrompt(entries.slice(0, 1))).toBe("Predict ADMET for this molecule: CCO");
+    expect(shortlistSeeds(entries)).toBe("CCO\nCCN");
   });
 });

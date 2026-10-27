@@ -573,6 +573,19 @@ export function linePath(points: { x: number; y: number }[], x: Scale, y: Scale)
 }
 
 /** The best score reached so far at each step: a never-decreasing line. */
+/**
+ * The per-step scores to chart. REINVENT only reports score_trajectory on some
+ * runs; the total score component carries the same means, without a per-step best.
+ */
+export function trajectoryPoints(status: JobStatus): { points: TrajectoryPoint[]; from: string | null } {
+  if (status.trajectory.length) return { points: status.trajectory, from: null };
+  for (const key of ["Score", "total_score"]) {
+    const series = status.componentTrajectories[key];
+    if (series?.length) return { points: series.map((p) => ({ step: p.step, mean: p.mean, max: null, molecules: null })), from: key };
+  }
+  return { points: [], from: null };
+}
+
 export function runningBest(points: TrajectoryPoint[]): { x: number; y: number }[] {
   let best = -Infinity;
   return points.map((p) => {

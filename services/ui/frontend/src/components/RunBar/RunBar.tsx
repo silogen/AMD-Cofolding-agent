@@ -20,6 +20,7 @@ import {
   type RunEvent,
 } from "../../lib/runProgress";
 import { notifyRunsChanged, onRunsChanged, openRun, openWorkbench } from "../../lib/workbenchBus";
+import { ScoreTrend } from "./ScoreTrend";
 
 interface Props {
   sessionId: string | null;
@@ -262,6 +263,7 @@ export function RunBar({ sessionId, steps, onNotice }: Props) {
           <span className="text-muted shrink-0 font-mono tabular-nums" title="Steps done / maximum steps">
             {progress.done}/{progress.max ?? "—"}
           </span>
+          <ScoreTrend status={entry?.status} width={56} className="hidden @lg:block" />
           {progress.elapsedMs !== null && (
             <span className="text-faint shrink-0 tabular-nums" title="Elapsed">
               {shortDuration(progress.elapsedMs)}

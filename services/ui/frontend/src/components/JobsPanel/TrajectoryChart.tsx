@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useMemo, useState, type PointerEvent } from "react";
-import { fmt, linePath, linear, runningBest, scoreDomain, ticks, type JobStatus } from "../../lib/jobs";
+import { fmt, linePath, linear, runningBest, scoreDomain, ticks, trajectoryPoints, type JobStatus } from "../../lib/jobs";
 
 interface Props {
   status: JobStatus;
@@ -31,8 +31,9 @@ const COMPONENT_COLOURS = [
 export function TrajectoryChart({ status }: Props) {
   const [shown, setShown] = useState<Set<string>>(() => new Set());
   const [hover, setHover] = useState<number | null>(null);
-  const points = status.trajectory;
-  const componentNames = Object.keys(status.componentTrajectories);
+  const { points, from } = useMemo(() => trajectoryPoints(status), [status]);
+  const componentNames = Object.keys(status.componentTrajectories).filter((name) => name !== from);
+  const hasBest = points.some((p) => p.max !== null);
 
   const geometry = useMemo(() => {
     const values = points.flatMap((p) => (p.max === null ? [p.mean] : [p.mean, p.max]));
@@ -83,8 +84,8 @@ export function TrajectoryChart({ status }: Props) {
     <div>
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
         <Legend colour={MEAN} label="mean total" />
-        <Legend colour={BEST} label="best of step" dashed />
-        <Legend colour={BEST} label="best so far" />
+        {hasBest && <Legend colour={BEST} label="best of step" dashed />}
+        {hasBest && <Legend colour={BEST} label="best so far" />}
         {componentNames.map((name, i) => (
           <button
             key={name}
@@ -145,8 +146,8 @@ export function TrajectoryChart({ status }: Props) {
             />
           );
         })}
-        <path d={stepMax} fill="none" stroke={BEST} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
-        <path d={best} fill="none" stroke={BEST} strokeWidth={1.75} />
+        {hasBest && <path d={stepMax} fill="none" stroke={BEST} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />}
+        {hasBest && <path d={best} fill="none" stroke={BEST} strokeWidth={1.75} />}
         <path d={mean} fill="none" stroke={MEAN} strokeWidth={2} />
         {hovered && (
           <g>
@@ -165,7 +166,7 @@ export function TrajectoryChart({ status }: Props) {
       </svg>
       <div className="text-muted h-4 text-[11px] tabular-nums">
         {hovered
-          ? `Step ${hovered.step} · mean ${fmt(hovered.mean)} · best ${fmt(hovered.max)}${hovered.molecules !== null ? ` · ${hovered.molecules} molecules` : ""}`
+          ? `Step ${hovered.step} · mean ${fmt(hovered.mean)}${hovered.max !== null ? ` · best ${fmt(hovered.max)}` : ""}${hovered.molecules !== null ? ` · ${hovered.molecules} molecules` : ""}`
           : `${points.length} sampled step${points.length === 1 ? "" : "s"}`}
       </div>
     </div>

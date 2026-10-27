@@ -63,7 +63,8 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
   const tools = steps.map((step) => step.name);
   const texts = turn.blocks.flatMap((block) => (block.kind === "text" ? [block.content] : []));
   const onlyAlerts = turn.blocks.length > 0 && turn.blocks.every((block) => block.kind === "alert");
-  const title = onlyAlerts ? "Monitor alert" : running && texts.length === 0 && steps.length === 0 ? "Working…" : answerTitle(texts, tools);
+  const stopped = texts.length === 0 && turn.blocks.some((block) => block.kind === "cancelled");
+  const title = onlyAlerts ? "Monitor alert" : stopped ? "Stopped" : running && texts.length === 0 && steps.length === 0 ? "Working…" : answerTitle(texts, tools);
   const firstText = turn.blocks.find((block) => block.kind === "text");
   const links = turn.done ? artifactLinks(panels, tools) : [];
   const failedGate = uniqueStructures(panels).filter((panel) => gate(panel.metrics).status === "fail");
@@ -107,8 +108,8 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
             return <ErrorBlock key={block.id} message={block.message} />;
           case "cancelled":
             return (
-              <p key={block.id} className="text-muted border-subtle rounded-lg border px-3 py-2 text-xs">
-                Stopped. Jobs the agent already launched keep running; stop them from the Jobs tab.
+              <p key={block.id} className="text-faint text-xs">
+                Jobs it already launched keep running; stop them from the Jobs tab.
               </p>
             );
           default:

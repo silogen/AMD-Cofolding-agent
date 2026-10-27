@@ -46,10 +46,10 @@ export function stepPose(paths: string[], path: string, step: number): string | 
 
 export type StructureKind = "predicted" | "experimental" | "prepared";
 
-export const STRUCTURE_KINDS: Record<StructureKind, { label: string; color: string; hint: string }> = {
-  predicted: { label: "Predicted", color: "var(--color-molecule)", hint: "Cofolding output (Boltz)" },
-  experimental: { label: "Experimental", color: "var(--color-structure)", hint: "Deposited structure (RCSB PDB)" },
-  prepared: { label: "Prepared", color: "var(--color-table)", hint: "Output of structure preparation" },
+export const STRUCTURE_KINDS: Record<StructureKind, { label: string; hint: string }> = {
+  predicted: { label: "Predicted", hint: "Cofolding output (Boltz)" },
+  experimental: { label: "Experimental", hint: "Deposited structure (RCSB PDB)" },
+  prepared: { label: "Prepared", hint: "Output of structure preparation" },
 };
 
 /** What kind of structure a file is, inferred from its path; null when the path does not say. */

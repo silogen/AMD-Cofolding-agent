@@ -46,6 +46,18 @@ _ID_PATTERN = re.compile(r"^s-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 #: Characters of the first user message used as the default title.
 _TITLE_CHARS = 80
 
+#: "## Score: c1ccccc1" at the top of an answer, the agent's own name for a turn.
+_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def first_heading(markdown: str) -> str | None:
+    """The first markdown heading of an answer, without its emphasis marks."""
+    match = _HEADING_PATTERN.search(markdown or "")
+    if match is None:
+        return None
+    text = re.sub(r"[*_`]", "", match.group(1)).strip()
+    return text or None
+
 #: Idle sessions kept in memory.  Older ones are reloaded from disk on demand.
 MAX_LIVE_SESSIONS = 20
 
@@ -224,6 +236,7 @@ class LiveSession:
         if not self.meta.get("title"):
             first_line = content.strip().splitlines()[0] if content.strip() else ""
             self.meta["title"] = first_line[:_TITLE_CHARS]
+            self.meta["auto_title"] = True
         self.publish({"type": "user_message", "content": content, **({"effort": effort} if effort else {})})
         self.publish({"type": "status", "state": "busy"})
         self.meta["turns"] = sum(1 for event in self.events if event.get("type") == "user_message")
@@ -243,6 +256,7 @@ class LiveSession:
     async def _run_turn(self, content: str) -> None:
         try:
             answer = await self.agent.chat(content)
+            self._title_from_answer(answer)
             self.publish(
                 {
                     "type": "assistant_message",
@@ -272,6 +286,15 @@ class LiveSession:
             except Exception:
                 logger.exception("Could not save the history of session %s", self.id)
         self.store.save_meta(self.meta)
+
+    def _title_from_answer(self, answer: str) -> None:
+        """Name a session after the first answer's heading, which beats a raw SMILES."""
+        if not self.meta.get("auto_title"):
+            return
+        heading = first_heading(answer)
+        if heading:
+            self.meta["title"] = heading[:_TITLE_CHARS]
+            self.meta["auto_title"] = False
 
     def summary(self) -> dict[str, Any]:
         return {**self.meta, "busy": self.busy}
@@ -345,6 +368,7 @@ class SessionManager:
         if live is None:
             return None
         live.meta["title"] = title.strip()[:200]
+        live.meta["auto_title"] = False
         live.store.save_meta(live.meta)
         return live.summary()
 

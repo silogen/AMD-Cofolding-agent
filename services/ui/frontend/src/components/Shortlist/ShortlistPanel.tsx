@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { Theme } from "../../hooks/useTheme";
 import { useRDKit } from "../../hooks/useRDKit";
 import { download } from "../../lib/api";
@@ -9,10 +9,12 @@ import type { Artifacts } from "../../lib/artifacts";
 import { buildCandidates } from "../../lib/candidates";
 import { fileName, toCsv } from "../../lib/csv";
 import { descriptors, withMol } from "../../lib/rdkit";
-import { removeStar, shortlistColumns, shortlistPrompt, shortlistSdf, shortlistSheet, shortlistValues, useShortlist, type KnownValues } from "../../lib/shortlist";
+import { admetPrompt, removeStar, shortlistColumns, shortlistPrompt, shortlistSdf, shortlistSeeds, shortlistSheet, shortlistValues, useShortlist, type KnownValues } from "../../lib/shortlist";
+import { latestTtp, toolEvents } from "../../lib/ttp";
 import { DownloadIcon, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { SmilesText } from "../MolDepiction/SmilesText";
+import { RunCard } from "../TtpBuilder/RunFields";
 
 interface Props {
   artifacts: Artifacts;
@@ -30,7 +32,9 @@ const SHOWN_SCORES = 3;
 export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, onAsk }: Props) {
   const entries = useShortlist(sessionId ?? "new");
   const { rdkit } = useRDKit();
+  const [seeding, setSeeding] = useState(false);
   const candidates = useMemo(() => new Map(buildCandidates(artifacts).map((c) => [c.smiles, c])), [artifacts]);
+  const sessionTtpId = useMemo(() => latestTtp(toolEvents(artifacts.steps)).id, [artifacts.steps]);
 
   const known = useMemo<KnownValues>(() => {
     return (smiles) => {
@@ -75,10 +79,21 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
         >
           <DownloadIcon /> SDF
         </TextButton>
+        <TextButton title="Start a Mol2Mol run from these molecules" onClick={() => setSeeding(!seeding)}>
+          Use as seeds…
+        </TextButton>
+        <TextButton title="Put an ADMET prediction request for these SMILES in the composer" onClick={() => onAsk(admetPrompt(entries))}>
+          ADMET
+        </TextButton>
         <TextButton title="Put a prompt with these SMILES in the composer" onClick={() => onAsk(shortlistPrompt(entries))}>
           Ask the agent…
         </TextButton>
       </div>
+      {seeding && (
+        <div className="shrink-0 px-3 pb-2">
+          <RunCard preferTtpId={sessionTtpId} seeds={shortlistSeeds(entries)} onAsk={onAsk} onClose={() => setSeeding(false)} />
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-xs">
           <thead className="bg-sunken text-muted sticky top-0 z-10 text-[10px]">

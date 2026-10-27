@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRDKit } from "../../hooks/useRDKit";
 import type { Artifacts } from "../../lib/artifacts";
 import {
@@ -62,6 +62,7 @@ const GATE_RANK = { pass: 2, unknown: 1, fail: 0 } as const;
 const control = "bg-sunken border-subtle rounded-md border px-2 py-1 text-xs";
 const button =
   "border-subtle hover:bg-sunken inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium";
+const menuItem = "hover:bg-sunken flex w-full cursor-pointer items-center gap-2 rounded px-2 py-1 text-left disabled:cursor-not-allowed disabled:opacity-50";
 
 function download(name: string, text: string, type: string) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -156,6 +157,8 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
   }, [candidates, props, query, origin, minScore, gateOnly, sort]);
 
   const chosen = candidates.filter((c) => selected.has(c.smiles));
+  const scope = chosen.length ? chosen : filtered;
+  const scopeLabel = chosen.length ? `${chosen.length} selected` : filtered.length === candidates.length ? `all ${candidates.length}` : `${filtered.length} shown`;
   const detailSmiles = detailKey === undefined ? (filtered[0]?.smiles ?? null) : detailKey;
   const detail = detailSmiles ? (candidates.find((c) => c.smiles === detailSmiles) ?? null) : null;
 
@@ -204,7 +207,7 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
 
   function exportSdf() {
     if (!rdkit) return;
-    const sdf = candidatesToSdf(chosen, (smiles) => withMol(rdkit, smiles, (mol) => mol.get_molblock()), propsOf);
+    const sdf = candidatesToSdf(scope, (smiles) => withMol(rdkit, smiles, (mol) => mol.get_molblock()), propsOf);
     download("candidates.sdf", sdf, "chemical/x-mdl-sdfile");
   }
 
@@ -288,84 +291,111 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
   return (
     <div className="bg-raised flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="border-subtle flex flex-wrap items-center gap-2 border-b px-3 py-2">
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search name, SMILES, tool…"
-            aria-label="Search candidates"
-            className={`${control} w-44 min-w-0 flex-1 sm:flex-none`}
-          />
-          <select aria-label="Origin" value={origin} onChange={(e) => setOrigin(e.target.value)} className={control}>
-            <option value="">All origins</option>
-            {origins.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-          <input
-            type="number"
-            min={0}
-            max={1}
-            step={0.05}
-            value={minScore}
-            onChange={(e) => setMinScore(e.target.value)}
-            placeholder="Min score"
-            aria-label="Minimum score"
-            className={`${control} w-24`}
-          />
-          <button
-            type="button"
-            aria-pressed={gateOnly}
-            onClick={() => setGateOnly((v) => !v)}
-            className={button}
-            style={gateOnly ? { borderColor: "var(--color-ok)", color: "var(--color-ok)" } : undefined}
-          >
-            Gate only
-          </button>
-          <div className="border-subtle ml-auto inline-flex overflow-hidden rounded-md border" role="group" aria-label="View">
-            {(["table", "scatter"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                aria-pressed={view === v}
-                onClick={() => setView(v)}
-                className={`cursor-pointer px-2.5 py-1 text-[11px] font-medium capitalize ${view === v ? "bg-inset text-body" : "text-muted hover:text-body"}`}
-              >
-                {v}
-              </button>
-            ))}
-          </div>
-          <details className="relative">
-            <summary className={`${button} list-none`} aria-label="Choose visible columns">
-              Columns
-            </summary>
-            <div className="bg-raised border-subtle shadow-card absolute right-0 z-20 mt-1 max-h-72 w-48 overflow-y-auto rounded-lg border p-1.5 text-[11px]">
-              {allColumns.map((col) => (
-                <label key={col.key} className="hover:bg-sunken flex cursor-pointer items-center gap-2 rounded px-1.5 py-1">
-                  <input
-                    type="checkbox"
-                    checked={shown[col.key] ?? col.defaultOn}
-                    onChange={(e) => setShown((previous) => ({ ...previous, [col.key]: e.target.checked }))}
-                    className="cursor-pointer"
-                  />
-                  <span className="truncate">{col.label}</span>
-                  {col.kind === "descriptor" && <span className="text-faint ml-auto text-[9px]">RDKit</span>}
-                </label>
+        <div className="border-subtle @container border-b px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search name, SMILES, tool…"
+              aria-label="Search candidates"
+              className={`${control} w-full @md:w-auto @md:min-w-36 @md:flex-1 @3xl:w-44 @3xl:flex-none`}
+            />
+            <select aria-label="Origin" value={origin} onChange={(e) => setOrigin(e.target.value)} className={`${control} max-w-40`}>
+              <option value="">All origins</option>
+              {origins.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
               ))}
+            </select>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={minScore}
+              onChange={(e) => setMinScore(e.target.value)}
+              placeholder="Min score"
+              aria-label="Minimum score"
+              className={`${control} w-24`}
+            />
+            <button
+              type="button"
+              aria-pressed={gateOnly}
+              onClick={() => setGateOnly((v) => !v)}
+              title="Only candidates that pass the quality gate"
+              className={button}
+              style={gateOnly ? { borderColor: "var(--color-ok)", color: "var(--color-ok)" } : undefined}
+            >
+              Passing
+            </button>
+            <div className="ml-auto flex items-center gap-1">
+              <div className="border-subtle inline-flex overflow-hidden rounded-md border" role="group" aria-label="View">
+                {(["table", "scatter"] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    aria-pressed={view === v}
+                    onClick={() => setView(v)}
+                    className={`cursor-pointer px-2.5 py-1 text-[11px] font-medium capitalize ${view === v ? "bg-inset text-body" : "text-muted hover:text-body"}`}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+              <Menu title="Download and columns">
+                {(close) => (
+                  <>
+                    <p className="text-faint px-2 pt-1 pb-0.5 text-[10px]">Download {scopeLabel}</p>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={menuItem}
+                      onClick={() => {
+                        download("candidates.csv", candidatesToCsv(scope, props.size ? propsOf : undefined), "text/csv");
+                        close();
+                      }}
+                    >
+                      CSV
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={menuItem}
+                      disabled={!rdkit}
+                      onClick={() => {
+                        exportSdf();
+                        close();
+                      }}
+                      title={rdkit ? "2D molblocks from RDKit, with scores and descriptors as SD fields" : "RDKit is loading"}
+                    >
+                      SDF
+                    </button>
+                    <div className="border-subtle my-1 border-t" />
+                    <label className={menuItem}>
+                      <input type="checkbox" checked={dense} onChange={(e) => setDense(e.target.checked)} className="cursor-pointer" />
+                      Compact rows
+                    </label>
+                    <div className="border-subtle my-1 border-t" />
+                    <p className="text-faint px-2 pt-1 pb-0.5 text-[10px]">Columns</p>
+                    {allColumns.map((col) => (
+                      <label key={col.key} className={menuItem}>
+                        <input
+                          type="checkbox"
+                          checked={shown[col.key] ?? col.defaultOn}
+                          onChange={(e) => setShown((previous) => ({ ...previous, [col.key]: e.target.checked }))}
+                          className="cursor-pointer"
+                        />
+                        <span className="truncate">{col.label}</span>
+                        {col.kind === "descriptor" && <span className="text-faint ml-auto text-[9px]">RDKit</span>}
+                      </label>
+                    ))}
+                  </>
+                )}
+              </Menu>
             </div>
-          </details>
-          <button
-            type="button"
-            aria-pressed={dense}
-            onClick={() => setDense((v) => !v)}
-            title="Compact density"
-            className={`${button} ${dense ? "bg-inset" : ""}`}
-          >
-            ≡
-          </button>
+          </div>
         </div>
 
         {chosen.length > 0 && (
@@ -374,32 +404,16 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
             <button
               type="button"
               className={button}
-              onClick={() => download("candidates.csv", candidatesToCsv(chosen, props.size ? propsOf : undefined), "text/csv")}
+              onClick={() => onAsk(cofoldPrompt(chosen))}
+              title={`Ask the agent to cofold ${chosen.length > MAX_COFOLD ? `the first ${MAX_COFOLD}` : "them"}`}
             >
-              ⇩ CSV
+              Cofold{chosen.length > MAX_COFOLD ? ` first ${MAX_COFOLD}` : ""}
             </button>
-            <button
-              type="button"
-              className={button}
-              onClick={exportSdf}
-              disabled={!rdkit}
-              title={rdkit ? "2D molblocks from RDKit, with scores and descriptors as SD fields" : "RDKit is loading"}
-            >
-              ⇩ SDF
+            <button type="button" className={button} onClick={() => onAsk(admetPrompt(chosen))} title="Ask the agent for their ADMET properties">
+              ADMET
             </button>
             <button type="button" className={button} onClick={copySmiles}>
               {copied ? "Copied" : "Copy SMILES"}
-            </button>
-            <button
-              type="button"
-              className={button}
-              onClick={() => onAsk(cofoldPrompt(chosen))}
-              title={chosen.length > MAX_COFOLD ? `Only the first ${MAX_COFOLD} are cofolded` : undefined}
-            >
-              Ask the agent to cofold{chosen.length > MAX_COFOLD ? ` first ${MAX_COFOLD}` : ""}
-            </button>
-            <button type="button" className={button} onClick={() => onAsk(admetPrompt(chosen))}>
-              Ask for ADMET
             </button>
             <button type="button" className="text-muted hover:text-body ml-auto cursor-pointer" onClick={() => setSelected(new Set())}>
               Clear
@@ -409,7 +423,6 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
 
         <p className="text-faint px-3 pt-1.5 text-[11px]">
           Showing {filtered.length} of {candidates.length}
-          {chosen.length ? ` · ${chosen.length} selected` : ""}
         </p>
 
         <div className="min-h-0 flex-1 overflow-auto">
@@ -501,6 +514,53 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
             ttp={ttp.ttp}
             ttpId={ttp.id}
           />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A quiet "⋯" button opening a menu, closed by a click outside or Escape. */
+function Menu({ title, children }: { title: string; children: (close: () => void) => ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (!(event.target instanceof Node) || !rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={title}
+        title={title}
+        onClick={() => setOpen((v) => !v)}
+        className={`hover:text-body hover:bg-sunken grid size-7 cursor-pointer place-items-center rounded-md ${open ? "bg-inset text-body" : "text-muted"}`}
+      >
+        <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" aria-hidden="true">
+          <circle cx="5" cy="12" r="1.6" />
+          <circle cx="12" cy="12" r="1.6" />
+          <circle cx="19" cy="12" r="1.6" />
+        </svg>
+      </button>
+      {open && (
+        <div role="menu" className="bg-raised border-subtle shadow-card absolute right-0 z-20 mt-1 max-h-80 w-52 overflow-y-auto rounded-lg border p-1 text-[11px]">
+          {children(() => setOpen(false))}
         </div>
       )}
     </div>

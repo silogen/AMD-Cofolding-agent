@@ -57,8 +57,9 @@ class FakeAgent:
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
-        self.backend.history.append({"role": "assistant", "content": f"answer to {content}"})
-        return f"answer to {content}"
+        answer = f"## Scored {content.split()[-1]}\n\nbody" if "heading" in content else f"answer to {content}"
+        self.backend.history.append({"role": "assistant", "content": answer})
+        return answer
 
 
 @pytest.fixture
@@ -285,6 +286,23 @@ def test_an_unknown_session_starts_a_new_one_and_says_so(agents):
             session = receive_until(ws, "session")
             assert session["id"] != "s-20260101-000000-abcdef"
             assert "no longer exists" in receive_until(ws, "notice")["message"]
+
+
+def test_the_first_answer_heading_names_the_session(agents):
+    """A raw SMILES tells the user nothing; the answer's own heading does."""
+    with TestClient(server.create_app()) as client:
+        with client.websocket_connect("/api/chat") as ws:
+            session_id = receive_until(ws, "session")["id"]
+            ws.send_json({"type": "user_message", "content": "quick heading c1ccccc1"})
+            receive_until(ws, "assistant_message")
+        assert client.get("/api/sessions").json()[0]["title"] == "Scored c1ccccc1"
+
+        client.patch(f"/api/sessions/{session_id}", json={"title": "My run"})
+        with client.websocket_connect(f"/api/chat?session={session_id}") as ws:
+            receive_until(ws, "session")
+            ws.send_json({"type": "user_message", "content": "quick heading CCO"})
+            receive_until(ws, "assistant_message")
+        assert client.get("/api/sessions").json()[0]["title"] == "My run"
 
 
 def test_sessions_can_be_renamed_and_deleted(agents):

@@ -144,3 +144,11 @@ export function shortlistPrompt(entries: readonly ShortlistEntry[]): string {
   const n = entries.length;
   return `Cofold ${n === 1 ? "this molecule" : `these ${n} molecules`} against the target and compare their poses and affinities:\n${entries.map((e) => e.smiles).join("\n")}`;
 }
+
+export function admetPrompt(entries: readonly ShortlistEntry[]): string {
+  const n = entries.length;
+  return `Predict ADMET for ${n === 1 ? "this molecule" : `these ${n} molecules`}: ${entries.map((e) => e.smiles).join(", ")}`;
+}
+
+/** The starred SMILES as Mol2Mol seeds, one per line. */
+export const shortlistSeeds = (entries: readonly ShortlistEntry[]) => entries.map((e) => e.smiles).join("\n");

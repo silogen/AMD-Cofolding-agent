@@ -7,12 +7,16 @@ import {
   RUN_KEY,
   loadRunSettings,
   modelLabel,
+  mol2molChoices,
   parseMol2MolModels,
+  rememberRun,
   runCost,
   runProblems,
+  runRequest,
   saveRunSettings,
   seedList,
   ttpRequest,
+  withOfferedModel,
 } from "./ttpRun";
 
 const memory = () => {
@@ -47,6 +51,28 @@ describe("run settings", () => {
       'Run REINVENT on the TTP "Solubility" (sol): Mol2Mol medium similarity (.m2m_medium) from CCO c1ccccc1 CCN, 300 steps, batch size 16.',
     );
     expect(seedList("  ")).toEqual([]);
+  });
+
+  it("asks for a run on a stored TTP whatever the builder switch says", () => {
+    const ttp = { id: "sol", name: "Solubility" };
+    expect(runRequest(ttp, DEFAULT_RUN)).toBe(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true }));
+    expect(runRequest(ttp, { ...DEFAULT_RUN, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" })).toBe(
+      'Run REINVENT on the TTP "Solubility" (sol): Mol2Mol high similarity (.m2m_high) from CCO, 300 steps, batch size 16.',
+    );
+  });
+
+  it("remembers edits from elsewhere without flipping the builder switch", () => {
+    const store = memory();
+    saveRunSettings({ ...DEFAULT_RUN, enabled: true }, store);
+    rememberRun({ enabled: false, maxSteps: 50 }, store);
+    expect(loadRunSettings(store)).toEqual({ ...DEFAULT_RUN, enabled: true, maxSteps: 50 });
+  });
+
+  it("offers installed Mol2Mol priors, else the default", () => {
+    expect(mol2molChoices([{ key: ".m2m_high", label: "h", available: false }]).map((m) => m.key)).toEqual([".m2m_medium"]);
+    const choices = mol2molChoices([{ key: ".m2m_high", label: "h", available: true }]);
+    expect(withOfferedModel(DEFAULT_RUN, choices).model).toBe(".m2m_high");
+    expect(withOfferedModel({ ...DEFAULT_RUN, model: ".m2m_high" }, choices).model).toBe(".m2m_high");
   });
 
   it("counts molecules and cofolds", () => {

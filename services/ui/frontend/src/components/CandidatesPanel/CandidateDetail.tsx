@@ -120,7 +120,7 @@ export function CandidateDetail({ candidate: c, props: p, theme, onClose, onOpen
 
       <section className="flex flex-col gap-1.5">
         <h4 className="text-muted text-[11px] font-semibold tracking-wide uppercase">Score components</h4>
-        {c.score === undefined && components.length === 0 && <p className="text-faint">No scores reported.</p>}
+        {c.score === undefined && components.length === 0 && <p className="text-faint">Not scored against a TTP.</p>}
         {c.score !== undefined && (
           <div className="flex items-center justify-between gap-2 font-semibold">
             <span>Total score</span>

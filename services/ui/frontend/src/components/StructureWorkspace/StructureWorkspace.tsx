@@ -553,9 +553,8 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           </select>
         )}
         {kind && (
-          <span className="flex shrink-0 items-center gap-1 text-[10px] whitespace-nowrap" title={STRUCTURE_KINDS[kind].hint}>
-            <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: STRUCTURE_KINDS[kind].color }} />
-            <span className="text-muted">{STRUCTURE_KINDS[kind].label}</span>
+          <span className="bg-inset text-muted shrink-0 rounded-full px-1.5 py-px text-[10px] whitespace-nowrap" title={STRUCTURE_KINDS[kind].hint}>
+            {STRUCTURE_KINDS[kind].label}
           </span>
         )}
         {!pdbForm && (

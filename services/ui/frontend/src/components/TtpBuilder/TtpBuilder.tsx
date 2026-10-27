@@ -38,20 +38,18 @@ import {
   type TtpForm,
 } from "../../lib/ttp";
 import {
-  DEFAULT_RUN,
-  MAX_BATCH,
-  MAX_STEPS,
   loadRunSettings,
-  modelLabel,
+  mol2molChoices,
   parseMol2MolModels,
-  runCost,
   runProblems,
   saveRunSettings,
   ttpRequest,
+  withOfferedModel,
   type PriorModel,
   type RunSettings,
 } from "../../lib/ttpRun";
 import { ObjectiveCard } from "../TtpPanel/ObjectiveCard";
+import { RunFields } from "./RunFields";
 
 export interface CreatedTtp {
   id: string;
@@ -87,7 +85,6 @@ type Submit =
 
 const ORGANISMS = ["human", "mouse", "rat", ""];
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-const int = (n: number) => n.toLocaleString("en");
 
 let nextKey = 1;
 const rows = (objectives: Objective[]): Row[] => objectives.map((objective) => ({ key: nextKey++, objective }));
@@ -158,10 +155,8 @@ export function TtpBuilder({ onClose, onCreated, initial }: Props) {
   const boltzMissing = catalog.loaded && Object.keys(catalog.services).length > 0 && !catalog.services.boltz;
   const weights = weightRangeOf(form.objectives);
   const total = form.objectives.reduce((sum, o) => sum + Math.max(0, o.weight), 0) || 1;
-  const installed = catalog.models.filter((m) => m.available);
-  const mol2mol = installed.length ? installed : [{ key: DEFAULT_RUN.model, label: modelLabel(DEFAULT_RUN.model), available: true }];
-  const effective: RunSettings = { ...run, model: mol2mol.some((m) => m.key === run.model) ? run.model : mol2mol[0].key };
-  const cost = runCost(run, cofold);
+  const mol2mol = mol2molChoices(catalog.models);
+  const effective = withOfferedModel(run, mol2mol);
   const busy = submit.state === "busy";
 
   const setList = (list: Objective[]) => setObjectives((previous) => list.map((objective, i) => ({ key: previous[i]?.key ?? nextKey++, objective })));
@@ -433,79 +428,7 @@ export function TtpBuilder({ onClose, onCreated, initial }: Props) {
                 </div>
                 <Switch on={run.enabled} label="Run REINVENT" onChange={(enabled) => updateRun({ enabled })} />
               </div>
-              {run.enabled && (
-                <>
-              <div className="flex flex-wrap items-end gap-3">
-                <Labelled label="Steps">
-                  <input
-                    type="number"
-                    min={1}
-                    max={MAX_STEPS}
-                    step={50}
-                    value={run.maxSteps}
-                    onChange={(event) => updateRun({ maxSteps: Math.round(Number(event.target.value)) })}
-                    className={`${INPUT} w-20 font-mono tabular-nums`}
-                  />
-                </Labelled>
-                <Labelled label="Batch size">
-                  <input
-                    type="number"
-                    min={1}
-                    max={MAX_BATCH}
-                    step={8}
-                    value={run.batchSize}
-                    onChange={(event) => updateRun({ batchSize: Math.round(Number(event.target.value)) })}
-                    className={`${INPUT} w-20 font-mono tabular-nums`}
-                  />
-                </Labelled>
-                <p className="text-faint pb-1 text-[11px]">
-                  = {int(cost.molecules)} molecules{cofold ? `, each cofolded` : ""}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted text-[11px]">Prior</span>
-                <div role="radiogroup" aria-label="Prior" className="bg-sunken border-subtle inline-flex rounded-md border p-0.5">
-                  {(
-                    [
-                      ["reinvent", "Reinvent · de novo"],
-                      ["mol2mol", "Mol2Mol · from seeds"],
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      role="radio"
-                      aria-checked={run.prior === value}
-                      onClick={() => updateRun({ prior: value })}
-                      className={`cursor-pointer rounded px-2 py-0.5 text-[11px] ${run.prior === value ? "bg-raised text-body shadow-card font-medium" : "text-muted hover:text-body"}`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {run.prior === "mol2mol" && mol2mol.length > 1 && (
-                  <select value={effective.model} onChange={(event) => updateRun({ model: event.target.value })} aria-label="Mol2Mol prior" className={INPUT}>
-                    {mol2mol.map((m) => (
-                      <option key={m.key} value={m.key}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-              {run.prior === "mol2mol" && (
-                <textarea
-                  value={run.seeds}
-                  onChange={(event) => updateRun({ seeds: event.target.value })}
-                  rows={2}
-                  spellCheck={false}
-                  aria-label="Seed SMILES"
-                  placeholder="Seed SMILES, one per line: the molecules Mol2Mol starts from"
-                  className={`${BLOCK} resize-y font-mono text-[10px]`}
-                />
-              )}
-                </>
-              )}
+              {run.enabled && <RunFields run={run} models={mol2mol} cofold={cofold} onChange={updateRun} />}
             </section>
 
             <div>

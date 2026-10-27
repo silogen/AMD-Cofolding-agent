@@ -45,6 +45,7 @@ import { focusRun, notifyRunsChanged, openRun, useFocusedRun } from "../../lib/w
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { SmilesText } from "../MolDepiction/SmilesText";
+import { ScoreTrend } from "../RunBar/ScoreTrend";
 import { StarButton } from "../Shortlist/StarButton";
 import { Badge } from "./Badge";
 import { ContinueRun } from "./ContinueRun";
@@ -286,6 +287,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
               <span className="truncate">{jobTitle(job)}</span>
               <Badge tone={stateTone(job.state)}>{job.state}</Badge>
               {diagnostics?.convergence && <Badge tone={convergenceTone(diagnostics.convergence)}>{diagnostics.convergence}</Badge>}
+              <ScoreTrend status={s} width={72} className="hidden @md:block" />
             </h2>
             <p className="text-faint mt-0.5 truncate font-mono text-[10px]">
               {job.id} · {typeLabel(job.type)} · {job.model ?? "default model"}

@@ -69,6 +69,12 @@ export function saveRunSettings(settings: RunSettings, storage: KeyValueStore | 
   }
 }
 
+/** Keep edits made outside the builder, leaving the builder's "Run REINVENT" switch as it was. */
+export function rememberRun(patch: Partial<RunSettings>, storage: KeyValueStore | null = browserStorage()): void {
+  const stored = loadRunSettings(storage);
+  saveRunSettings({ ...stored, ...patch, enabled: stored.enabled }, storage);
+}
+
 /** Seed SMILES from free text: one per line, or separated by spaces or commas. */
 export const seedList = (text: string) => text.split(/[\s,]+/).filter(Boolean);
 
@@ -89,6 +95,20 @@ export function ttpRequest(ttp: { id: string; name: string }, settings: RunSetti
   const model = runModel(settings);
   const from = settings.prior === "mol2mol" ? ` from ${seedList(settings.seeds).join(" ")}` : "";
   return `Run REINVENT on the TTP "${ttp.name}" (${ttp.id}): ${modelLabel(model)} (${model})${from}, ${settings.maxSteps} steps, batch size ${settings.batchSize}.`;
+}
+
+/** The composer text asking for a run on a stored TTP. */
+export const runRequest = (ttp: { id: string; name: string }, settings: RunSettings) => ttpRequest(ttp, { ...settings, enabled: true });
+
+/** The Mol2Mol priors to offer: the installed ones, else the default so the picker is never empty. */
+export function mol2molChoices(models: readonly PriorModel[]): PriorModel[] {
+  const installed = models.filter((m) => m.available);
+  return installed.length ? installed : [{ key: DEFAULT_RUN.model, label: modelLabel(DEFAULT_RUN.model), available: true }];
+}
+
+/** The settings with a Mol2Mol prior that is on offer. */
+export function withOfferedModel(settings: RunSettings, choices: readonly PriorModel[]): RunSettings {
+  return choices.some((m) => m.key === settings.model) || !choices.length ? settings : { ...settings, model: choices[0].key };
 }
 
 /** Molecules a run generates and scores, and how many of them Boltz-2 cofolds. */
