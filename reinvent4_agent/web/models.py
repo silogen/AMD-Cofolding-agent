@@ -105,6 +105,20 @@ def key_for_served_id(served_id: str | None) -> str | None:
     return next((spec.key for spec in CATALOGUE if spec.served_id.lower() == wanted), None)
 
 
+def _beside_the_logs() -> str | None:
+    """The conventional control directory, for a gateway started without the variable.
+
+    The agent's log directory is one of the few paths a containerised gateway
+    and the supervisor outside it are guaranteed to share, so a supervisor may
+    put the control files in ``model-control`` there and be found.
+    """
+    logs = os.environ.get("REINVENT4_AGENT_LOG_DIR")
+    if not logs:
+        return None
+    candidate = Path(logs).expanduser() / "model-control"
+    return str(candidate) if candidate.is_dir() else None
+
+
 class ModelControl:
     """Reads and writes the control directory; answers which model is live.
 
@@ -117,6 +131,11 @@ class ModelControl:
     def __init__(self, directory: str | None = None, fallback_model: str | None = None) -> None:
         raw = directory if directory is not None else os.environ.get(CONTROL_DIR_ENV)
         self.directory = Path(raw).expanduser() if raw else None
+        if self.directory is None or not self.directory.is_dir():
+            # A host path inherited by a container names a directory that is not
+            # mounted there, so the conventional place wins over an unusable name.
+            beside = _beside_the_logs()
+            self.directory = Path(beside) if beside else self.directory
         #: What the endpoint serves when no supervisor says otherwise: the
         #: model ``dd-agent`` itself was configured with.
         self.fallback_model = fallback_model

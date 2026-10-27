@@ -186,6 +186,12 @@ for row in "${INSTANCES[@]}"; do
         opts+=($(gpu_env_flag "${BOLTZ_GPU}"))
     fi
 
+    # Reusing a healthy instance lets the gateway be restarted with new settings
+    # without taking the scoring services (and Boltz's model load) down with it.
+    if [ "${DRY_RUN}" -eq 0 ] && "${APPTAINER}" instance list 2>/dev/null | grep -qE "^dd_${name}\b"; then
+        echo "  reusing running instance dd_${name}"
+        continue
+    fi
     run "${APPTAINER}" instance start "${opts[@]}" "${sif_path}" "dd_${name}"
     STARTED+=("${name}")
 done
@@ -227,6 +233,10 @@ AGENT_BINDS=(
     --bind "${DATA_DIR}/tb_logs:/data/reinvent4_mcp/tb_logs"
     --bind "${DATA_DIR}/agent_logs:/logs"
 )
+# The model supervisor hands the gateway the running model through this directory.
+if [ -n "${REINVENT4_WEB_MODEL_CONTROL:-}" ]; then
+    AGENT_BINDS+=(--bind "${REINVENT4_WEB_MODEL_CONTROL}:${REINVENT4_WEB_MODEL_CONTROL}")
+fi
 # DEV_SOURCE=1 runs the agent and MCP server from this checkout instead of the
 # copies baked into the image, so Python edits need a restart, not a rebuild.
 # Dependency changes (pyproject.toml) still need build.sh.
@@ -254,7 +264,8 @@ for _v in LLM_GATEWAY_KEY REINVENT4_AGENT_API_KEY \
           REINVENT4_AGENT_BACKEND REINVENT4_AGENT_MODEL REINVENT4_AGENT_BASE_URL \
           REINVENT4_AGENT_API_VERSION REINVENT4_AGENT_NO_VERIFY_SSL \
           REINVENT4_AGENT_THINKING_BUDGET REINVENT4_AGENT_REASONING_EFFORT \
-          REINVENT4_AGENT_MULTI_AGENT REINVENT4_AGENT_LOG_TIMESTAMPS; do
+          REINVENT4_AGENT_MULTI_AGENT REINVENT4_AGENT_LOG_TIMESTAMPS \
+          REINVENT4_WEB_MODEL_CONTROL; do
     [ -n "${!_v:-}" ] && AGENT_ENV+=(--env "${_v}=${!_v}")
 done
 
