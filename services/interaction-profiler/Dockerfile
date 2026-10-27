@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 USER $MAMBA_USER
 
 RUN micromamba install -y -n base -c conda-forge \
-        python=3.11 rdkit openmm pdbfixer mdanalysis numpy scipy pandas \
+        python=3.11 rdkit openmm pdbfixer mdanalysis=2.11.0 numpy scipy pandas \
     && micromamba clean --all --yes
 
 WORKDIR /app

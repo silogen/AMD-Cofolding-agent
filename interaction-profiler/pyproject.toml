@@ -31,7 +31,7 @@ classifiers = [
 ]
 dependencies = [
     "rdkit>=2023.03",
-    "MDAnalysis>=2.6",
+    "MDAnalysis>=2.8",
     "accfg>=0.0.9",
     "dimorphite-dl>=2.0",
     "pydantic>=2.0",
