@@ -4,7 +4,7 @@
 import { parseResult } from "./ttp";
 
 /**
- * The REINVENT run a new TTP can start right away (run_optimization in
+ * The REINVENT run the chat can ask for on a new TTP (run_optimization in
  * reinvent4_mcp/server.py): the prior, how many RL steps and how many
  * molecules per step. The last settings used are kept in localStorage.
  */
@@ -12,6 +12,8 @@ import { parseResult } from "./ttp";
 export type Prior = "reinvent" | "mol2mol";
 
 export interface RunSettings {
+  /** Whether the chat text asks the agent to start a run on the new TTP. */
+  enabled: boolean;
   maxSteps: number;
   batchSize: number;
   prior: Prior;
@@ -22,7 +24,7 @@ export interface RunSettings {
 }
 
 /** run_optimization's defaults and the server config's batch_size (reinvent4_mcp_config.yaml). */
-export const DEFAULT_RUN: RunSettings = { maxSteps: 300, batchSize: 16, prior: "reinvent", model: ".m2m_medium", seeds: "" };
+export const DEFAULT_RUN: RunSettings = { enabled: false, maxSteps: 300, batchSize: 16, prior: "reinvent", model: ".m2m_medium", seeds: "" };
 
 export const MAX_STEPS = 5000;
 export const MAX_BATCH = 512;
@@ -47,6 +49,7 @@ export function loadRunSettings(storage: KeyValueStore | null = browserStorage()
     const value = JSON.parse(storage?.getItem(RUN_KEY) ?? "null") as Partial<RunSettings> | null;
     if (!value || typeof value !== "object") return DEFAULT_RUN;
     return {
+      enabled: value.enabled === true,
       maxSteps: whole(value.maxSteps, DEFAULT_RUN.maxSteps, MAX_STEPS),
       batchSize: whole(value.batchSize, DEFAULT_RUN.batchSize, MAX_BATCH),
       prior: value.prior === "mol2mol" ? "mol2mol" : "reinvent",
@@ -80,11 +83,12 @@ export function runProblems(settings: RunSettings): string[] {
 
 export const runModel = (settings: RunSettings) => (settings.prior === "mol2mol" ? settings.model : ".reinvent");
 
-/** The run_optimization arguments that start a run on a stored TTP. */
-export function runArguments(ttpId: string, settings: RunSettings): Record<string, unknown> {
-  const args: Record<string, unknown> = { ttp_id: ttpId, model: runModel(settings), max_steps: settings.maxSteps, batch_size: settings.batchSize };
-  if (settings.prior === "mol2mol") args.seed_smiles = seedList(settings.seeds);
-  return args;
+/** What the composer gets after a TTP is created: use it, or also start a run on it with these settings. */
+export function ttpRequest(ttp: { id: string; name: string }, settings: RunSettings): string {
+  if (!settings.enabled) return `Use the TTP "${ttp.name}" (${ttp.id})`;
+  const model = runModel(settings);
+  const from = settings.prior === "mol2mol" ? ` from ${seedList(settings.seeds).join(" ")}` : "";
+  return `Run REINVENT on the TTP "${ttp.name}" (${ttp.id}): ${modelLabel(model)} (${model})${from}, ${settings.maxSteps} steps, batch size ${settings.batchSize}.`;
 }
 
 /** Molecules a run generates and scores, and how many of them Boltz-2 cofolds. */
@@ -119,13 +123,3 @@ export function parseMol2MolModels(value: unknown): PriorModel[] {
     .sort((a, b) => Number(b.available) - Number(a.available));
 }
 
-/** The job a run_optimization call started, or its error. */
-export function startedRun(value: unknown): { jobId: string } | { error: string } {
-  const parsed = parseResult(value);
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.error === "string") return { error: record.error };
-    if (typeof record.job_id === "string" && record.job_id) return { jobId: record.job_id };
-  }
-  return { error: typeof value === "string" && value.trim() ? value.trim() : "run_optimization gave no job id." };
-}

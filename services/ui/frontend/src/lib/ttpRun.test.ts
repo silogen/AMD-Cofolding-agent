@@ -8,12 +8,11 @@ import {
   loadRunSettings,
   modelLabel,
   parseMol2MolModels,
-  runArguments,
   runCost,
   runProblems,
   saveRunSettings,
   seedList,
-  startedRun,
+  ttpRequest,
 } from "./ttpRun";
 
 const memory = () => {
@@ -25,8 +24,8 @@ describe("run settings", () => {
   it("remembers the last settings and drops bad values", () => {
     const store = memory();
     expect(loadRunSettings(store)).toEqual(DEFAULT_RUN);
-    saveRunSettings({ maxSteps: 100, batchSize: 32, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" }, store);
-    expect(loadRunSettings(store)).toEqual({ maxSteps: 100, batchSize: 32, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" });
+    saveRunSettings({ enabled: true, maxSteps: 100, batchSize: 32, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" }, store);
+    expect(loadRunSettings(store)).toEqual({ enabled: true, maxSteps: 100, batchSize: 32, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" });
     store.setItem(RUN_KEY, JSON.stringify({ maxSteps: -3, batchSize: 1.5, prior: "x", model: "/etc/passwd" }));
     expect(loadRunSettings(store)).toEqual(DEFAULT_RUN);
     store.setItem(RUN_KEY, "{oops");
@@ -40,15 +39,13 @@ describe("run settings", () => {
     expect(runProblems({ ...DEFAULT_RUN, prior: "mol2mol" })[0]).toMatch(/seed/);
   });
 
-  it("builds run_optimization arguments for each prior", () => {
-    expect(runArguments("t", DEFAULT_RUN)).toEqual({ ttp_id: "t", model: ".reinvent", max_steps: 300, batch_size: 16 });
-    expect(runArguments("t", { ...DEFAULT_RUN, prior: "mol2mol", seeds: "CCO\n c1ccccc1 ,CCN" })).toEqual({
-      ttp_id: "t",
-      model: ".m2m_medium",
-      max_steps: 300,
-      batch_size: 16,
-      seed_smiles: ["CCO", "c1ccccc1", "CCN"],
-    });
+  it("writes the chat request, with the run only when asked", () => {
+    const ttp = { id: "sol", name: "Solubility" };
+    expect(ttpRequest(ttp, DEFAULT_RUN)).toBe('Use the TTP "Solubility" (sol)');
+    expect(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true })).toBe('Run REINVENT on the TTP "Solubility" (sol): Reinvent (de novo) (.reinvent), 300 steps, batch size 16.');
+    expect(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true, prior: "mol2mol", seeds: "CCO\n c1ccccc1 ,CCN" })).toBe(
+      'Run REINVENT on the TTP "Solubility" (sol): Mol2Mol medium similarity (.m2m_medium) from CCO c1ccccc1 CCN, 300 steps, batch size 16.',
+    );
     expect(seedList("  ")).toEqual([]);
   });
 
@@ -77,11 +74,5 @@ describe("models and results", () => {
       [".m2m_high", false],
     ]);
     expect(parseMol2MolModels("nope")).toEqual([]);
-  });
-
-  it("reads the started job or the error", () => {
-    expect(startedRun({ job_id: "3814ad67", status: "running" })).toEqual({ jobId: "3814ad67" });
-    expect(startedRun(JSON.stringify({ error: "Mol2Mol models require 'seed_smiles'" }))).toEqual({ error: "Mol2Mol models require 'seed_smiles'" });
-    expect(startedRun("Tool failed")).toEqual({ error: "Tool failed" });
   });
 });

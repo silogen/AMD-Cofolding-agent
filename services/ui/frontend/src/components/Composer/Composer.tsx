@@ -14,7 +14,6 @@ import { ACCEPTED_FILES, fileKind, moleculesFromFile } from "../../lib/dropFiles
 import { uploadedStructure, uploadFile } from "../../lib/uploads";
 import { addUserStructure } from "../../lib/userStructures";
 import { sendToViewer } from "../../lib/viewerBus";
-import { notifyRunsChanged, openRun } from "../../lib/workbenchBus";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 
 const Sketcher = lazy(() => import("../Sketcher/Sketcher").then((module) => ({ default: module.Sketcher })));
@@ -543,15 +542,9 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
           <Suspense fallback={null}>
             <TtpBuilder
               onClose={() => setTtpOpen(false)}
-              onCreated={(ttp) => {
+              onCreated={(_, request) => {
                 setTtpOpen(false);
-                insert(`Use the TTP "${ttp.name}" (${ttp.id})`, true);
-              }}
-              onStarted={(ttp, jobId) => {
-                setTtpOpen(false);
-                insert(`I started REINVENT job ${jobId} on the TTP "${ttp.name}" (${ttp.id}).`, true);
-                notifyRunsChanged();
-                openRun(jobId, "jobs");
+                insert(request, true);
               }}
             />
           </Suspense>,

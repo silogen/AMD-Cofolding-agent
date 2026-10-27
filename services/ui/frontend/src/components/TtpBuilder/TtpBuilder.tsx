@@ -44,13 +44,10 @@ import {
   loadRunSettings,
   modelLabel,
   parseMol2MolModels,
-  runArguments,
   runCost,
-  runModel,
   runProblems,
   saveRunSettings,
-  seedList,
-  startedRun,
+  ttpRequest,
   type PriorModel,
   type RunSettings,
 } from "../../lib/ttpRun";
@@ -63,12 +60,10 @@ export interface CreatedTtp {
 
 interface Props {
   onClose: () => void;
-  /** Called once create_ttp has stored the profile. */
-  onCreated: (ttp: CreatedTtp) => void;
+  /** Called once create_ttp has stored the profile, with the text for the chat: use it, or run REINVENT on it. */
+  onCreated: (ttp: CreatedTtp, request: string) => void;
   /** Start from a copy of this stored TTP. */
   initial?: Ttp;
-  /** Called after "Create and run" started a job; without it, onCreated is called. */
-  onStarted?: (ttp: CreatedTtp, jobId: string) => void;
 }
 
 interface Row {
@@ -88,8 +83,7 @@ type Lookup = { state: "idle" } | { state: "busy" } | { state: "error"; message:
 type Submit =
   | { state: "idle" }
   | { state: "busy"; label: string }
-  | { state: "error"; message: string; forbidden: boolean }
-  | { state: "run-error"; message: string; created: CreatedTtp };
+  | { state: "error"; message: string; forbidden: boolean };
 
 const ORGANISMS = ["human", "mouse", "rat", ""];
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -98,8 +92,8 @@ const int = (n: number) => n.toLocaleString("en");
 let nextKey = 1;
 const rows = (objectives: Objective[]): Row[] => objectives.map((objective) => ({ key: nextKey++, objective }));
 
-/** A form to define a target product profile, and optionally start a run on it, without asking the agent. */
-export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
+/** A form to define a target product profile; the chat then gets the request to use it, or to run REINVENT on it. */
+export function TtpBuilder({ onClose, onCreated, initial }: Props) {
   const [start] = useState(() => (initial ? formFromTtp(initial) : null));
   const [catalog, setCatalog] = useState<Catalog>({ services: {}, components: [], ids: [], models: [], loaded: false });
   const [name, setName] = useState(start?.name ?? "");
@@ -117,7 +111,6 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
   const [submit, setSubmit] = useState<Submit>({ state: "idle" });
   const [copied, setCopied] = useState(false);
   const [run, setRun] = useState<RunSettings>(() => loadRunSettings());
-  const [confirming, setConfirming] = useState(false);
   const [options, setOptions] = useState(false);
 
   useEffect(() => {
@@ -158,7 +151,7 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
     constraints: start?.constraints,
   };
   const problems = formProblems(form, catalog.ids);
-  const runIssues = runProblems(run);
+  const runIssues = run.enabled ? runProblems(run) : [];
   const catalogue = useMemo(() => objectiveCatalogue(catalog.services, catalog.components), [catalog]);
   const residues = normaliseSequence(sequence);
   const cofold = hasCofolding(form.objectives);
@@ -240,39 +233,13 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
 
   const create = async () => {
     setAttempted(true);
-    if (problems.length) return;
+    if (problems.length || runIssues.length) return;
     setSubmit({ state: "busy", label: "Creating…" });
     try {
       const created = await createOnly();
-      if (created) onCreated(created);
+      if (created) onCreated(created, ttpRequest(created, effective));
     } catch (err) {
       failed(err);
-    }
-  };
-
-  const askToRun = () => {
-    setAttempted(true);
-    if (problems.length || runIssues.length) return;
-    setSubmit({ state: "idle" });
-    setConfirming(true);
-  };
-
-  const createAndRun = async () => {
-    const already = submit.state === "run-error" ? submit.created : null;
-    setSubmit({ state: "busy", label: already ? "Starting the run…" : "Creating…" });
-    let created = already;
-    try {
-      created ??= await createOnly();
-      if (!created) return;
-      setSubmit({ state: "busy", label: "Starting the run…" });
-      const response = await callTool("run_optimization", runArguments(created.id, effective));
-      const started = startedRun(response.result);
-      if ("error" in started) setSubmit({ state: "run-error", message: started.error, created });
-      else if (onStarted) onStarted(created, started.jobId);
-      else onCreated(created);
-    } catch (err) {
-      if (created) setSubmit({ state: "run-error", message: message(err), created });
-      else failed(err);
     }
   };
 
@@ -299,63 +266,14 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
       >
         <header className="border-subtle flex items-center gap-2 border-b px-4 py-2.5">
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold">{confirming ? "Start a REINVENT run?" : initial ? `Duplicate ${initial.name}` : "New target product profile"}</h2>
-            <p className="text-faint text-[11px]">
-              {confirming ? "Check what this will cost before it starts." : "What REINVENT optimises for: a target, the objectives and how much each counts."}
-            </p>
+            <h2 className="text-sm font-semibold">{initial ? `Duplicate ${initial.name}` : "New target product profile"}</h2>
+            <p className="text-faint text-[11px]">What REINVENT optimises for: a target, the objectives and how much each counts.</p>
           </div>
           <button type="button" onClick={onClose} aria-label="Close" className="text-faint hover:text-body cursor-pointer px-1 text-lg leading-none">
             ×
           </button>
         </header>
 
-        {confirming ? (
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
-            <dl className="bg-sunken border-subtle grid grid-cols-[6.5rem_1fr] gap-x-3 gap-y-2 rounded-lg border px-3 py-2.5 text-[11px]">
-              <dt className="text-muted">Profile</dt>
-              <dd>
-                <span className="font-semibold">{form.name.trim()}</span> <span className="text-faint font-mono">{form.id}</span>
-                <span className="text-faint"> · {submit.state === "run-error" ? "already created" : "created first"}</span>
-              </dd>
-              <dt className="text-muted">Prior</dt>
-              <dd>
-                {modelLabel(runModel(effective))}
-                {run.prior === "mol2mol" && <span className="text-faint"> · {seedList(run.seeds).length} seed SMILES</span>}
-              </dd>
-              <dt className="text-muted">Size</dt>
-              <dd>
-                <span className="font-mono tabular-nums">
-                  {int(run.maxSteps)} steps × {int(run.batchSize)}
-                </span>{" "}
-                = <span className="font-semibold">{int(cost.molecules)} molecules</span> generated and scored
-              </dd>
-              <dt className="text-muted">Cofolding</dt>
-              <dd>
-                {cofold ? (
-                  <>
-                    <span className="font-semibold" style={{ color: "var(--color-warn)" }}>
-                      On
-                    </span>{" "}
-                    — up to {int(cost.cofolds)} Boltz-2 cofolds plus PoseBusters checks. This is the slow, GPU-heavy part.
-                  </>
-                ) : (
-                  <>
-                    <span className="font-semibold">Off</span> — fast ligand-only scoring.
-                  </>
-                )}
-              </dd>
-              <dt className="text-muted">Objectives</dt>
-              <dd>
-                {form.objectives.length} · {aggregation === "geometric_mean" ? "geometric mean" : "arithmetic mean"}
-              </dd>
-            </dl>
-            <p className="text-muted text-[11px]">The run starts on LUMI right away and shows up under Jobs. You can stop it from there.</p>
-            {submit.state === "run-error" && (
-              <Alert title={`"${submit.created.name}" was created, but the run did not start.`} detail={submit.message} />
-            )}
-            {submit.state === "error" && <Alert title="The server did not accept the profile." detail={submit.message} />}
-          </div>
-        ) : (
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
             <Labelled label="Name" hint={form.id ? `id ${form.id}` : undefined}>
               <input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. BRD4 cofolding lead optimisation" autoFocus className={BLOCK} />
@@ -505,7 +423,18 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
               {!catalog.loaded && <span className="text-faint ml-2">Loading the services…</span>}
             </Section>
 
-            <Section title="Run" hint="remembered for next time">
+            <section className="border-subtle space-y-2.5 rounded-lg border px-3 py-2.5">
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold">Run REINVENT</p>
+                  <p className="text-faint text-[11px] leading-snug">
+                    {run.enabled ? "The chat gets a request to start a run with these settings." : "Off: the chat just gets the TTP to use."}
+                  </p>
+                </div>
+                <Switch on={run.enabled} label="Run REINVENT" onChange={(enabled) => updateRun({ enabled })} />
+              </div>
+              {run.enabled && (
+                <>
               <div className="flex flex-wrap items-end gap-3">
                 <Labelled label="Steps">
                   <input
@@ -575,7 +504,9 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
                   className={`${BLOCK} resize-y font-mono text-[10px]`}
                 />
               )}
-            </Section>
+                </>
+              )}
+            </section>
 
             <div>
               <button type="button" onClick={() => setOptions((v) => !v)} aria-expanded={options} className="text-muted hover:text-body cursor-pointer text-[11px] font-medium">
@@ -612,9 +543,8 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
               )}
             </div>
           </div>
-        )}
 
-        {!confirming && submit.state === "error" && (
+        {submit.state === "error" && (
           <div className="mx-4 mb-2">
             {submit.forbidden ? (
               <Alert
@@ -628,18 +558,6 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
         )}
 
         <footer className="border-subtle flex flex-wrap items-center gap-2 border-t px-4 py-2.5">
-          {confirming ? (
-            <>
-              <span className="text-faint min-w-0 flex-1 text-[11px]">{busy ? submit.label : `${int(cost.molecules)} molecules${cofold ? ", cofolded" : ""}`}</span>
-              <button type="button" onClick={() => setConfirming(false)} disabled={busy} className={GHOST}>
-                Back
-              </button>
-              <button type="button" onClick={() => void createAndRun()} disabled={busy} className={PRIMARY} style={{ background: "var(--color-accent)" }}>
-                {busy ? submit.label : submit.state === "run-error" ? "Try starting the run again" : "Create and start run"}
-              </button>
-            </>
-          ) : (
-            <>
               <div className="min-w-0 flex-1 text-[11px]">
                 {shown.length > 0 ? (
                   <ul style={{ color: "var(--color-accent)" }}>
@@ -658,14 +576,16 @@ export function TtpBuilder({ onClose, onCreated, initial, onStarted }: Props) {
               <button type="button" onClick={onClose} className={GHOST}>
                 Cancel
               </button>
-              <button type="button" onClick={() => void create()} disabled={busy} title="Save the profile without starting a run" className={SECONDARY}>
-                {busy ? submit.label : "Create only"}
+              <button
+                type="button"
+                onClick={() => void create()}
+                disabled={busy}
+                title={run.enabled ? "Save the profile and put the run request in the chat" : "Save the profile and put it in the chat"}
+                className={PRIMARY}
+                style={{ background: "var(--color-accent)" }}
+              >
+                {busy ? submit.label : "Create TTP"}
               </button>
-              <button type="button" onClick={askToRun} disabled={busy} title="Create the profile and start a REINVENT run with the settings above" className={PRIMARY} style={{ background: "var(--color-accent)" }}>
-                Create and run…
-              </button>
-            </>
-          )}
         </footer>
       </div>
     </div>

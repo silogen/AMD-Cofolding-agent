@@ -43,7 +43,7 @@ import {
   type TtpSummary,
 } from "../../lib/ttp";
 import { modelLabel } from "../../lib/ttpRun";
-import { notifyRunsChanged, onRunsChanged, openRun } from "../../lib/workbenchBus";
+import { onRunsChanged, openRun } from "../../lib/workbenchBus";
 import { ObjectiveCard } from "./ObjectiveCard";
 import { TransformCurve } from "./TransformCurve";
 
@@ -208,11 +208,9 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
           <TtpBuilder
             initial={builder.initial}
             onClose={() => setBuilder(null)}
-            onCreated={(ttp) => afterCreate(ttp.id)}
-            onStarted={(ttp, jobId) => {
+            onCreated={(ttp, request) => {
               afterCreate(ttp.id);
-              notifyRunsChanged();
-              openRun(jobId, "jobs");
+              onAsk(request);
             }}
           />
         </Suspense>
