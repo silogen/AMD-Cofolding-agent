@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for the PoseBusters FastAPI wrapper service.
 
 Covers:

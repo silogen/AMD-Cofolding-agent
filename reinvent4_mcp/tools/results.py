@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Results tools: get_optimization_status, get_top_candidates, read_results.
 
 Provides monitoring and results extraction for agent-driven

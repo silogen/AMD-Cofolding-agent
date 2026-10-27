@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # Extends the REINVENT4 ROCm image with the MCP server + agent CLI.
 #
 # Build from the repo root:
@@ -106,10 +109,10 @@ ENV REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.yaml
 # copy under site-packages/reinvent4_mcp/_plugins is added by the code too.
 ENV PYTHONPATH=/app/reinvent4_mcp/_plugins:${PYTHONPATH}
 
-# AMD gateway defaults
+# Agent defaults. No endpoint is baked in: pass REINVENT4_AGENT_BASE_URL at
+# runtime (-e / compose) to target a gateway, or omit it for the SDK default.
 ENV REINVENT4_AGENT_BACKEND=anthropic
 ENV REINVENT4_AGENT_MODEL=claude-sonnet-4.6
-ENV REINVENT4_AGENT_BASE_URL=https://llm-api.amd.com/Anthropic
 ENV REINVENT4_AGENT_NO_VERIFY_SSL=true
 ENV REINVENT4_AGENT_THINKING_BUDGET=1024
 ENV REINVENT4_AGENT_LOG_DIR=/logs

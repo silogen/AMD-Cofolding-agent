@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Rank interactions by importance and cap to a maximum count.
 
 Priority follows approximate interaction energetics (rank 0 = kept

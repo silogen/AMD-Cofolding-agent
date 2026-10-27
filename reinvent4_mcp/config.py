@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Process configuration loading and validation.
 
 Loads the reinvent4_mcp_config.yaml that defines operational parameters

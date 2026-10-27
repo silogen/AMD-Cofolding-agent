@@ -1,8 +1,12 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "dd-mcp"
 version = "0.1.0"
 description = "MCP server for Drug Discovery de novo drug design"
 requires-python = ">=3.10"
+license = "MIT"
 dependencies = [
     # <2: mcp 2.0 renamed mcp.server.fastmcp.FastMCP to
     # mcp.server.mcpserver.MCPServer, which server.py does not use yet.
@@ -20,7 +24,8 @@ dependencies = [
 dd-mcp = "reinvent4_mcp.server:main"
 
 [build-system]
-requires = ["setuptools"]
+# >=77 understands the PEP 639 SPDX string form of `project.license`.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

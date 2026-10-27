@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Parse a batch of molecules from JSON or CSV.
 
 A batch is a list of items. Each item has at minimum a ``name``. It may

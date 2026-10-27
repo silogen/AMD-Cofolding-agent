@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for the receptor prep cache-target resolution (no OpenMM needed)."""
 
 from __future__ import annotations

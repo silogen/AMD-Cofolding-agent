@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # retrodmta-predictor — Apptainer/Singularity definition.
 #
 # CPU service, HTTP server. Vendor-neutral. Mirrors services/retrodmta-predictor/Dockerfile.

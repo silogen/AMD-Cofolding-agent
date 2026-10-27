@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Integration test: full pipeline on the bundled Boltz-2 example.
 
 Uses the single in-repo structure ``examples/1OIU_boltz.pdb`` (CDK2 +

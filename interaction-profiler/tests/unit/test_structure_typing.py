@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for residue-kind / backbone classification (RNA vs DNA)."""
 
 from __future__ import annotations

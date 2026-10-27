@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Optimization tools: run_optimization, stop_optimization.
 
 Implements the MCP tools for launching and controlling REINVENT4

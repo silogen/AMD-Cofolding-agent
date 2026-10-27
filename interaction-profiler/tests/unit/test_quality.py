@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for the quality improvements (cap, confidence, vocab, blacklist)."""
 
 from __future__ import annotations

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """ADMET inference REST service (single FastAPI app, boltz2/posebusters convention).
 
 Models (XGBoost + Chemprop-MTL), response-domain statistics, and the

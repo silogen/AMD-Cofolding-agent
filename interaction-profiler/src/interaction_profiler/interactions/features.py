@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Pharmacophore feature perception for ligand and receptor.
 
 Ligand features come from the prepared RDKit Mol (explicit Hs, correct

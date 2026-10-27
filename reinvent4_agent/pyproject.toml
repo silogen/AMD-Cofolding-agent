@@ -1,8 +1,12 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "dd-agent"
 version = "0.1.0"
 description = "Interactive CLI agent for Drug Discovery using LLM + MCP"
 requires-python = ">=3.10"
+license = "MIT"
 dependencies = [
     "anthropic>=0.50",
     "openai>=1.77",
@@ -18,7 +22,8 @@ dd-agent = "reinvent4_agent.cli:main"
 dd-coscientist = "reinvent4_agent.cli:coscientist_main"
 
 [build-system]
-requires = ["setuptools"]
+# >=77 understands the PEP 639 SPDX string form of `project.license`.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

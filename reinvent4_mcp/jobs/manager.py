@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Background job manager for REINVENT4 optimization runs.
 
 Tracks subprocess-based RL/TL jobs, provides status polling via CSV

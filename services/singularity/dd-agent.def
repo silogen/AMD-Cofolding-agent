@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # dd-agent (reinvent4-mcp) — Apptainer/Singularity definition.
 #
 # GPU service. Mirrors services/dd-agent/Dockerfile. No server port; this image
@@ -100,12 +103,12 @@ print('FINAL env OK; externalrestscorer registered; numpy', numpy.__version__, '
     export REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.singularity.yaml
     # Custom REINVENT4 plugins on the path (server + RL worker subprocess).
     export PYTHONPATH=/app/reinvent4_mcp/_plugins:${PYTHONPATH}
-    # AMD gateway defaults. Guarded with :- so host env (e.g. from env.local.sh,
-    # which Apptainer forwards by default) or run.sh --env values win — e.g. a
-    # tunnelled REINVENT4_AGENT_BASE_URL with a :PORT is NOT clobbered.
+    # Agent defaults. Guarded with :- so host env (e.g. from env.local.sh,
+    # which Apptainer forwards by default) or run.sh --env values win.
+    # No endpoint is baked in: set REINVENT4_AGENT_BASE_URL for your own.
     export REINVENT4_AGENT_BACKEND="${REINVENT4_AGENT_BACKEND:-anthropic}"
     export REINVENT4_AGENT_MODEL="${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}"
-    export REINVENT4_AGENT_BASE_URL="${REINVENT4_AGENT_BASE_URL:-https://llm-api.amd.com/Anthropic}"
+    export REINVENT4_AGENT_BASE_URL="${REINVENT4_AGENT_BASE_URL:-}"
     export REINVENT4_AGENT_NO_VERIFY_SSL="${REINVENT4_AGENT_NO_VERIFY_SSL:-true}"
     export REINVENT4_AGENT_THINKING_BUDGET="${REINVENT4_AGENT_THINKING_BUDGET:-1024}"
     export REINVENT4_AGENT_LOG_DIR="${REINVENT4_AGENT_LOG_DIR:-/logs}"

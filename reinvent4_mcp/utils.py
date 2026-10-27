@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Utility helpers: device detection, temp directories, REINVENT4 path discovery."""
 
 from __future__ import annotations

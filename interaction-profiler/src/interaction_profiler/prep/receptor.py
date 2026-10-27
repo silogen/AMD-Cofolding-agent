@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Receptor preparation via PDBFixer.
 
 Adds missing heavy atoms within existing residues and explicit hydrogens

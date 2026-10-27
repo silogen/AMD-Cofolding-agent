@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 volumes:
   boltz_cache:
 
@@ -41,13 +44,14 @@ services:
       - ${DATA_DIR:-./data}/agent_logs:/logs
     environment:
       - LLM_GATEWAY_KEY=${LLM_GATEWAY_KEY:-}
-      # Used instead of LLM_GATEWAY_KEY for non-AMD endpoints (Azure, Anthropic).
+      # Used instead of LLM_GATEWAY_KEY for endpoints that take a plain
+      # API key rather than gateway headers (Azure, Anthropic, ...).
       - REINVENT4_AGENT_API_KEY=${REINVENT4_AGENT_API_KEY:-}
       - AMD_VISIBLE_DEVICES=${REINVENT_GPU}
       - HIP_VISIBLE_DEVICES=${REINVENT_GPU}
       - REINVENT4_AGENT_BACKEND=${REINVENT4_AGENT_BACKEND:-anthropic}
       - REINVENT4_AGENT_MODEL=${REINVENT4_AGENT_MODEL:-claude-sonnet-4.6}
-      - REINVENT4_AGENT_BASE_URL=${REINVENT4_AGENT_BASE_URL:-https://llm-api.amd.com/Anthropic}
+      - REINVENT4_AGENT_BASE_URL=${REINVENT4_AGENT_BASE_URL:-}
       # OpenAI backend only: an api-version (or LLM_GATEWAY_KEY) selects the
       # Azure deployments endpoint <base-url>/openai/deployments/<model>.
       - REINVENT4_AGENT_API_VERSION=${REINVENT4_AGENT_API_VERSION:-}
@@ -68,9 +72,7 @@ services:
       # Block 10 annotation cache/proxy.
       - ANNOTATION_SERVICE_URL=http://annotation:8080
       - SP_SERVICE_URL=http://structure-prep:8080
-    # No extra_hosts: the gateway is reached directly by DNS. Nodes that
-    # cannot resolve/reach it need the SSH tunnel, which is opt-in via
-    # `-f docker-compose.yml -f docker-compose.tunnel.yml`.
+    # The LLM endpoint is reached directly by DNS from the bridge network.
     depends_on:
       boltz:
         condition: service_healthy

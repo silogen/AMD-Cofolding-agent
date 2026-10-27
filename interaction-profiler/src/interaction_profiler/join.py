@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Attach fragments to interactions and build grouped triples.
 
 Each interaction whose ligand atom belongs to a functional-group (or, as

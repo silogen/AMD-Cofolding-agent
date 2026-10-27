@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """RetroDMTA project-endpoint REST service (single FastAPI app, boltz2/posebusters convention).
 
 Per-target, per-temporal-window models. An agent fixes a (target, window) for a campaign; the
