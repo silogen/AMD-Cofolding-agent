@@ -1,9 +1,9 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { forwardRef, lazy, Suspense, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, Fragment, lazy, Suspense, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { Effort } from "../../types/api";
+import type { Effort, ModelOption } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { useRDKit } from "../../hooks/useRDKit";
 import { availableCommands, firstPlaceholder, VIEW_PREFIX, type SlashCommand } from "../../lib/commands";
@@ -11,6 +11,7 @@ import { canonical, withMol } from "../../lib/rdkit";
 import { findSmiles, replaceToken } from "../../lib/smiles";
 import { onSketchRequest, openSketcher, type SketchRequest } from "../../lib/sketcherBus";
 import { ACCEPTED_FILES, fileKind, moleculesFromFile } from "../../lib/dropFiles";
+import { modelLabel, pickEffort, useModels } from "../../lib/models";
 import { uploadedStructure, uploadFile } from "../../lib/uploads";
 import { addUserStructure } from "../../lib/userStructures";
 import { sendToViewer } from "../../lib/viewerBus";
@@ -22,7 +23,7 @@ const TtpBuilder = lazy(() => import("../TtpBuilder/TtpBuilder").then((module) =
 interface Props {
   value: string;
   onChange: (text: string) => void;
-  onSend: (text: string, effort: Effort) => boolean;
+  onSend: (text: string, effort: Effort | null) => boolean;
   onStop: () => void;
   busy: boolean;
   connected: boolean;
@@ -30,7 +31,7 @@ interface Props {
   theme: Theme;
   /** The conversation's id, null before it has one; uploads go to its folder. */
   sessionId: string | null;
-  /** The model answering, for the effort pill. */
+  /** The model answering, for the model pill. */
   model: string | null;
   /** The gateway's effort, used until the user picks one. */
   defaultEffort: string | null;
@@ -50,9 +51,13 @@ const EFFORTS: { value: Effort; label: string; hint: string }[] = [
   { value: "medium", label: "Medium", hint: "Balanced" },
   { value: "high", label: "High", hint: "Thinks longest" },
 ];
+const EFFORT_VALUES = EFFORTS.map((option) => option.value);
 const EFFORT_KEY = "cofolding-effort";
 /** Files with up to this many molecules go into the message as SMILES; longer lists stay one attachment. */
 const INLINE_MOLECULES = 6;
+
+const effortLabel = (value: Effort) => EFFORTS.find((option) => option.value === value)?.label ?? value;
+const effortHint = (value: Effort) => EFFORTS.find((option) => option.value === value)?.hint ?? "";
 
 function isEffort(value: unknown): value is Effort {
   return value === "low" || value === "medium" || value === "high";
@@ -96,11 +101,25 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   const [sketch, setSketch] = useState<SketchRequest | null>(null);
   const [ttpOpen, setTtpOpen] = useState(false);
   const [chosenEffort, setChosenEffort] = useState<Effort | null>(storedEffort);
-  const [effortMenu, setEffortMenu] = useState(false);
+  const [modelMenu, setModelMenu] = useState(false);
   const [dropArea, setDropArea] = useState<DOMRect | null>(null);
   const { rdkit } = useRDKit();
+  const models = useModels();
 
-  const effort = chosenEffort ?? (isEffort(defaultEffort) ? defaultEffort : "medium");
+  const served = models.state;
+  const currentKey = served?.current ?? model;
+  // Without the endpoint the ready event still named one model: show that
+  // alone, with the thinking levels the UI has always offered.
+  const rows: ModelOption[] = served
+    ? served.models
+    : model
+      ? [{ key: model, id: model, label: model.split("/").pop() ?? model, efforts: EFFORT_VALUES, defaultEffort: null }]
+      : [];
+  const current = rows.find((row) => row.key === currentKey) ?? null;
+  const effort = pickEffort(current?.efforts ?? [], chosenEffort, isEffort(defaultEffort) ? defaultEffort : "medium");
+  /** The model being loaded, named for the pill; nothing is while it is null. */
+  const loading = models.pending ? modelLabel(served, models.pending) : null;
+  const canSwitch = served !== null && served.switchable && !loading;
   const commands = useMemo(() => availableCommands(tools), [tools]);
   const slash = /^\/\S*$/.test(value) && !dismissed;
   const matches = slash ? commands.filter((command) => command.cmd.startsWith(value.toLowerCase())) : [];
@@ -250,7 +269,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
 
   function chooseEffort(next: Effort) {
     setChosenEffort(next);
-    setEffortMenu(false);
+    setModelMenu(false);
     try {
       localStorage.setItem(EFFORT_KEY, next);
     } catch {
@@ -284,7 +303,8 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     const content = [value.trim(), ...extra].filter(Boolean).join("\n");
     if (!content) return;
     const local = content.toLowerCase().startsWith(VIEW_PREFIX);
-    if (!local && (busy || !connected)) return;
+    // While the other model loads the gateway has no endpoint to answer on.
+    if (!local && (busy || !connected || loading)) return;
     if (uploading) {
       setProblem("Wait for the upload to finish.");
       return;
@@ -441,42 +461,64 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
             <div className="relative ml-1">
               <button
                 type="button"
-                onClick={() => setEffortMenu((open) => !open)}
+                onClick={() => setModelMenu((open) => !open)}
                 aria-haspopup="menu"
-                aria-expanded={effortMenu}
-                title="Reasoning effort"
+                aria-expanded={modelMenu}
+                title={loading ? `${loading} is loading` : "Model and thinking level"}
                 className="text-muted hover:text-body border-subtle flex h-7 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-[11px] touch:h-9"
               >
-                {model && <span className="max-w-[12rem] truncate">{model.split("/").pop()}</span>}
-                {model && <span className="text-faint">·</span>}
-                <span className="text-body">{effort}</span>
+                <span className="max-w-[14rem] truncate">{loading ? `Loading ${loading}…` : (current?.label ?? "Model")}</span>
                 <svg viewBox="0 0 24 24" className="size-3" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
                   <path d="m6 15 6-6 6 6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
-              {effortMenu && (
+              {modelMenu && (
                 <div
                   role="menu"
-                  aria-label="Reasoning effort"
-                  className="bg-raised border-subtle shadow-card absolute bottom-full left-0 z-20 mb-1 w-56 overflow-hidden rounded-lg border py-1 text-xs"
-                  onMouseLeave={() => setEffortMenu(false)}
+                  aria-label="Model and thinking level"
+                  className="bg-raised border-subtle shadow-card absolute bottom-full left-0 z-20 mb-1 w-60 overflow-hidden rounded-lg border py-1 text-xs"
+                  onMouseLeave={() => setModelMenu(false)}
                 >
-                  {EFFORTS.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={option.value === effort}
-                      onClick={() => chooseEffort(option.value)}
-                      className="hover:bg-sunken flex w-full cursor-pointer items-baseline gap-2 px-3 py-1.5 text-left"
-                    >
-                      <span className="w-3 shrink-0" style={{ color: "var(--color-accent)" }}>
-                        {option.value === effort ? "✓" : ""}
-                      </span>
-                      <span className="font-medium">{option.label}</span>
-                      <span className="text-faint truncate">{option.hint}</span>
-                    </button>
+                  {rows.map((row) => (
+                    <Fragment key={row.key}>
+                      <button
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={row.key === currentKey}
+                        disabled={!canSwitch}
+                        onClick={() => models.choose(row.key)}
+                        className="hover:bg-sunken flex w-full cursor-pointer items-baseline gap-2 px-3 py-1.5 text-left disabled:cursor-default disabled:hover:bg-transparent"
+                      >
+                        <span className="w-3 shrink-0" style={{ color: "var(--color-accent)" }}>
+                          {row.key === currentKey ? "✓" : ""}
+                        </span>
+                        <span className="truncate font-medium">{row.label}</span>
+                      </button>
+                      {row.key === currentKey &&
+                        row.efforts.map((value) => (
+                          <button
+                            key={value}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={value === effort}
+                            onClick={() => chooseEffort(value)}
+                            className="hover:bg-sunken flex w-full cursor-pointer items-baseline gap-2 py-1.5 pr-3 pl-8 text-left"
+                          >
+                            <span className="w-3 shrink-0" style={{ color: "var(--color-accent)" }}>
+                              {value === effort ? "✓" : ""}
+                            </span>
+                            <span>{effortLabel(value)}</span>
+                            <span className="text-faint truncate">{effortHint(value)}</span>
+                          </button>
+                        ))}
+                    </Fragment>
                   ))}
+                  {served && !served.switchable && <p className="text-faint px-3 pt-1 pb-0.5 leading-snug">The model is fixed for this session.</p>}
+                  {models.note && (
+                    <p className="px-3 pt-1 pb-0.5 leading-snug" style={{ color: "var(--color-warn)" }}>
+                      {models.note}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -497,8 +539,9 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
               <button
                 type="button"
                 onClick={submit}
-                disabled={!connected || (!value.trim() && attachments.length === 0)}
+                disabled={!connected || loading !== null || (!value.trim() && attachments.length === 0)}
                 aria-label="Send"
+                title={loading ? `${loading} is still loading` : "Send"}
                 className="bg-accent hover:bg-accent-strong disabled:bg-inset disabled:text-faint grid size-8 shrink-0 cursor-pointer place-items-center rounded-xl text-white transition-colors disabled:cursor-not-allowed touch:size-11"
               >
                 <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">

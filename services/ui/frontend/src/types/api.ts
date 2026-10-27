@@ -242,6 +242,33 @@ export type Effort = "low" | "medium" | "high";
 export type ClientMessage = { type: "user_message"; content: string; effort?: Effort } | { type: "cancel" };
 
 // ---------------------------------------------------------------------------
+// models — which model answers, and switching to the other one
+// ---------------------------------------------------------------------------
+
+/** One served model. A model without *efforts* does not reason in levels. */
+export interface ModelOption {
+  key: string;
+  id: string;
+  label: string;
+  efforts: Effort[];
+  defaultEffort: Effort | null;
+}
+
+/**
+ * GET /api/models, and the answer to a POST to it. Only one model runs at a
+ * time, so a switch restarts the server: the POST answers 202 with state
+ * "loading" and the browser polls until it is ready or failed.
+ */
+export interface ModelsState {
+  /** The key of the model now serving. */
+  current: string;
+  state: "ready" | "loading" | "failed";
+  /** False where there is no cluster to restart; the model is then fixed. */
+  switchable: boolean;
+  models: ModelOption[];
+}
+
+// ---------------------------------------------------------------------------
 // sessions — saved conversations
 // ---------------------------------------------------------------------------
 

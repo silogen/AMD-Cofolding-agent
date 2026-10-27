@@ -145,7 +145,7 @@ export default function App() {
   /** "/view …" runs on the viewer, here; everything else goes to the agent. */
   const { send: sendToAgent } = chat;
   const send = useCallback(
-    (text: string, effort?: Effort) => {
+    (text: string, effort?: Effort | null) => {
       if (!text.toLowerCase().startsWith(VIEW_PREFIX)) return sendToAgent(text, effort);
       const command = text.slice(VIEW_PREFIX.length).trim();
       const action = parseViewerCommand(command || "help");

@@ -36,7 +36,7 @@ interface SessionState {
   gatewayError: string | null;
   notices: Notice[];
   dismissNotice: (id: number) => void;
-  send: (text: string, effort?: Effort) => boolean;
+  send: (text: string, effort?: Effort | null) => boolean;
   cancel: () => void;
   reconnect: () => void;
 }
@@ -255,7 +255,7 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
   // No local echo: the gateway sends the user's message back as an event,
   // so every open tab shows it, in the order the gateway recorded it.
   const send = useCallback(
-    (text: string, effort?: Effort) => {
+    (text: string, effort?: Effort | null) => {
       const content = text.trim();
       return content ? sendMessage({ type: "user_message", content, ...(effort ? { effort } : {}) }) : false;
     },

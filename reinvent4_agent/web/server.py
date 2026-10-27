@@ -13,6 +13,8 @@ Endpoints
 ---------
 ``GET    /api/health``                       liveness and readiness.
 ``GET    /api/session``                      backend, model and available tools.
+``GET    /api/models``                       the chat models, and which one serves.
+``POST   /api/models``                       ask for another one; it is swapped.
 ``GET    /api/artifacts/{path}``             one file from the shared volume.
 ``GET    /api/sessions``                     saved conversations, newest first.
 ``PATCH  /api/sessions/{id}``                rename one.
@@ -49,6 +51,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from reinvent4_agent.web import artifacts as shared_files
 from reinvent4_agent.web.artifacts import extract_panels, parse_tool_result, resolve_artifact
+from reinvent4_agent.web import models as chat_models
 from reinvent4_agent.web.events import WebSocketEventHandler
 from reinvent4_agent.web.sessions import SessionManager, SessionStore, valid_session_id
 
@@ -279,6 +282,7 @@ class AgentGateway:
 
     def __init__(self, config: WebConfig) -> None:
         self.config = config
+        self.models = chat_models.ModelControl(fallback_model=config.model)
         self._mcp: Any | None = None
         self._stack: contextlib.AsyncExitStack | None = None
         self._tools: list[dict[str, Any]] = []
@@ -324,6 +328,35 @@ class AgentGateway:
             raise RuntimeError("MCP server is not running")
         return await self._mcp.call_tool(name, arguments)
 
+    @property
+    def model(self) -> str:
+        """The served id of the model the agents talk to now."""
+        spec = self.models.active()
+        return spec.served_id if spec is not None else self.config.model
+
+    def model_takes_effort(self) -> bool:
+        """Whether the serving model has reasoning efforts to set."""
+        spec = self.models.active()
+        return spec.supports_effort if spec is not None else True
+
+    def model_choice(self) -> Any:
+        """The model a request goes to now, and what that model needs sent.
+
+        Read per request rather than per agent: the endpoint serves one model
+        at a time and it can be swapped under a conversation that is already
+        under way.
+        """
+        from reinvent4_agent.backends import ModelChoice
+
+        spec = self.models.active()
+        if spec is None:
+            return ModelChoice(model=self.config.model)
+        return ModelChoice(
+            model=spec.served_id,
+            extra_body=spec.extra_body,
+            supports_reasoning_effort=spec.supports_effort,
+        )
+
     def new_agent(self, handler: WebSocketEventHandler) -> Any:
         """Build an agent for one chat session, sharing the MCP connection."""
         from reinvent4_agent.agent import Agent
@@ -335,7 +368,8 @@ class AgentGateway:
 
         backend = create_backend(
             self.config.backend,
-            model=self.config.model,
+            model=self.model,
+            model_choice=self.model_choice,
             base_url=self.config.base_url,
             api_key=self.config.resolved_api_key(),
             gateway_key=self.config.gateway_key,
@@ -401,11 +435,42 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     async def session() -> dict[str, Any]:
         return {
             "backend": settings.backend,
-            "model": settings.model,
+            "model": gateway.model,
             "endpoint": settings.base_url or "default",
             "tools": gateway.tool_names,
             "ready": gateway.ready,
         }
+
+    # -- which model serves the UI --------------------------------------------
+
+    @app.get("/api/models")
+    async def models() -> dict[str, Any]:
+        return gateway.models.snapshot()
+
+    @app.post("/api/models")
+    async def choose_model(request: Request) -> JSONResponse:
+        """Ask the supervisor to serve another model.
+
+        The swap restarts vLLM, so a turn that is running anywhere would lose
+        its endpoint mid-answer: those are refused rather than interrupted.
+        """
+        body = await _json_body(request)
+        wanted = chat_models.by_key(body.get("key"))
+        if wanted is None:
+            raise HTTPException(status_code=400, detail=f"Unknown model: {body.get('key')!r}")
+        if not gateway.models.switchable:
+            raise HTTPException(status_code=503, detail="This deployment cannot switch models")
+        current, state = gateway.models.status()
+        if wanted.key == current and state == "ready":
+            return JSONResponse(gateway.models.snapshot(), status_code=200)
+        if sessions.busy_ids():
+            raise HTTPException(status_code=409, detail="Wait for the running turn to finish before switching model")
+        try:
+            gateway.models.request(wanted.key)
+        except OSError as exc:
+            logger.warning("Could not ask for model %s: %s", wanted.key, exc)
+            raise HTTPException(status_code=503, detail=f"Could not ask for {wanted.label}: {exc}") from exc
+        return JSONResponse(gateway.models.snapshot(current=wanted.key, state="loading"), status_code=202)
 
     @app.get("/api/artifacts/{path:path}")
     async def artifact(path: str) -> FileResponse:
@@ -577,7 +642,7 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         await websocket.send_json(
             {
                 "type": "ready",
-                "model": settings.model,
+                "model": gateway.model,
                 "backend": settings.backend,
                 "reasoningEffort": settings.reasoning_effort,
                 "tools": gateway.tool_names,
@@ -595,7 +660,7 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
 
         sender = asyncio.create_task(_forward_events(websocket, queue, snapshot))
         try:
-            await _receive_loop(websocket, live)
+            await _receive_loop(websocket, live, gateway.model_takes_effort)
         except WebSocketDisconnect:
             logger.info("Client disconnected from session %s", live.id)
         finally:
@@ -633,13 +698,17 @@ async def _forward_events(websocket: WebSocket, queue: asyncio.Queue[dict[str, A
             return
 
 
-async def _receive_loop(websocket: WebSocket, live: Any) -> None:
+async def _receive_loop(websocket: WebSocket, live: Any, takes_effort: Any = None) -> None:
     """Read the browser's messages: a new question, or stop the current turn.
 
     Turns are serialised per session: the agent keeps conversation state, so
     two overlapping turns would interleave tool calls into one history.  A
     question that arrives while a turn runs is refused rather than queued,
     and only this browser is told, since it is not part of the conversation.
+
+    An effort asked for while a model without efforts is serving is dropped:
+    that model thinks regardless, and the request carries the chat template
+    option instead (see ``models.py``).
     """
     while True:
         raw = await websocket.receive_text()
@@ -664,6 +733,8 @@ async def _receive_loop(websocket: WebSocket, live: Any) -> None:
         if effort is not None and (not isinstance(effort, str) or effort not in EFFORTS):
             await websocket.send_json({"type": "notice", "message": f"Unknown effort: {effort!r}"})
             continue
+        if effort and takes_effort is not None and not takes_effort():
+            effort = None
         content = (message.get("content") or "").strip()
         if content and not live.start_turn(content, effort=effort):
             await websocket.send_json(

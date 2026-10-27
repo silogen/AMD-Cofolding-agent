@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -31,6 +32,7 @@ from reinvent4_agent.backends import (
     ChatResult,
     EndpointError,
     LLMBackend,
+    ModelChoice,
     ToolCall,
     ToolResult,
     TransientEndpointError,
@@ -104,6 +106,11 @@ class OpenAIBackend(LLMBackend):
         models take their token cap as ``max_completion_tokens`` whether
         or not this is set, and that cap has to cover the reasoning
         tokens too — see :data:`MIN_REASONING_TOKEN_CAP`.
+    model_choice:
+        Called before every request for the model to address and what it
+        needs sent with it, for an endpoint whose model can change under
+        a running conversation.  Ignored on the Azure deployments route,
+        where the model is part of the URL the client was built with.
     system_prompt:
         System prompt for the conversation.
     """
@@ -118,9 +125,11 @@ class OpenAIBackend(LLMBackend):
         api_version: str | None = None,
         verify_ssl: bool = True,
         reasoning_effort: str | None = None,
+        model_choice: Callable[[], ModelChoice] | None = None,
         system_prompt: str,
     ) -> None:
-        self.model = model
+        self._model_choice = model_choice
+        self._choice = ModelChoice(model=model)
         self.reasoning_effort = reasoning_effort
         self._verify_ssl = verify_ssl
         # gpt-5 and the o-series reject max_tokens, so send the parameter
@@ -180,6 +189,26 @@ class OpenAIBackend(LLMBackend):
             {"role": "system", "content": system_prompt},
         ]
 
+    @property
+    def model(self) -> str:
+        """The model this backend is addressing, as of its last request."""
+        return self._choice.model
+
+    def _resolve_model(self) -> ModelChoice:
+        """The model for the request about to be sent.
+
+        The conversation is kept here and the model is chosen outside, so a
+        model swapped between two turns continues the same history.  A chooser
+        that fails leaves the last choice standing rather than the turn.
+        """
+        if self._model_choice is None or self.api_version:
+            return self._choice
+        try:
+            self._choice = self._model_choice()
+        except Exception:
+            logger.warning("Could not read the current model; keeping %s", self._choice.model)
+        return self._choice
+
     # ------------------------------------------------------------------
     # LLMBackend interface
     # ------------------------------------------------------------------
@@ -191,13 +220,16 @@ class OpenAIBackend(LLMBackend):
     ) -> ChatResult:
         self.repair_dangling_tool_use()
         openai_tools = self._convert_tools(tools)
+        choice = self._resolve_model()
 
         kwargs: dict[str, Any] = {
-            "model": self.model,
+            "model": choice.model,
             "messages": self._messages,
             self._token_param: self._token_cap(max_tokens),
         }
-        if self.reasoning_effort:
+        if choice.extra_body:
+            kwargs["extra_body"] = dict(choice.extra_body)
+        if self.reasoning_effort and choice.supports_reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
         if openai_tools:
             kwargs["tools"] = openai_tools

@@ -410,6 +410,10 @@ class SessionManager:
         shown = [s for s in summaries.values() if s.get("turns") or s.get("busy")]
         return sorted(shown, key=lambda m: m.get("updated", ""), reverse=True)
 
+    def busy_ids(self) -> list[str]:
+        """Sessions with a turn running, so a caller can refuse to disturb them."""
+        return [live.id for live in self._live.values() if live.busy]
+
     def rename(self, session_id: str, title: str) -> dict[str, Any] | None:
         live = self.get(session_id)
         if live is None:

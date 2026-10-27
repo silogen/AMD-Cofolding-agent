@@ -10,6 +10,7 @@ the web dependencies (FastAPI) but no GPU and no network.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 
@@ -65,6 +66,9 @@ class FakeAgent:
 @pytest.fixture
 def agents(monkeypatch, tmp_path):
     monkeypatch.setenv("REINVENT4_WEB_SESSION_DIR", str(tmp_path / "sessions"))
+    # Tests about the model say so themselves; the rest must not inherit a
+    # control directory from the machine they run on.
+    monkeypatch.delenv(server.chat_models.CONTROL_DIR_ENV, raising=False)
     made: list[FakeAgent] = []
 
     async def start(self) -> None:
@@ -330,6 +334,171 @@ def test_a_session_with_a_running_turn_cannot_be_deleted(agents):
 def test_malformed_session_ids_are_not_found(agents, bad):
     with TestClient(server.create_app()) as client:
         assert client.get(f"/api/sessions/{bad}/events").status_code == 404
+
+
+# -- which model serves ----------------------------------------------------
+
+
+CATALOGUE = [
+    {
+        "key": "qwen",
+        "id": "Qwen/Qwen3.8-27B",
+        "label": "Qwen3.8 27B",
+        "efforts": ["low", "medium", "high"],
+        "defaultEffort": "low",
+    },
+    {
+        "key": "gemma",
+        "id": "google/gemma-4-31B-it",
+        "label": "Gemma 4 31B",
+        "efforts": [],
+        "defaultEffort": None,
+    },
+]
+
+
+@pytest.fixture
+def laptop(agents, monkeypatch):
+    """No supervisor, and the model the agent was configured with."""
+    monkeypatch.delenv(server.chat_models.CONTROL_DIR_ENV, raising=False)
+    monkeypatch.setenv("REINVENT4_AGENT_MODEL", "Qwen/Qwen3.8-27B")
+    return agents
+
+
+@pytest.fixture
+def control(agents, monkeypatch, tmp_path):
+    """A control directory with Qwen up and ready, as on LUMI."""
+    directory = tmp_path / "model-control"
+    directory.mkdir()
+    monkeypatch.setenv(server.chat_models.CONTROL_DIR_ENV, str(directory))
+    monkeypatch.setenv("REINVENT4_AGENT_MODEL", "Qwen/Qwen3.8-27B")
+    (directory / server.chat_models.STATE_FILE).write_text(
+        json.dumps({"model": "qwen", "state": "ready", "job": "23208674", "at": 1793102522})
+    )
+    return directory
+
+
+def wanted(directory):
+    return (directory / server.chat_models.WANT_FILE).read_text().strip()
+
+
+def test_both_models_are_listed_with_the_one_that_serves(control):
+    with TestClient(server.create_app()) as client:
+        assert client.get("/api/models").json() == {
+            "current": "qwen",
+            "state": "ready",
+            "switchable": True,
+            "models": CATALOGUE,
+        }
+
+
+def test_without_a_supervisor_the_catalogue_is_still_reported(laptop):
+    with TestClient(server.create_app()) as client:
+        assert client.get("/api/models").json() == {
+            "current": "qwen",
+            "state": "ready",
+            "switchable": False,
+            "models": CATALOGUE,
+        }
+
+
+def test_the_session_reports_the_model_that_serves(control):
+    with TestClient(server.create_app()) as client:
+        assert client.get("/api/session").json()["model"] == "Qwen/Qwen3.8-27B"
+        (control / server.chat_models.STATE_FILE).write_text(json.dumps({"model": "gemma", "state": "ready"}))
+        assert client.get("/api/session").json()["model"] == "google/gemma-4-31B-it"
+        with client.websocket_connect("/api/chat") as ws:
+            assert receive_until(ws, "ready")["model"] == "google/gemma-4-31B-it"
+
+
+def test_choosing_the_other_model_asks_the_supervisor_for_it(control):
+    with TestClient(server.create_app()) as client:
+        response = client.post("/api/models", json={"key": "gemma"})
+        assert response.status_code == 202
+        assert response.json() == {
+            "current": "gemma",
+            "state": "loading",
+            "switchable": True,
+            "models": CATALOGUE,
+        }
+        assert wanted(control) == "gemma"
+
+
+def test_choosing_the_model_that_already_serves_does_nothing(control):
+    with TestClient(server.create_app()) as client:
+        response = client.post("/api/models", json={"key": "qwen"})
+        assert response.status_code == 200
+        assert response.json()["state"] == "ready"
+        assert not (control / server.chat_models.WANT_FILE).exists()
+
+
+def test_the_model_can_be_asked_for_again_while_it_is_loading(control):
+    """A swap that failed or is still coming up is not a no-op."""
+    (control / server.chat_models.STATE_FILE).write_text(json.dumps({"model": "gemma", "state": "failed"}))
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/models", json={"key": "gemma"}).status_code == 202
+        assert wanted(control) == "gemma"
+
+
+@pytest.mark.parametrize("key", ["llama", "", None, 3, "Gemma"])
+def test_an_unknown_model_is_refused(control, key):
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/models", json={"key": key}).status_code == 400
+        assert not (control / server.chat_models.WANT_FILE).exists()
+
+
+def test_without_a_supervisor_nothing_can_be_switched(laptop):
+    with TestClient(server.create_app()) as client:
+        assert client.post("/api/models", json={"key": "gemma"}).status_code == 503
+
+
+def test_a_running_turn_is_not_interrupted_by_a_swap(control):
+    with TestClient(server.create_app()) as client, client.websocket_connect("/api/chat") as ws:
+        receive_until(ws, "session")
+        ws.send_json({"type": "user_message", "content": "Design a ligand"})
+        receive_until(ws, "status")
+        response = client.post("/api/models", json={"key": "gemma"})
+        assert response.status_code == 409
+        assert not (control / server.chat_models.WANT_FILE).exists()
+        ws.send_json({"type": "cancel"})
+        receive_until(ws, "cancelled")
+        receive_until(ws, "status")
+        assert client.post("/api/models", json={"key": "gemma"}).status_code == 202
+
+
+def test_an_effort_is_dropped_while_a_model_without_efforts_serves(agents, control):
+    (control / server.chat_models.STATE_FILE).write_text(json.dumps({"model": "gemma", "state": "ready"}))
+    with TestClient(server.create_app()) as client, client.websocket_connect("/api/chat") as ws:
+        receive_until(ws, "session")
+        ws.send_json({"type": "user_message", "content": "quick one", "effort": "high"})
+        assert "effort" not in receive_until(ws, "user_message")
+        receive_until(ws, "assistant_message")
+        assert agents[0].backend.reasoning_effort is None
+
+
+def test_the_request_follows_the_model_that_serves(control, monkeypatch):
+    """What an agent sends is decided per request, not when it was built."""
+    gateway = server.AgentGateway(server.WebConfig())
+    assert gateway.model == "Qwen/Qwen3.8-27B"
+    choice = gateway.model_choice()
+    assert (choice.model, choice.extra_body, choice.supports_reasoning_effort) == ("Qwen/Qwen3.8-27B", {}, True)
+    assert gateway.model_takes_effort()
+
+    (control / server.chat_models.STATE_FILE).write_text(json.dumps({"model": "gemma", "state": "ready"}))
+    choice = gateway.model_choice()
+    assert choice.model == "google/gemma-4-31B-it"
+    assert choice.extra_body == {"chat_template_kwargs": {"enable_thinking": True}}
+    assert not choice.supports_reasoning_effort
+    assert not gateway.model_takes_effort()
+    assert gateway.model == "google/gemma-4-31B-it"
+
+
+def test_a_model_outside_the_catalogue_is_served_as_configured(laptop, monkeypatch):
+    monkeypatch.setenv("REINVENT4_AGENT_MODEL", "claude-sonnet-4")
+    gateway = server.AgentGateway(server.WebConfig())
+    assert gateway.model == "claude-sonnet-4"
+    assert gateway.model_choice().model == "claude-sonnet-4"
+    assert gateway.model_takes_effort()
 
 
 # -- direct tool calls -----------------------------------------------------

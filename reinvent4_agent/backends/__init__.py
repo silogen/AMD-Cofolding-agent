@@ -14,7 +14,7 @@ import os
 import socket
 import ssl
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -40,6 +40,25 @@ class TransientEndpointError(EndpointError):
     a rejected request fails the same way however often it is sent.  Only
     this subclass is worth retrying.
     """
+
+
+@dataclass
+class ModelChoice:
+    """Which model a request goes to, and what that model needs sent with it.
+
+    An endpoint that serves one model at a time can be made to serve another
+    between turns, so a backend built when Qwen was up must be able to address
+    Gemma on its next call.  A caller that can change its mind passes
+    ``create_backend`` something that returns this per request; everyone else
+    keeps the model it was constructed with.
+    """
+
+    model: str
+    #: Extra request body the model needs, e.g. vLLM chat template options.
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    #: Whether ``reasoning_effort`` may be sent at all; a model whose thinking
+    #: is fixed by its chat template rejects it.
+    supports_reasoning_effort: bool = True
 
 
 @dataclass
@@ -347,6 +366,7 @@ def create_backend(
     verify_ssl: bool = True,
     thinking_budget: int | None = None,
     reasoning_effort: str | None = None,
+    model_choice: Callable[[], ModelChoice] | None = None,
     system_prompt: str,
 ) -> LLMBackend:
     """Factory: instantiate the correct backend by name.
@@ -373,6 +393,9 @@ def create_backend(
         Token budget for extended thinking (Anthropic only).
     reasoning_effort:
         Reasoning effort for o-series models (OpenAI only).
+    model_choice:
+        Called before every request for the model to address and the extra
+        body it needs (OpenAI only).  ``None`` → always ``model``.
     system_prompt:
         System prompt to initialise the conversation.
     """
@@ -402,6 +425,7 @@ def create_backend(
             api_version=api_version,
             verify_ssl=verify_ssl,
             reasoning_effort=reasoning_effort,
+            model_choice=model_choice,
             system_prompt=system_prompt,
         )
 
