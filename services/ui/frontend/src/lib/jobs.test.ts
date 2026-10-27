@@ -3,12 +3,15 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  bestScore,
   canResume,
+  componentSeriesNames,
   continueCost,
   continueSteps,
   errorSummary,
   isActive,
   isMol2Mol,
+  isScoringComponent,
   linePath,
   linear,
   parseAlerts,
@@ -21,7 +24,9 @@ import {
   resumeArguments,
   runningBest,
   scoreDomain,
+  scoringComponents,
   startedJobId,
+  stepTicks,
   stepsDone,
   ticks,
   trajectoryPoints,
@@ -286,6 +291,30 @@ describe("chart geometry", () => {
     expect(ticks(0, 1, 5)).toEqual([0, 0.25, 0.5, 0.75, 1]);
   });
 
+  it("spaces the step axis on round steps inside the run", () => {
+    // 51 steps used to tick 0, 10, 20, 31, 41, 51, and 3 steps repeated a tick.
+    expect(stepTicks(50, 6)).toEqual([0, 10, 20, 30, 40, 50]);
+    expect(stepTicks(51, 6)).toEqual([0, 20, 40]);
+    expect(stepTicks(300, 6)).toEqual([0, 100, 200, 300]);
+    expect(stepTicks(30, 6)).toEqual([0, 10, 20, 30]);
+    expect(stepTicks(3, 6)).toEqual([0, 1, 2, 3]);
+    expect(stepTicks(1, 6)).toEqual([0, 1]);
+  });
+
+  it("never ticks past the last step, nor twice on one", () => {
+    for (const last of [1, 2, 3, 7, 12, 29, 50, 51, 99, 100, 137, 300, 1000, 2048]) {
+      const t = stepTicks(last, 6);
+      expect(t[0]).toBe(0);
+      expect(Math.max(...t)).toBeLessThanOrEqual(last);
+      expect(t.every(Number.isInteger)).toBe(true);
+      expect(new Set(t).size).toBe(t.length);
+      expect(t.length).toBeLessThanOrEqual(6);
+    }
+    expect(stepTicks(0, 6)).toEqual([0]);
+    expect(stepTicks(-5, 6)).toEqual([0]);
+    expect(stepTicks(NaN, 6)).toEqual([0]);
+  });
+
   it("never lets the best score go down", () => {
     const best = runningBest([
       { step: 0, mean: 0.1, max: 0.5, molecules: 1 },
@@ -294,5 +323,60 @@ describe("chart geometry", () => {
       { step: 3, mean: 0.3, max: 0.9, molecules: 1 },
     ]);
     expect(best.map((p) => p.y)).toEqual([0.5, 0.5, 0.5, 0.9]);
+  });
+});
+
+describe("scoring components", () => {
+  // What the MCP server answers for a completed run: no score_trajectory, no best_total_score.
+  const status = parseStatus({
+    ...job,
+    state: "completed",
+    trajectory: {
+      current_step: 301,
+      max_steps: 300,
+      per_component: {
+        Agent: { mean: 13.5179, max: 40.0668, min: 2.2821 },
+        Prior: { mean: 34.5732, max: 104.4353, min: 2.2821 },
+        Target: { mean: 76.6245, max: 125.4626, min: -92.3977 },
+        Score: { mean: 0.8687, max: 0.9487, min: 0 },
+        QED: { mean: 0.74, max: 0.93, min: 0.2 },
+        "Synthetic accessibility": { mean: 0.6, max: 0.8, min: 0.1 },
+      },
+      per_component_trajectory: {
+        Agent: [{ step: 1, mean_score: 6.2256 }],
+        Prior: [{ step: 1, mean_score: 6.2256 }],
+        Target: [{ step: 1, mean_score: 71.5 }],
+        Score: [{ step: 1, mean_score: 0.7065 }],
+        QED: [{ step: 1, mean_score: 0.74 }],
+        "Synthetic accessibility": [{ step: 1, mean_score: 0.6 }],
+      },
+    },
+  })!;
+
+  it("drops REINVENT's likelihoods and the total from the plottable series", () => {
+    expect(isScoringComponent("Agent")).toBe(false);
+    expect(isScoringComponent("prior")).toBe(false);
+    expect(isScoringComponent(" Target ")).toBe(false);
+    expect(isScoringComponent("Score")).toBe(false);
+    expect(isScoringComponent("Boltz affinity")).toBe(true);
+    expect(componentSeriesNames(status)).toEqual(["QED", "Synthetic accessibility"]);
+    expect(scoringComponents(status).map((c) => c.name)).toEqual(["QED", "Synthetic accessibility"]);
+    expect(scoringComponents(null)).toEqual([]);
+  });
+
+  it("keeps the Score series reachable as the chart's own line", () => {
+    expect(trajectoryPoints(status).from).toBe("Score");
+  });
+
+  it("takes the best score from the total component, then the candidates, else nothing", () => {
+    expect(bestScore(status)).toBe(0.9487);
+    const withBest = parseStatus({ ...job, trajectory: { best_total_score: 0.99 } })!;
+    expect(bestScore(withBest)).toBe(0.99);
+
+    const bare = parseStatus({ ...job, trajectory: { per_component: { QED: { mean: 0.5 } } } })!;
+    expect(bestScore(bare)).toBeNull();
+    const candidates = parseCandidates({ candidates: [{ smiles: "CCO", components: { Score: { transformed: 0.59 } } }, { smiles: "CCN", components: { Score: { transformed: 0.81 } } }] });
+    expect(bestScore(bare, candidates)).toBe(0.81);
+    expect(bestScore(null)).toBeNull();
   });
 });

@@ -27,6 +27,36 @@ export function endpointUnit(panel: PropertiesPanel, endpoint: string): string |
   return null;
 }
 
+/** Conventional short forms for the units the predictors report. */
+const SHORT_UNITS: Record<string, string> = {
+  "log10(mol/L)": "log₁₀ M",
+  "log10(cm/s)": "log₁₀ cm/s",
+  "log10(efflux ratio)": "log₁₀ ER",
+  "log10(IC50/µM)": "log₁₀ µM",
+};
+
+/** Units past this length stay in the header's tooltip only, so the header keeps one line. */
+const UNIT_MAX = 12;
+
+/**
+ * A compact unit for a table header, or null when it would say nothing the
+ * endpoint's label does not. The full unit stays in the header's tooltip.
+ */
+export function shortUnit(unit: string | null | undefined): string | null {
+  if (!unit) return null;
+  if (SHORT_UNITS[unit]) return SHORT_UNITS[unit];
+  const base = unit.replace(/\s*\(dimensionless\)$/i, "").trim();
+  if (/^log\s?[pd]$/i.test(base)) return null;
+  const log10 = /^log10\s?\((.+)\)$/i.exec(base);
+  const short = log10 ? `log₁₀ ${log10[1]}` : base;
+  return short && short.length <= UNIT_MAX ? short : null;
+}
+
+/** The endpoint's key and full unit, for a header tooltip. */
+export function endpointTitle(endpoint: string, unit: string | null): string {
+  return unit ? `${endpoint} — ${unit}` : endpoint;
+}
+
 export function formatValue(value: PropertyValue | undefined): string {
   if (!value) return "—";
   const digits = Math.abs(value.mean) >= 100 ? 0 : Math.abs(value.mean) >= 10 ? 1 : 2;

@@ -283,6 +283,13 @@ export function errorSummary(error: string): string {
 /** REINVENT 4 likelihood columns that get_top_candidates reports as if they were components. */
 const NOT_COMPONENTS = new Set(["agent", "prior", "target", "score"]);
 
+/**
+ * Whether a column REINVENT reports beside the scoring components really is
+ * one. Agent, Prior and Target are the model's own likelihoods, in nats rather
+ * than 0..1 desirabilities, and Score is the total they add up to.
+ */
+export const isScoringComponent = (name: string): boolean => !NOT_COMPONENTS.has(name.trim().toLowerCase());
+
 /** get_top_candidates: ranked unique molecules with their component scores. */
 export function parseCandidates(result: unknown): Candidate[] {
   return list(obj(result)?.candidates)
@@ -300,7 +307,7 @@ export function parseCandidates(result: unknown): Candidate[] {
         smiles,
         total: num(d.total_score) ?? num(obj(score?.[1])?.transformed) ?? num(obj(score?.[1])?.raw),
         components: entries
-          .filter(([name]) => !NOT_COMPONENTS.has(name.toLowerCase()) && !detail(name))
+          .filter(([name]) => isScoringComponent(name) && !detail(name))
           .map(([name, c]) => {
             const e = obj(c);
             return { name, transformed: num(e?.transformed), raw: num(e?.raw) };
@@ -556,6 +563,23 @@ export function ticks(lo: number, hi: number, count = 5): number[] {
   return Array.from({ length: count }, (_, i) => Number((lo + i * step).toFixed(6)));
 }
 
+/**
+ * Whole-step ticks from 0 up to *last*, spaced 1, 2 or 5 × 10^n apart so they
+ * read as round steps: evenly dividing the axis instead gives 0, 10, 20, 31,
+ * 41, 51 on a 51-step run, and repeats a tick on a run of three steps.
+ * At most *count* ticks, and never one past *last*.
+ */
+export function stepTicks(last: number, count = 6): number[] {
+  const hi = Math.floor(last);
+  if (!Number.isFinite(hi) || hi <= 0 || count < 2) return [0];
+  const spread = hi / (count - 1);
+  const magnitude = 10 ** Math.floor(Math.log10(spread));
+  const step = Math.max(1, [1, 2, 5, 10].map((m) => m * magnitude).find((s) => s >= spread) ?? magnitude * 10);
+  const out: number[] = [];
+  for (let t = 0; t <= hi; t += step) out.push(t);
+  return out;
+}
+
 export interface Scale {
   (value: number): number;
 }
@@ -584,6 +608,30 @@ export function trajectoryPoints(status: JobStatus): { points: TrajectoryPoint[]
     if (series?.length) return { points: series.map((p) => ({ step: p.step, mean: p.mean, max: null, molecules: null })), from: key };
   }
   return { points: [], from: null };
+}
+
+/** The per-step series worth plotting beside the total: the scoring components only. */
+export function componentSeriesNames(status: Pick<JobStatus, "componentTrajectories">): string[] {
+  return Object.keys(status.componentTrajectories).filter(isScoringComponent);
+}
+
+/** per_component as the scoring components alone, so Agent's tens do not sit beside a desirability. */
+export function scoringComponents(status: Pick<JobStatus, "components"> | null | undefined): ComponentStats[] {
+  return (status?.components ?? []).filter((c) => isScoringComponent(c.name));
+}
+
+/**
+ * The best total score the run reached. score_trajectory carries a per-step
+ * maximum, but most runs report none and only the total score component knows
+ * its own max; the candidates already on screen are the last resort. Null
+ * means nothing reports one, and the panel says nothing rather than guessing.
+ */
+export function bestScore(status: JobStatus | null | undefined, candidates: readonly Candidate[] = []): number | null {
+  if (status?.bestScore != null) return status.bestScore;
+  const total = status?.components.find((c) => /^(score|total_score)$/i.test(c.name))?.max;
+  if (total != null) return total;
+  const totals = candidates.map((c) => c.total).filter((t): t is number => t !== null);
+  return totals.length ? Math.max(...totals) : null;
 }
 
 export function runningBest(points: TrajectoryPoint[]): { x: number; y: number }[] {

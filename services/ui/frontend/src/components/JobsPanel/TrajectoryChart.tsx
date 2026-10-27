@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useMemo, useState, type PointerEvent } from "react";
-import { fmt, linePath, linear, runningBest, scoreDomain, ticks, trajectoryPoints, type JobStatus } from "../../lib/jobs";
+import { componentSeriesNames, fmt, linePath, linear, runningBest, scoreDomain, stepTicks, stepsDone, ticks, trajectoryPoints, type JobStatus } from "../../lib/jobs";
 
 interface Props {
   status: JobStatus;
@@ -32,18 +32,19 @@ export function TrajectoryChart({ status }: Props) {
   const [shown, setShown] = useState<Set<string>>(() => new Set());
   const [hover, setHover] = useState<number | null>(null);
   const { points, from } = useMemo(() => trajectoryPoints(status), [status]);
-  const componentNames = Object.keys(status.componentTrajectories).filter((name) => name !== from);
+  const componentNames = componentSeriesNames(status).filter((name) => name !== from);
   const hasBest = points.some((p) => p.max !== null);
 
   const geometry = useMemo(() => {
     const values = points.flatMap((p) => (p.max === null ? [p.mean] : [p.mean, p.max]));
     for (const name of shown) values.push(...(status.componentTrajectories[name] ?? []).map((p) => p.mean));
     const [lo, hi] = scoreDomain(values);
-    const lastStep = Math.max(1, points.at(-1)?.step ?? 0, status.currentStep ?? 0);
+    // stepsDone, not currentStep: the status reports the next step to run, one past the axis.
+    const lastStep = Math.max(1, points.at(-1)?.step ?? 0, stepsDone(status));
     const x = linear([0, lastStep], [PAD.left, WIDTH - PAD.right]);
     const y = linear([lo, hi], [HEIGHT - PAD.bottom, PAD.top]);
     return { lo, hi, lastStep, x, y };
-  }, [points, shown, status.componentTrajectories, status.currentStep]);
+  }, [points, shown, status]);
 
   if (!points.length) {
     return (
@@ -59,7 +60,7 @@ export function TrajectoryChart({ status }: Props) {
   const best = linePath(runningBest(points), x, y);
   const plateauFrom = status.diagnostics?.plateau ? status.diagnostics.plateauSince : null;
   const hovered = hover === null ? null : points[hover];
-  const xTicks = ticks(0, lastStep, 6).map((t) => Math.round(t));
+  const xTicks = stepTicks(lastStep, 6);
 
   function onMove(event: PointerEvent<SVGSVGElement>) {
     const box = event.currentTarget.getBoundingClientRect();
@@ -127,8 +128,8 @@ export function TrajectoryChart({ status }: Props) {
             </text>
           </g>
         ))}
-        {xTicks.map((t, i) => (
-          <text key={`${t}-${i}`} x={x(t)} y={HEIGHT - 6} textAnchor="middle" fontSize={10} fill="var(--text-faint)">
+        {xTicks.map((t) => (
+          <text key={t} x={x(t)} y={HEIGHT - 6} textAnchor="middle" fontSize={10} fill="var(--text-faint)">
             {t}
           </text>
         ))}

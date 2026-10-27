@@ -22,6 +22,13 @@ import { ArtifactButton } from "./ArtifactButton";
 
 type ToolStep = Extract<TurnBlock, { kind: "tool" }>;
 
+/** When a turn ran, how long it took and what it cost. */
+interface TurnMeta {
+  at: string;
+  took: string;
+  tokens: string | null;
+}
+
 interface Props {
   turn: AgentTurn;
   theme: Theme;
@@ -64,7 +71,9 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
   const texts = turn.blocks.flatMap((block) => (block.kind === "text" ? [block.content] : []));
   const onlyAlerts = turn.blocks.length > 0 && turn.blocks.every((block) => block.kind === "alert");
   const stopped = texts.length === 0 && turn.blocks.some((block) => block.kind === "cancelled");
-  const title = onlyAlerts ? "Monitor alert" : stopped ? "Stopped" : running && texts.length === 0 && steps.length === 0 ? "Working…" : answerTitle(texts, tools);
+  const title = onlyAlerts ? "Monitor alert" : stopped ? "Stopped" : answerTitle(texts, tools);
+  // Nothing has come back yet, so there is nothing to title: LiveStatus is the only progress line.
+  const titled = !(running && texts.length === 0 && steps.length === 0);
   const firstText = turn.blocks.find((block) => block.kind === "text");
   const links = turn.done ? artifactLinks(panels, tools) : [];
   const failedGate = uniqueStructures(panels).filter((panel) => gate(panel.metrics).status === "fail");
@@ -72,9 +81,11 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
 
   return (
     <article className="flex flex-col gap-3" aria-busy={running}>
-      <h3 className="text-body truncate text-sm leading-snug font-semibold" title={title}>
-        {title}
-      </h3>
+      {titled && (
+        <h3 className="text-body truncate text-sm leading-snug font-semibold" title={title}>
+          {title}
+        </h3>
+      )}
 
       {running && <LiveStatus steps={steps} thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null} now={now} />}
 
@@ -124,11 +135,11 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
           steps={steps}
           thoughts={thoughts.map((block) => block.content)}
           failed={failedSteps}
-          meta={[
-            clock(turn.at),
-            duration(elapsed),
-            turn.tokens ? `${turn.tokens.input.toLocaleString()} in · ${turn.tokens.output.toLocaleString()} out` : null,
-          ]}
+          meta={{
+            at: clock(turn.at),
+            took: duration(elapsed),
+            tokens: turn.tokens ? `${turn.tokens.input.toLocaleString()} in · ${turn.tokens.output.toLocaleString()} out` : null,
+          }}
           now={now}
         />
       )}
@@ -184,11 +195,10 @@ function TurnTrace({
   steps: ToolStep[];
   thoughts: string[];
   failed: number;
-  meta: (string | null)[];
+  meta: TurnMeta;
   now: number;
 }) {
   const [open, setOpen] = useState(false);
-  const details = meta.filter(Boolean);
   return (
     <div className="text-[11px]">
       <button
@@ -205,7 +215,7 @@ function TurnTrace({
       </button>
       {open && (
         <div className="mt-2 flex flex-col gap-2">
-          {details.length > 0 && <p className="text-faint">{details.join(" · ")}</p>}
+          <TurnMetaList meta={meta} />
           {steps.length > 0 && <StepList steps={steps} now={now} />}
           {thoughts.map((content, index) => (
             <p key={index} className="text-muted border-subtle border-l-2 py-0.5 pl-3 text-xs whitespace-pre-wrap">
@@ -213,6 +223,22 @@ function TurnTrace({
             </p>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function TurnMetaList({ meta }: { meta: TurnMeta }) {
+  return (
+    <div className="text-faint flex flex-col gap-0.5">
+      <p>{meta.at}</p>
+      <p>
+        <span className="text-muted">Duration</span> {meta.took}
+      </p>
+      {meta.tokens && (
+        <p>
+          <span className="text-muted">Token</span> {meta.tokens}
+        </p>
       )}
     </div>
   );

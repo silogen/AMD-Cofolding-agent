@@ -368,6 +368,9 @@ class RichEventHandler:
     def on_error(self, message: str) -> None:
         print_error(message)
 
+    def on_notice(self, message: str) -> None:
+        print_status(message)
+
     def on_monitor_alert(self, alert: dict[str, Any]) -> None:
         print_monitor_alert(alert)
 

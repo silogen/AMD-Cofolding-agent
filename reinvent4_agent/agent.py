@@ -19,17 +19,36 @@ import contextlib
 import json
 import logging
 import os
+import random
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from reinvent4_agent.backends import ChatResult, LLMBackend, ToolResult
+from reinvent4_agent.backends import (
+    ChatResult,
+    LLMBackend,
+    ToolResult,
+    TransientEndpointError,
+)
 from reinvent4_agent.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 20
+
+#: Attempts per LLM call while the endpoint is merely unreachable.  A locally
+#: served model that is restarting is back within seconds, and without this
+#: the whole turn — tool results and all — is lost with it.
+MAX_LLM_ATTEMPTS = 3
+
+#: First wait between attempts, doubled each time, plus a little jitter so
+#: several agents do not come back in lockstep.
+LLM_RETRY_DELAY = 5.0
+
+#: Ceiling on the waiting, so a genuinely dead endpoint is reported promptly
+#: instead of leaving the user watching a spinner.
+LLM_RETRY_BUDGET = 30.0
 
 #: A turn ends once the same tool fails this often with the same arguments:
 #: the model is looping, and each retry costs a full LLM round.
@@ -54,6 +73,7 @@ class AgentEventHandler(Protocol):
     def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None: ...
     def on_tool_result(self, name: str, result: str, is_error: bool) -> None: ...
     def on_error(self, message: str) -> None: ...
+    def on_notice(self, message: str) -> None: ...
     def on_monitor_alert(self, alert: dict[str, Any]) -> None: ...
     def on_monitor_response(self, text: str) -> None: ...
 
@@ -65,6 +85,7 @@ class _NullEventHandler:
     def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None: pass
     def on_tool_result(self, name: str, result: str, is_error: bool) -> None: pass
     def on_error(self, message: str) -> None: pass
+    def on_notice(self, message: str) -> None: pass
     def on_monitor_alert(self, alert: dict[str, Any]) -> None: pass
     def on_monitor_response(self, text: str) -> None: pass
 
@@ -152,12 +173,7 @@ class Agent:
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             t0 = time.monotonic()
-            # Off the event loop: a reasoning model can take minutes, and the
-            # web gateway must keep answering WebSocket pings meanwhile.
-            self._inflight = asyncio.ensure_future(
-                asyncio.to_thread(self.backend.complete, tools, self.max_tokens)
-            )
-            result = await asyncio.shield(self._inflight)
+            result = await self._complete(tools)
             elapsed = time.monotonic() - t0
 
             self.total_input_tokens += result.input_tokens
@@ -235,6 +251,57 @@ class Agent:
         logger.warning("Turn %d — max tool rounds reached", self._turn)
         self._write_event("max_rounds", {"turn": self._turn})
         return msg
+
+    async def _complete(self, tools: list[dict[str, Any]]) -> ChatResult:
+        """One LLM call, retried while the endpoint is only unreachable.
+
+        The call runs off the event loop: a reasoning model can take minutes,
+        and the web gateway must keep answering WebSocket pings meanwhile.
+        Only a transient failure is retried — a rejected request or a tool
+        error would fail identically — and the waiting is interruptible, so
+        stopping the turn still stops it at once.
+        """
+        budget = LLM_RETRY_BUDGET
+        attempt = 0
+        while True:
+            attempt += 1
+            self._inflight = asyncio.ensure_future(
+                asyncio.to_thread(self.backend.complete, tools, self.max_tokens)
+            )
+            try:
+                return await asyncio.shield(self._inflight)
+            except (TransientEndpointError, TimeoutError) as exc:
+                delay = min(
+                    LLM_RETRY_DELAY * 2 ** (attempt - 1) * (1 + random.uniform(0, 0.25)),
+                    budget,
+                )
+                if attempt >= MAX_LLM_ATTEMPTS or delay <= 0:
+                    logger.error(
+                        "Turn %d — the endpoint stayed unreachable over %d attempt(s)",
+                        self._turn,
+                        attempt,
+                    )
+                    raise TransientEndpointError(
+                        f"The model endpoint did not answer after {attempt} "
+                        "attempts; it may be restarting, so try again in a "
+                        f"moment.\n{exc}"
+                    ) from exc
+                budget -= delay
+                logger.warning(
+                    "Turn %d — the endpoint did not answer (attempt %d of %d); "
+                    "retrying in %.1fs: %s",
+                    self._turn,
+                    attempt,
+                    MAX_LLM_ATTEMPTS,
+                    delay,
+                    str(exc).partition("\n")[0],
+                )
+                self._write_event("llm_retry", {"attempt": attempt, "delay_s": round(delay, 2)})
+                self._events.on_notice(
+                    "The model endpoint is not answering, retrying "
+                    f"({attempt + 1} of {MAX_LLM_ATTEMPTS})..."
+                )
+                await asyncio.sleep(delay)
 
     async def _handle_tool_calls(
         self, result: ChatResult, round_idx: int

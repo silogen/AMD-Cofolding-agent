@@ -32,6 +32,16 @@ class EndpointError(ConnectionError):
     """
 
 
+class TransientEndpointError(EndpointError):
+    """The endpoint could not be reached, so the same call may yet succeed.
+
+    Connection failures and timeouts say nothing about the request — a
+    locally served model that is restarting looks exactly like this — while
+    a rejected request fails the same way however often it is sent.  Only
+    this subclass is worth retrying.
+    """
+
+
 @dataclass
 class ToolCall:
     """A single tool invocation requested by the LLM."""

@@ -8,6 +8,7 @@ import { candidatesSdf, candidatesSheet, fileName } from "../../lib/csv";
 import { duration } from "../../lib/format";
 import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
+  bestScore,
   canResume,
   candidateScores,
   convergenceTone,
@@ -27,6 +28,7 @@ import {
   resumePrompt,
   reviewPrompt,
   runtimeMs,
+  scoringComponents,
   severityTone,
   shortDate,
   stateTone,
@@ -241,6 +243,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const jobAlerts = uniqueAlerts([...(diagnostics?.warnings ?? []), ...alerts.filter((a) => a.jobId === job.id)]);
   const top = candidates && candidates.id === job.id ? candidates : null;
   const runtime = runtimeMs(job);
+  const best = bestScore(s, top?.value ?? []);
 
   return (
     <div className="@container flex h-full min-h-0 text-xs">
@@ -349,7 +352,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </Note>
         )}
 
-        <div className="border-subtle mt-3 grid grid-cols-2 border-y @lg:grid-cols-5">
+        <div className={`border-subtle mt-3 grid grid-cols-2 border-y ${best === null ? "@lg:grid-cols-4" : "@lg:grid-cols-5"}`}>
           <Stat label="Progress" value={share === null ? "—" : `${Math.round(share * 100)}%`} />
           <Stat
             label={job.type === "transfer_learning" ? "Epochs" : "Step"}
@@ -361,7 +364,8 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           />
           <Stat label="Molecules" value={int(s?.molecules)} />
           <Stat label="Valid" value={pct(s?.validity)} />
-          <Stat label="Best" value={fmt(s?.bestScore)} />
+          {/* Nothing reports a best score on some servers; an em dash in its place only looks broken. */}
+          {best !== null && <Stat label="Best" value={fmt(best)} />}
         </div>
         <div className="bg-inset mt-2 h-1.5 overflow-hidden rounded-full">
           <div
@@ -409,7 +413,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
             <Card title="Component health" inGrid>
               {diagnostics.health.length ? (
                 diagnostics.health.map((h) => {
-                  const stats = s?.components.find((c) => c.name === h.name);
+                  const stats = scoringComponents(s).find((c) => c.name === h.name);
                   return (
                     <div key={h.name} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 py-0.5">
                       <span className="truncate" title={h.name}>{h.name}</span>

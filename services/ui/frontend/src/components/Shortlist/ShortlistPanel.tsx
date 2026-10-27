@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { Theme } from "../../hooks/useTheme";
 import { useRDKit } from "../../hooks/useRDKit";
 import { download } from "../../lib/api";
@@ -9,7 +9,21 @@ import type { Artifacts } from "../../lib/artifacts";
 import { buildCandidates } from "../../lib/candidates";
 import { fileName, toCsv } from "../../lib/csv";
 import { descriptors, withMol } from "../../lib/rdkit";
-import { admetPrompt, removeStar, shortlistColumns, shortlistPrompt, shortlistSdf, shortlistSeeds, shortlistSheet, shortlistValues, useShortlist, type KnownValues } from "../../lib/shortlist";
+import {
+  admetPrompt,
+  mergeShortlist,
+  parseShortlistFile,
+  removeStar,
+  shortlistColumns,
+  shortlistJson,
+  shortlistPrompt,
+  shortlistSdf,
+  shortlistSeeds,
+  shortlistSheet,
+  shortlistValues,
+  useShortlist,
+  type KnownValues,
+} from "../../lib/shortlist";
 import { latestTtp, toolEvents } from "../../lib/ttp";
 import { DownloadIcon, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
@@ -33,6 +47,7 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
   const entries = useShortlist(sessionId ?? "new");
   const { rdkit } = useRDKit();
   const [seeding, setSeeding] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
   const candidates = useMemo(() => new Map(buildCandidates(artifacts).map((c) => [c.smiles, c])), [artifacts]);
   const sessionTtpId = useMemo(() => latestTtp(toolEvents(artifacts.steps)).id, [artifacts.steps]);
 
@@ -54,15 +69,40 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
     return [...scores, ...DESCRIPTORS.filter((d) => all.includes(d))];
   }, [entries, known]);
 
+  const session = sessionId ?? "new";
+  const importFile = (text: string | null) => {
+    if (text === null) {
+      setNote("That file could not be read");
+      return;
+    }
+    try {
+      const { added, skipped } = mergeShortlist(session, parseShortlistFile(text));
+      setNote(added === 0 ? `Already starred: ${skipped} molecule${skipped === 1 ? "" : "s"}` : `${added} imported${skipped ? `, ${skipped} already starred` : ""}`);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "That file could not be imported");
+    }
+  };
+
   if (entries.length === 0) {
-    return <p className="text-faint flex-1 px-8 py-12 text-center text-xs leading-relaxed">Star molecules in Results, Candidates or the chat to collect them here.</p>;
+    return (
+      <div className="flex-1 px-8 py-12 text-center">
+        <p className="text-faint text-xs leading-relaxed">Star molecules in Results, Candidates or the chat to collect them here.</p>
+        <p className="mt-3">
+          <ImportButton onFile={importFile} />
+        </p>
+        {note && <p className="text-faint mt-1 text-[10px]">{note}</p>}
+      </div>
+    );
   }
 
-  const name = `shortlist ${sessionId ?? "new"}`;
+  const name = `shortlist ${session}`;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="text-faint flex shrink-0 items-center gap-1 px-3 py-1.5 text-[11px]">
-        <span className="mr-auto">{entries.length} starred</span>
+      <div className="text-faint flex shrink-0 flex-wrap items-center gap-1 px-3 py-1.5 text-[11px]">
+        <span className="mr-auto min-w-0 truncate">
+          {entries.length} starred
+          {note && <span className="ml-2">· {note}</span>}
+        </span>
         <TextButton
           title="Download the shortlist as CSV, with every known score"
           onClick={() => {
@@ -79,6 +119,13 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
         >
           <DownloadIcon /> SDF
         </TextButton>
+        <TextButton
+          title="Download the shortlist as JSON, to keep it or to import it in another browser"
+          onClick={() => download(fileName(name, "json"), shortlistJson(entries, session), "application/json")}
+        >
+          <DownloadIcon /> JSON
+        </TextButton>
+        <ImportButton onFile={importFile} />
         <TextButton title="Start a Mol2Mol run from these molecules" onClick={() => setSeeding(!seeding)}>
           Use as seeds…
         </TextButton>
@@ -133,7 +180,7 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
                   <td className="border-subtle border-b pr-1 text-right">
                     <button
                       type="button"
-                      onClick={() => removeStar(sessionId ?? "new", e.smiles)}
+                      onClick={() => removeStar(session, e.smiles)}
                       aria-label={`Remove ${e.label ?? e.smiles} from the shortlist`}
                       title="Remove"
                       className="text-faint hover:text-body cursor-pointer px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 touch:opacity-100"
@@ -148,5 +195,29 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
         </table>
       </div>
     </div>
+  );
+}
+
+/** Reads a shortlist JSON file the user picks; the panel merges it. */
+function ImportButton({ onFile }: { onFile: (text: string | null) => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <TextButton title="Import a shortlist JSON file, adding the molecules that are not starred yet" onClick={() => input.current?.click()}>
+        Import JSON…
+      </TextButton>
+      <input
+        ref={input}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          // Cleared so picking the same file again fires another change.
+          event.target.value = "";
+          if (file) void file.text().then(onFile, () => onFile(null));
+        }}
+      />
+    </>
   );
 }

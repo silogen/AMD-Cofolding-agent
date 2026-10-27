@@ -623,7 +623,9 @@ async def _forward_events(websocket: WebSocket, queue: asyncio.Queue[dict[str, A
     """Send the session's new events to the browser until cancelled."""
     while True:
         event = await queue.get()
-        if event.get("seq", 0) <= after:
+        # Unnumbered events (a notice) belong to no replay, so they are never
+        # the duplicates this skips.
+        if "seq" in event and event["seq"] <= after:
             continue
         try:
             await websocket.send_json(event)

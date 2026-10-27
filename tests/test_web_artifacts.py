@@ -11,6 +11,7 @@ Run from the repository root::
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from reinvent4_agent.web import artifacts
@@ -381,3 +382,108 @@ def test_results_recorded_without_panels_get_them_on_load():
 
     assert "properties" in kinds(refreshed[1]["panels"])
     assert refreshed[2]["panels"] == []
+
+
+# -- titles backfilled when an old session is opened -----------------------
+
+
+def conversation(question="c1cc(COc2cncnc2)ncn1", answer="## Score: aminopyrimidine series\n\nbody"):
+    events = [{"type": "user_message", "content": question}]
+    if answer is not None:
+        events.append({"type": "assistant_message", "content": answer})
+    return events
+
+
+def test_an_automatic_smiles_title_is_replaced_by_the_answer_heading():
+    from reinvent4_agent.web.sessions import backfill_title
+
+    meta = {"title": "c1cc(COc2cncnc2)ncn1", "auto_title": True}
+
+    assert backfill_title(meta, conversation()) is True
+    assert meta == {"title": "Score: aminopyrimidine series", "auto_title": False}
+
+
+def test_a_title_recorded_before_auto_title_existed_is_matched_to_the_question():
+    from reinvent4_agent.web.sessions import backfill_title
+
+    meta = {"title": "c1cc(COc2cncnc2)ncn1"}
+
+    assert backfill_title(meta, conversation()) is True
+    assert meta["title"] == "Score: aminopyrimidine series"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"title": "BRD4 campaign", "auto_title": False},
+        {"title": "BRD4 campaign"},
+    ],
+    ids=["renamed", "renamed before auto_title existed"],
+)
+def test_a_title_the_user_chose_is_left_alone(meta):
+    from reinvent4_agent.web.sessions import backfill_title
+
+    before = dict(meta)
+
+    assert backfill_title(meta, conversation()) is False
+    assert meta == before
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [None, "No heading, just prose about the series."],
+    ids=["no answer", "answer without a heading"],
+)
+def test_a_session_with_nothing_to_name_it_after_keeps_its_title(answer):
+    from reinvent4_agent.web.sessions import backfill_title
+
+    meta = {"title": "c1cc(COc2cncnc2)ncn1", "auto_title": True}
+
+    assert backfill_title(meta, conversation(answer=answer)) is False
+    assert meta["title"] == "c1cc(COc2cncnc2)ncn1"
+
+
+def test_a_backfilled_title_is_not_rewritten_by_a_later_answer():
+    from reinvent4_agent.web.sessions import backfill_title
+
+    meta = {"title": "c1cc(COc2cncnc2)ncn1", "auto_title": True}
+    backfill_title(meta, conversation())
+
+    assert backfill_title(meta, conversation(answer="## A later heading\n")) is False
+    assert meta["title"] == "Score: aminopyrimidine series"
+
+
+def test_a_notice_reaches_the_watchers_without_joining_the_conversation(tmp_path):
+    """Replayed on a reconnect, a retry notice would be stale and confusing."""
+    from reinvent4_agent.web.sessions import LiveSession, SessionStore
+
+    store = SessionStore(tmp_path)
+    session_id = "s-20260101-000000-abcdef"
+    store.create({"id": session_id, "title": ""})
+    live = LiveSession(meta={"id": session_id}, store=store)
+    queue = live.subscribe()
+
+    live.publish({"type": "notice", "message": "The model endpoint is not answering, retrying (2 of 3)..."})
+
+    assert queue.get_nowait()["type"] == "notice"
+    assert live.events == []
+    assert live.last_seq == 0
+    assert store.load_events(session_id) == []
+
+
+def test_opening_a_stored_session_saves_the_backfilled_title(tmp_path):
+    """The rename has to reach disk, or the sidebar shows the SMILES again."""
+    from reinvent4_agent.web.sessions import SessionManager, SessionStore
+
+    store = SessionStore(tmp_path)
+    session_id = "s-20260101-000000-abcdef"
+    store.create({"id": session_id, "title": "c1cc(COc2cncnc2)ncn1", "auto_title": True, "turns": 1})
+    for event in conversation():
+        store.append_event(session_id, event)
+
+    manager = SessionManager(store, lambda handler: SimpleNamespace())
+    live = manager.get(session_id)
+
+    assert live is not None
+    assert live.meta["title"] == "Score: aminopyrimidine series"
+    assert store.load_meta(session_id)["title"] == "Score: aminopyrimidine series"

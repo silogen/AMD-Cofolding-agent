@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import type { PropertiesPanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { propertiesSheet } from "../../lib/csv";
-import { endpointLabel, endpointRange, endpointUnit, formatValue, serviceName } from "../../lib/properties";
+import { endpointLabel, endpointRange, endpointTitle, endpointUnit, formatValue, serviceName, shortUnit } from "../../lib/properties";
 import { radarData } from "../../lib/radar";
 import { ExportButtons } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
@@ -13,6 +13,8 @@ import { SmilesText } from "../MolDepiction/SmilesText";
 import { RadarChart } from "./RadarChart";
 
 const RADAR_MAX = 5;
+/** Endpoints shown before the "+N more" affordance; the exports always carry them all. */
+const SHOWN_ENDPOINTS = 6;
 
 interface Props {
   panel: PropertiesPanel;
@@ -30,8 +32,11 @@ interface Props {
  */
 export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: Props) {
   const [view, setView] = useState<"table" | "radar">("table");
+  const [allEndpoints, setAllEndpoints] = useState(false);
   const radar = useMemo(() => radarData(panel, RADAR_MAX), [panel]);
   const rows = limit ? panel.molecules.slice(0, limit) : panel.molecules;
+  const endpoints = allEndpoints ? panel.endpoints : panel.endpoints.slice(0, SHOWN_ENDPOINTS);
+  const hiddenEndpoints = panel.endpoints.length - endpoints.length;
   const hidden = panel.molecules.length - rows.length;
   const outside = panel.molecules.filter((m) => m.adPass === false).length;
   const showRadar = view === "radar" && radar !== null;
@@ -44,6 +49,17 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
         <span className="text-faint ml-auto shrink-0 text-[11px]">
           {panel.molecules.length} molecule{panel.molecules.length === 1 ? "" : "s"} · {panel.endpoints.length} endpoints
         </span>
+        {(hiddenEndpoints > 0 || allEndpoints) && !showRadar && (
+          <button
+            type="button"
+            onClick={() => setAllEndpoints(!allEndpoints)}
+            aria-expanded={allEndpoints}
+            title={allEndpoints ? `Show the first ${SHOWN_ENDPOINTS} endpoints only` : `Show the ${hiddenEndpoints} endpoint${hiddenEndpoints === 1 ? "" : "s"} not in the table`}
+            className="text-faint hover:text-body hover:bg-inset shrink-0 cursor-pointer rounded px-1 text-[11px] font-medium touch:min-h-11"
+          >
+            {allEndpoints ? "fewer" : `+${hiddenEndpoints} more`}
+          </button>
+        )}
         {radar && (
           <span role="group" aria-label="View" className="bg-sunken flex shrink-0 rounded-md p-0.5 text-[10px] font-medium">
             {(["table", "radar"] as const).map((v) => (
@@ -67,12 +83,13 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
           <thead>
             <tr className="text-muted border-subtle border-b text-left">
               <th className="px-2 py-1.5 font-medium">Molecule</th>
-              {panel.endpoints.map((endpoint) => {
+              {endpoints.map((endpoint) => {
                 const unit = endpointUnit(panel, endpoint);
+                const short = shortUnit(unit);
                 return (
-                  <th key={endpoint} className="px-2 py-1.5 text-right font-medium whitespace-nowrap" title={endpoint}>
+                  <th key={endpoint} className="px-2 py-1.5 text-right font-medium whitespace-nowrap" title={endpointTitle(endpoint, unit)}>
                     {endpointLabel(endpoint)}
-                    {unit && <span className="text-faint block text-[9px] font-normal">{unit}</span>}
+                    {short && <span className="text-faint ml-1 text-[9px] font-normal">{short}</span>}
                   </th>
                 );
               })}
@@ -116,7 +133,7 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
                   )}
                 </td>
                 {molecule.ok ? (
-                  panel.endpoints.map((endpoint) => {
+                  endpoints.map((endpoint) => {
                     const value = molecule.values[endpoint];
                     const range = endpointRange(panel, endpoint);
                     const share = value && range ? (value.mean - range[0]) / (range[1] - range[0]) : null;
@@ -132,7 +149,7 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
                     );
                   })
                 ) : (
-                  <td colSpan={panel.endpoints.length} className="text-faint px-2 py-1">
+                  <td colSpan={endpoints.length} className="text-faint px-2 py-1">
                     <span className="sr-only">No predictions</span>
                     <span aria-hidden="true">—</span>
                   </td>
@@ -161,7 +178,7 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
               {outside} outside the applicability domain
             </span>
           )}
-          {hidden > 0 && <span>{hidden} more</span>}
+          {hidden > 0 && <span>{hidden} more molecules</span>}
           {onOpen && (
             <button type="button" onClick={onOpen} className="hover:text-body ml-auto cursor-pointer font-medium">
               Open in workbench

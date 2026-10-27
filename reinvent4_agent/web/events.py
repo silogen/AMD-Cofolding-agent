@@ -96,6 +96,9 @@ class WebSocketEventHandler:
     def on_error(self, message: str) -> None:
         self._emit({"type": "error", "message": message})
 
+    def on_notice(self, message: str) -> None:
+        self._emit({"type": "notice", "message": message})
+
     def on_monitor_alert(self, alert: dict[str, Any]) -> None:
         self._emit({"type": "monitor_alert", "alert": _safe_json(alert)})
 

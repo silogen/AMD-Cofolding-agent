@@ -22,6 +22,7 @@ from reinvent4_agent.backends import (
     LLMBackend,
     ToolCall,
     ToolResult,
+    TransientEndpointError,
     connection_failure_report,
 )
 
@@ -118,7 +119,8 @@ class AnthropicBackend(LLMBackend):
         try:
             response = self.client.messages.create(**kwargs)
         except anthropic.APIConnectionError as exc:
-            raise EndpointError(
+            # Also covers APITimeoutError, which the SDK derives from it.
+            raise TransientEndpointError(
                 connection_failure_report(
                     exc,
                     self.base_url or "https://api.anthropic.com",

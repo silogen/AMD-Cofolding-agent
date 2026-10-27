@@ -33,6 +33,7 @@ from reinvent4_agent.backends import (
     LLMBackend,
     ToolCall,
     ToolResult,
+    TransientEndpointError,
     connection_failure_report,
     empty_response_report,
     rejected_request_report,
@@ -362,7 +363,8 @@ class OpenAIBackend(LLMBackend):
         try:
             return self.client.chat.completions.create(**kwargs)
         except openai.APIConnectionError as exc:
-            raise EndpointError(
+            # Also covers APITimeoutError, which the SDK derives from it.
+            raise TransientEndpointError(
                 connection_failure_report(
                     exc,
                     self._endpoint_label(),

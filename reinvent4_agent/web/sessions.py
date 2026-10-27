@@ -95,6 +95,42 @@ def refresh_panels(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return events
 
 
+def backfill_title(meta: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    """Rename a still-automatic title after the first answer's heading.
+
+    Sessions recorded before titles came from the answer are named after the
+    first line of the question, which is often a raw SMILES and tells the
+    user nothing.  Returns whether the title changed, so the caller can save
+    the metadata; clearing ``auto_title`` keeps it a one-off, and a title the
+    user chose is never touched.
+    """
+    if "auto_title" in meta:
+        if not meta["auto_title"]:
+            return False
+    elif meta.get("title", "") != _first_user_line(events):
+        # Recorded before auto_title existed: only a title that still matches
+        # the question verbatim can be assumed to be automatic.
+        return False
+
+    first_answer = next(
+        (e for e in events if e.get("type") == "assistant_message"),
+        None,
+    )
+    heading = first_heading(str((first_answer or {}).get("content") or ""))
+    if not heading:
+        return False
+    meta["title"] = heading[:_TITLE_CHARS]
+    meta["auto_title"] = False
+    return True
+
+
+def _first_user_line(events: list[dict[str, Any]]) -> str:
+    """The title ``start_turn`` would have derived from the first question."""
+    first = next((e for e in events if e.get("type") == "user_message"), None)
+    content = str((first or {}).get("content") or "").strip()
+    return content.splitlines()[0][:_TITLE_CHARS] if content else ""
+
+
 class SessionStore:
     """Reads and writes session directories below *root*."""
 
@@ -204,7 +240,16 @@ class LiveSession:
         return self.events[-1]["seq"] if self.events else 0
 
     def publish(self, event: dict[str, Any]) -> None:
-        """Number, record and fan out one event."""
+        """Number, record and fan out one event.
+
+        A notice speaks to whoever is watching now rather than to the
+        conversation, so it is neither numbered nor recorded: replayed on a
+        reconnect it would announce a retry that finished long ago.
+        """
+        if event.get("type") == "notice":
+            for queue in list(self.subscribers):
+                queue.put_nowait(event)
+            return
         event = {**event, "seq": self.last_seq + 1, "ts": _now()}
         self.events.append(event)
         self.store.append_event(self.id, event)
@@ -337,6 +382,8 @@ class SessionManager:
         if meta is None:
             return None
         live = LiveSession(meta=meta, store=self.store, events=self.store.load_events(session_id))
+        if backfill_title(live.meta, live.events):
+            self.store.save_meta(live.meta)
         self._attach_agent(live)
         history = self.store.load_history(session_id)
         if history:
