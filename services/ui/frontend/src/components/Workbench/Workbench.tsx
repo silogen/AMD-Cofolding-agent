@@ -76,10 +76,10 @@ const LABEL: Record<DockTab, string> = {
   assets: "Assets",
 };
 /** The tabs the dock offers; "tables" is gone, though saved tab lists and old links may still name it. */
-const TABS: readonly DockTab[] = DOCK_TABS.filter((id) => id !== "tables");
+const TABS: readonly DockTab[] = DOCK_TABS.filter((id) => id !== "tables" && id !== "results");
 const openable = (ids: readonly DockTab[], id: DockTab) => (TABS.includes(id) ? openTab(ids, id) : [...ids]);
 /** Tabs a molecule page opens over; from any other, it opens over Molecules. */
-const PAGE_TABS: readonly DockTab[] = ["molecules", "results", "jobs"];
+const PAGE_TABS: readonly DockTab[] = ["molecules", "jobs"];
 
 /** A molecule's page, shown over the list of the tab it was opened from. */
 interface Page {
@@ -97,6 +97,7 @@ const MOLECULE_VIEWS = [
 ] as const;
 const JOB_VIEWS = [
   { id: "jobs", label: "Jobs" },
+  { id: "results", label: "Results" },
   { id: "activity", label: "Activity" },
 ] as const;
 
@@ -367,13 +368,13 @@ export const Workbench = memo(function Workbench(props: Props) {
                   <JobsPanel sessionId={sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={show} />
                 </div>
               )}
+              {tab === "results" && (
+                <div className="min-h-0 flex-1">
+                  <RunResults artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />
+                </div>
+              )}
               {tab === "activity" && <ActivityTab {...props} />}
             </>
-          )}
-          {active === "results" && (
-            <div className="min-h-0 flex-1">
-              <RunResults artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />
-            </div>
           )}
           {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
         </div>

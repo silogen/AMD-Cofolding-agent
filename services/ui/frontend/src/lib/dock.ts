@@ -18,7 +18,13 @@ export type DockView = DockTab | "candidates" | "properties" | "shortlist" | "ac
 export const DOCK_TABS: readonly DockTab[] = ["structure", "molecules", "tables", "jobs", "results", "target", "ttp", "assets"];
 
 /** Views that used to be tabs of their own; saved tab lists still name them. */
-const MERGED: Partial<Record<DockView, DockTab>> = { candidates: "molecules", properties: "molecules", shortlist: "molecules", activity: "jobs" };
+const MERGED: Partial<Record<DockView, DockTab>> = {
+  candidates: "molecules",
+  properties: "molecules",
+  shortlist: "molecules",
+  activity: "jobs",
+  results: "jobs",
+};
 
 /** The tab that shows `view`. */
 export function dockTabOf(view: DockView): DockTab {

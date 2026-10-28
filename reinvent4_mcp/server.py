@@ -10,11 +10,13 @@ available components/models, and (in later phases) running RL optimization.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import sys
-from typing import Any, Annotated
+from typing import Any, Annotated, Callable
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
@@ -34,11 +36,32 @@ mcp = FastMCP(
 )
 
 
+def tool() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Register a tool that runs in a worker thread.
+
+    FastMCP calls synchronous tools on its event loop, so one long call
+    (cofolding takes minutes) would hold up every other request, including
+    the UI's job and results polling. The function itself stays synchronous.
+    """
+
+    register = mcp.tool()
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        async def run(*args: Any, **kwargs: Any) -> Any:
+            return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+        register(run)
+        return fn
+
+    return decorate
+
+
 # ---------------------------------------------------------------------------
 # Tool: list_scoring_components
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_scoring_components() -> str:
     """List all available native REINVENT4 scoring components.
 
@@ -60,7 +83,7 @@ def list_scoring_components() -> str:
 # Tool: list_available_models
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_available_models() -> str:
     """List all registered generative model priors and their availability.
 
@@ -79,7 +102,7 @@ def list_available_models() -> str:
 # Tool: list_transforms
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_transforms() -> str:
     """List all available score transform types and their parameters.
 
@@ -97,7 +120,7 @@ def list_transforms() -> str:
 # Tool: list_external_services
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_external_services() -> str:
     """Check health and capabilities of configured external services.
 
@@ -122,7 +145,7 @@ def list_external_services() -> str:
 # Tool: predict_admet
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def predict_admet(
     smiles: Annotated[
         list[str],
@@ -159,7 +182,7 @@ def predict_admet(
 # Tool: predict_retrodmta
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def predict_retrodmta(
     smiles: Annotated[
         list[str],
@@ -205,7 +228,7 @@ def predict_retrodmta(
 # Tool: profile_interactions
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def profile_interactions(
     smiles: Annotated[
         list[str] | None,
@@ -252,7 +275,7 @@ def profile_interactions(
 # Tool: score_molecules
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def score_molecules(
     smiles: Annotated[
         list[str],
@@ -344,7 +367,7 @@ def score_molecules(
 # Tool: create_ttp
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def create_ttp(
     ttp: Annotated[
         dict[str, Any],
@@ -441,7 +464,7 @@ def create_ttp(
 # Tool: update_ttp
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def update_ttp(
     ttp_id: Annotated[
         str,
@@ -494,7 +517,7 @@ def update_ttp(
 # Tool: get_ttp
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def get_ttp(
     ttp_id: Annotated[
         str,
@@ -527,7 +550,7 @@ def get_ttp(
 # Tool: list_ttps
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_ttps() -> str:
     """List all stored TTPs with summary metadata.
 
@@ -544,7 +567,7 @@ def list_ttps() -> str:
 # Tool: delete_ttp
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def delete_ttp(
     ttp_id: Annotated[
         str,
@@ -565,7 +588,7 @@ def delete_ttp(
 # Tool: run_optimization
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def run_optimization(
     ttp_id: Annotated[
         str | None,
@@ -688,7 +711,7 @@ def run_optimization(
 # Tool: get_optimization_status
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def get_optimization_status(
     job_id: Annotated[
         str,
@@ -733,7 +756,7 @@ def get_optimization_status(
 # Tool: stop_optimization
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def stop_optimization(
     job_id: Annotated[
         str,
@@ -758,7 +781,7 @@ def stop_optimization(
 # Tool: run_transfer_learning
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def run_transfer_learning(
     model: Annotated[
         str,
@@ -878,7 +901,7 @@ def run_transfer_learning(
 # Tool: get_top_candidates
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def get_top_candidates(
     job_id: Annotated[
         str | None,
@@ -926,7 +949,7 @@ def get_top_candidates(
 # Tool: read_results
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def read_results(
     csv_path: Annotated[
         str,
@@ -950,7 +973,7 @@ def read_results(
 # Tool: get_job_alerts
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def get_job_alerts() -> str:
     """Check all running jobs for problems that may need intervention.
 
@@ -971,7 +994,7 @@ def get_job_alerts() -> str:
 # Tool: list_jobs
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_jobs() -> str:
     """List all tracked optimization jobs with their current status.
 
@@ -990,7 +1013,7 @@ def list_jobs() -> str:
 # Tool: list_shared_assets
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def list_shared_assets() -> str:
     """List usable files on the shared volume (structures, MSAs, cofold outputs).
 
@@ -1013,7 +1036,7 @@ def list_shared_assets() -> str:
 # Tool: fetch_target_info
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def fetch_target_info(
     query: Annotated[
         str,
@@ -1056,7 +1079,7 @@ def fetch_target_info(
 # Tool: fetch_compound
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@tool()
 def fetch_compound(
     name: Annotated[
         str,

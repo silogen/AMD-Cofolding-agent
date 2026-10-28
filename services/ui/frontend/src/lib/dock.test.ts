@@ -48,11 +48,11 @@ describe("persistence", () => {
     saveTabs("s1", ["structure", "candidates", "properties", "activity", "jobs"], store);
     expect(loadTabs("s1", DOCK_TABS, store)).toEqual(["structure", "molecules", "jobs"]);
   });
-  it("keeps the run results tab", () => {
+  it("opens run results in the jobs tab", () => {
     const store = memory();
-    saveTabs("s1", ["jobs", "results"], store);
-    expect(loadTabs("s1", DOCK_TABS, store)).toEqual(["jobs", "results"]);
-    expect(dockTabOf("results")).toBe("results");
+    saveTabs("s1", ["results", "jobs"], store);
+    expect(loadTabs("s1", DOCK_TABS, store)).toEqual(["jobs"]);
+    expect(dockTabOf("results")).toBe("jobs");
   });
   it("tolerates garbage", () => {
     const store = memory();

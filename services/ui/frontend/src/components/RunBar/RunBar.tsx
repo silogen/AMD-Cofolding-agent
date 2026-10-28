@@ -324,8 +324,8 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
               +{others.length}
             </BarButton>
           )}
-          <BarButton onClick={() => openRun(first.id, "results")} title="Every molecule generated so far">
-            Results
+          <BarButton tone="primary" onClick={() => openRun(first.id, "jobs")} title="Open the job: progress, results and activity">
+            Job
           </BarButton>
           {first.type === "optimization" && first.state === "running" && (
             <BarButton tone="bad" disabled={stopping} onClick={() => setConfirm(true)} title="Stop the run (asks first)">
@@ -363,7 +363,9 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
           <span />
         </button>
         <Actions>
-          {state !== "failed" && <BarButton onClick={() => openRun(job.id, "results")}>Results</BarButton>}
+          <BarButton tone="primary" onClick={() => openRun(job.id, state === "failed" ? "jobs" : "results")} title="Open the job">
+            Job
+          </BarButton>
           <BarButton onClick={() => setFinished(null)} title="Dismiss">
             ×
           </BarButton>
@@ -405,17 +407,21 @@ function BarButton({
   onClick: () => void;
   title?: string;
   disabled?: boolean;
-  tone?: "bad";
+  tone?: "bad" | "primary";
 }) {
+  const look =
+    tone === "bad"
+      ? "text-accent hover:bg-accent-soft"
+      : tone === "primary"
+        ? "bg-raised border-subtle text-body hover:bg-inset border shadow-sm"
+        : "text-muted hover:text-body hover:bg-inset";
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
       disabled={disabled}
-      className={`inline-flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 font-medium disabled:cursor-default disabled:opacity-40 ${
-        tone === "bad" ? "text-accent hover:bg-accent-soft" : "text-muted hover:text-body hover:bg-inset"
-      }`}
+      className={`inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-2 py-0.5 font-medium disabled:cursor-default disabled:opacity-40 ${look}`}
     >
       {children}
     </button>
