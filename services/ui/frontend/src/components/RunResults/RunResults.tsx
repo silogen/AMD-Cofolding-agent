@@ -8,7 +8,8 @@ import { sameFile, type Artifacts } from "../../lib/artifacts";
 import { assetUrl } from "../../lib/assets";
 import { fileName } from "../../lib/csv";
 import { canResume, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
-import { openRunStructure, rowMetrics, runStructurePanel } from "../../lib/jobStructures";
+import { openRunStructure, rowMetrics, rowMolecule, runStructurePanel } from "../../lib/jobStructures";
+import type { MoleculeContext } from "../../lib/moleculePage";
 import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
   defaultColumns,
@@ -29,15 +30,13 @@ import { focusRun, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { ContinueRun } from "../JobsPanel/ContinueRun";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { SmilesText } from "../MolDepiction/SmilesText";
 import { StarButton } from "../Shortlist/StarButton";
-import { ScoreWhy } from "./ScoreWhy";
 
 interface Props {
   artifacts: Artifacts;
   theme: Theme;
   sessionId: string | null;
-  onOpenMolecule?: (smiles: string) => void;
+  onOpenMolecule?: (smiles: string, context?: MoleculeContext) => void;
   onAsk?: (prompt: string) => void;
 }
 
@@ -102,12 +101,10 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewport, setViewport] = useState(600);
-  const [detailFor, setDetailFor] = useState<{ runId: string; id: number } | null>(null);
   const [continuing, setContinuing] = useState<string | null>(null);
 
   if (selectedFor.runId !== runId) setSelectedFor({ runId, ids: new Set() });
   const selected = selectedFor.ids;
-  const detail = table && detailFor && detailFor.runId === runId ? (table.rows[detailFor.id] ?? null) : null;
   const seeds = useMemo(() => (table ? runSeeds(table) : undefined), [table]);
   const session = sessionId ?? "new";
 
@@ -179,8 +176,9 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   const visibleKeys = columnsFor && columnsFor.runId === runId ? columnsFor.keys : table ? defaultColumns(table) : new Set<string>();
   const shownColumns = table ? table.columns.map((column, index) => ({ column, index })).filter(({ column }) => visibleKeys.has(column.key)) : [];
   const hasStructures = table ? table.structureColumn >= 0 && table.rows.some((r) => r.structure) : false;
-  const template = ["24px", "64px", "minmax(180px,1fr)", ...shownColumns.map(() => `${NUMBER_WIDTH}px`), ...(hasStructures ? ["72px"] : [])].join(" ");
-  const minWidth = 24 + 64 + 180 + shownColumns.length * NUMBER_WIDTH + (hasStructures ? 72 : 0) + 16;
+  // The complex right after the SMILES: a run has a dozen score columns, and the last of them is off screen.
+  const template = ["24px", "64px", "minmax(180px,1fr)", ...(hasStructures ? ["56px"] : []), ...shownColumns.map(() => `${NUMBER_WIDTH}px`)].join(" ");
+  const minWidth = 24 + 64 + 180 + (hasStructures ? 56 : 0) + shownColumns.length * NUMBER_WIDTH + 16;
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const last = Math.min(rows.length, Math.ceil((scrollTop + viewport) / ROW_HEIGHT) + OVERSCAN);
@@ -406,6 +404,7 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
               </span>
               <span />
               <SortHeader label="SMILES" active={sortKey === "smiles"} desc={sortDesc} onClick={() => toggleSort("smiles", false)} />
+              {hasStructures && <span className="px-2">Complex</span>}
               {shownColumns.map(({ column, index }) => (
                 <SortHeader
                   key={column.key}
@@ -417,7 +416,6 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
                   onClick={() => toggleSort(index, column.numeric)}
                 />
               ))}
-              {hasStructures && <span className="px-2">Complex</span>}
             </div>
             {rows.length === 0 ? (
               <p className="text-faint py-10 text-center">No rows match.</p>
@@ -434,11 +432,9 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
                     selected={selected.has(row.id)}
                     onToggle={() => toggleRow(row.id)}
                     theme={theme}
-                    onOpenMolecule={onOpenMolecule}
                     structureColumn={hasStructures}
                     onOpenStructure={() => openStructure(row)}
-                    isDetail={row === detail}
-                    onDetail={() => setDetailFor(row === detail ? null : { runId: job.id, id: row.id })}
+                    onOpen={onOpenMolecule && row.smiles ? () => onOpenMolecule(row.smiles, rowMolecule(table, row, job.id, job)) : undefined}
                     star={<StarButton smiles={row.smiles} source={job.id} session={session} values={() => numbersOf(rowValues(table, row))} />}
                   />
                 ))}
@@ -448,37 +444,6 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
         </div>
       )}
 
-      {detail && table && (
-        <div className="border-subtle bg-sunken flex shrink-0 items-start gap-3 border-t px-3 py-2" aria-label="Why this score">
-          <button
-            type="button"
-            onClick={() => onOpenMolecule?.(detail.smiles)}
-            disabled={!onOpenMolecule || !detail.smiles}
-            className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
-            title="Open in Molecules"
-          >
-            {detail.smiles && <MolDepiction smiles={detail.smiles} theme={theme} width={128} height={96} className="size-full" />}
-          </button>
-          <div className="group flex w-40 min-w-0 shrink-0 flex-col gap-0.5">
-            <SmilesText smiles={detail.smiles} className="max-w-32 text-[10px]" />
-            <span className="text-faint tabular-nums">
-              Score {formatCell(detail.total)}
-              {detail.step !== null && ` · step ${detail.step}`}
-            </span>
-            {detail.failure && <span style={{ color: "var(--color-accent)" }}>{detail.failure}</span>}
-          </div>
-          <div className="min-w-0 flex-1">
-            {detail.state === 0 || detail.state === 2 ? (
-              <p className="text-muted">Not scored: REINVENT gives {detail.state === 0 ? "an invalid SMILES" : "a duplicate in the batch"} a score of 0.</p>
-            ) : (
-              <ScoreWhy values={rowValues(table, detail)} ttpId={job.ttpId} ttpVersion={job.ttpVersion} />
-            )}
-          </div>
-          <button type="button" onClick={() => setDetailFor(null)} aria-label="Close" className="text-faint hover:text-body cursor-pointer px-1">
-            ×
-          </button>
-        </div>
-      )}
     </div>
   );
 }
@@ -496,11 +461,9 @@ function Row({
   selected,
   onToggle,
   theme,
-  onOpenMolecule,
   structureColumn,
   onOpenStructure,
-  isDetail,
-  onDetail,
+  onOpen,
   star,
 }: {
   row: RunRow;
@@ -511,38 +474,27 @@ function Row({
   selected: boolean;
   onToggle: () => void;
   theme: Theme;
-  onOpenMolecule?: (smiles: string) => void;
   structureColumn: boolean;
   onOpenStructure: () => void;
-  isDetail: boolean;
-  onDetail: () => void;
+  /** Opens the molecule's page. */
+  onOpen?: () => void;
   star: ReactNode;
 }) {
   const url = row.structure ? assetUrl(row.structure) : null;
-  const edge = isDetail ? "inset 2px 0 0 var(--color-structure)" : row.failure ? "inset 2px 0 0 var(--color-accent)" : undefined;
   return (
     <div
       role="row"
-      onClick={onDetail}
-      title="Click for why it scored this"
-      className={`border-subtle absolute inset-x-0 grid cursor-pointer items-center border-b ${selected || isDetail ? "bg-inset" : "hover:bg-sunken"} ${row.failure ? "text-faint" : ""}`}
-      style={{ top, height: ROW_HEIGHT, gridTemplateColumns: template, boxShadow: edge }}
+      onClick={onOpen}
+      title={onOpen ? "Open the molecule" : undefined}
+      className={`border-subtle absolute inset-x-0 grid items-center border-b ${onOpen ? "cursor-pointer" : ""} ${selected ? "bg-inset" : "hover:bg-sunken"} ${row.failure ? "text-faint" : ""}`}
+      style={{ top, height: ROW_HEIGHT, gridTemplateColumns: template, boxShadow: row.failure ? "inset 2px 0 0 var(--color-accent)" : undefined }}
     >
       <span className="grid place-items-center" onClick={(event) => event.stopPropagation()}>
         <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`Select row ${row.id + 1}`} className="accent-[var(--color-accent)]" />
       </span>
-      <button
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation();
-          onOpenMolecule?.(row.smiles);
-        }}
-        disabled={!onOpenMolecule || !row.smiles}
-        title="Open in Molecules"
-        className="h-full py-0.5 enabled:cursor-pointer"
-      >
+      <span className="h-full py-0.5">
         {row.smiles && <MolDepiction smiles={row.smiles} theme={theme} width={120} height={80} className={`h-full w-full ${row.failure ? "opacity-60" : ""}`} />}
-      </button>
+      </span>
       <span className="flex min-w-0 items-center gap-1 px-2">
         <span className="flex min-w-0 flex-1 flex-col justify-center">
           <span className="truncate font-mono text-[10px]" title={row.smiles}>
@@ -556,20 +508,15 @@ function Row({
         </span>
         {row.smiles && star}
       </span>
-      {columns.map(({ index, integer }) => (
-        <span key={index} className={`truncate px-2 text-right font-mono tabular-nums ${index === sortedBy ? "text-body font-semibold" : ""}`}>
-          {formatCell(row.cells[index], integer)}
-        </span>
-      ))}
       {structureColumn && (
-        <span className="flex items-center gap-0.5 px-1" onClick={(event) => event.stopPropagation()}>
+        <span className="flex items-center" onClick={(event) => event.stopPropagation()}>
           {row.structure && (
             <>
               <button
                 type="button"
                 onClick={onOpenStructure}
                 title={`Show ${row.structure} in the viewer`}
-                className="cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                className="hover:bg-inset cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-semibold"
                 style={{ color: "var(--color-structure)" }}
               >
                 3D
@@ -583,6 +530,11 @@ function Row({
           )}
         </span>
       )}
+      {columns.map(({ index, integer }) => (
+        <span key={index} className={`truncate px-2 text-right font-mono tabular-nums ${index === sortedBy ? "text-body font-semibold" : ""}`}>
+          {formatCell(row.cells[index], integer)}
+        </span>
+      ))}
     </div>
   );
 }

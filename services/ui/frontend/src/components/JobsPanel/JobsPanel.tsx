@@ -1,16 +1,18 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { refreshSessionList, useJobOwners, useRunsKnown, useSessionRuns } from "../../hooks/useSessions";
 import type { Theme } from "../../hooks/useTheme";
 import { callTool, download, jobFileUrl } from "../../lib/api";
 import { candidatesSdf, candidatesSheet, fileName } from "../../lib/csv";
-import { duration } from "../../lib/format";
 import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
+  bestPerStep,
   bestScore,
   canResume,
   candidateScores,
+  conversationJobs,
   convergenceTone,
   errorSummary,
   fmt,
@@ -27,7 +29,6 @@ import {
   resultsFile,
   resumePrompt,
   reviewPrompt,
-  runtimeMs,
   scoringComponents,
   severityTone,
   shortDate,
@@ -35,7 +36,6 @@ import {
   stepsDone,
   toneColor,
   toolError,
-  typeLabel,
   uniqueAlerts,
   type Candidate,
   type JobAlert,
@@ -44,7 +44,9 @@ import {
   type Tone,
 } from "../../lib/jobs";
 import { loadJobStructures, openRunStructure, runStructurePanel, type JobStructure } from "../../lib/jobStructures";
-import { focusRun, notifyRunsChanged, openRun, useFocusedRun } from "../../lib/workbenchBus";
+import type { MoleculeContext } from "../../lib/moleculePage";
+import { parseRunResults } from "../../lib/runResults";
+import { focusRun, notifyRunsChanged, onRunsChanged, openRun, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { SmilesText } from "../MolDepiction/SmilesText";
@@ -55,16 +57,18 @@ import { ContinueRun } from "./ContinueRun";
 import { TrajectoryChart } from "./TrajectoryChart";
 
 interface Props {
-  /** The conversation on screen; a new one reloads the list. Jobs themselves are global. */
+  /** The conversation on screen: only its runs are listed. */
   sessionId?: string;
   theme: Theme;
   /** Hand a request to the chat agent, for what the panel cannot do itself. */
   onAsk: (prompt: string) => void;
-  onOpenMolecule?: (smiles: string) => void;
+  onOpenMolecule?: (smiles: string, context?: MoleculeContext) => void;
 }
 
 /** How often to refresh while a job runs. Nothing is polled once all jobs are done. */
 const POLL_MS = 10_000;
+/** The results file is read again every this many refreshes, for the chart's per-step best. */
+const RESULTS_EVERY = 3;
 const TOP_N = 10;
 
 interface Loaded<T> {
@@ -82,16 +86,27 @@ interface Notice {
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /**
- * REINVENT runs: every job the MCP job manager tracks, and for the selected
- * one its progress, score trajectory, diagnostics, alerts and best molecules.
- * Stop and resume call the tools directly behind a confirmation; anything
- * that needs judgement (adjusting the TTP) goes to the agent through onAsk.
+ * The REINVENT runs of this conversation (and, apart, the ones it only looked
+ * at), and for the selected one its progress, score trajectory, diagnostics,
+ * alerts and best molecules. Stop and resume call the tools directly behind a
+ * confirmation; anything that needs judgement (adjusting the TTP) goes to the
+ * agent through onAsk.
  */
 export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
-  const [jobs, setJobs] = useState<JobSummary[] | null>(null);
+  const [allJobs, setJobs] = useState<JobSummary[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<JobAlert[]>([]);
   const selectedId = useFocusedRun();
+  const runs = useSessionRuns(sessionId);
+  const owners = useJobOwners();
+  const known = useRunsKnown();
+  const listed = useMemo(() => {
+    if (!allJobs || known === null) return null;
+    // A gateway that does not say who launched what: every job, as before.
+    if (!known) return { own: allJobs, seen: [] };
+    return conversationJobs(allJobs, runs, selectedId, owners, sessionId);
+  }, [allJobs, known, runs, selectedId, owners, sessionId]);
+  const jobs = useMemo(() => (listed ? [...listed.own, ...listed.seen] : null), [listed]);
   const [tick, setTick] = useState(0);
   const [status, setStatus] = useState<Loaded<JobStatus | null> | null>(null);
   const [candidates, setCandidates] = useState<Loaded<Candidate[]> | null>(null);
@@ -106,8 +121,11 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const live = (jobs ?? []).some((j) => isActive(j.state));
   const refresh = () => setTick((t) => t + 1);
 
+  useEffect(() => onRunsChanged(() => setTick((t) => t + 1)), []);
+
   useEffect(() => {
     let cancelled = false;
+    refreshSessionList();
     Promise.all([callTool("list_jobs"), callTool("get_job_alerts").catch(() => null)])
       .then(([list, alertList]) => {
         if (cancelled) return;
@@ -171,6 +189,24 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
       cancelled = true;
     };
   }, [activeId, hasResults, growing, tick]);
+
+  const [stepBest, setStepBest] = useState<Loaded<Map<number, number>> | null>(null);
+  const statusHasBest = current?.value?.trajectory.some((p) => p.max !== null) ?? false;
+  const resultsName = summary ? resultsFile(summary) : null;
+  const resultsTick = Math.floor(tick / RESULTS_EVERY);
+  useEffect(() => {
+    if (!activeId || !hasResults || statusHasBest || !resultsName) return;
+    let cancelled = false;
+    fetch(jobFileUrl(activeId, resultsName))
+      .then((response) => (response.ok ? response.text() : ""))
+      .then((text) => {
+        if (!cancelled && text) setStepBest({ id: activeId, value: bestPerStep(parseRunResults(text).rows), error: null });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, hasResults, statusHasBest, resultsName, resultsTick]);
 
   useEffect(() => {
     if (!live) return;
@@ -244,8 +280,8 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   if (!jobs.length || !job) {
     return (
       <Centered>
-        <p className="text-body font-medium">No REINVENT runs yet</p>
-        <p className="text-muted max-w-sm">Optimization and transfer-learning jobs the agent launches show up here with their progress.</p>
+        <p className="text-body font-medium">No runs in this conversation</p>
+        <p className="text-muted max-w-sm">REINVENT runs the agent launches here show up with their progress.</p>
         <ActionButton onClick={() => onAsk("List the stored TTPs and help me start a REINVENT optimization run.")}>
           Ask the agent to start one
         </ActionButton>
@@ -258,7 +294,6 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const diagnostics = s?.diagnostics ?? null;
   const jobAlerts = uniqueAlerts([...(diagnostics?.warnings ?? []), ...alerts.filter((a) => a.jobId === job.id)]);
   const top = candidates && candidates.id === job.id ? candidates : null;
-  const runtime = runtimeMs(job);
   const best = bestScore(s, top?.value ?? []);
   const complexes = structures && structures.id === job.id ? structures.value : null;
 
@@ -267,43 +302,55 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     if (panel) openRunStructure(sessionId ?? "new", panel);
   }
 
+  const runButton = (j: JobSummary, seen: boolean) => {
+    const count = uniqueAlerts(alerts.filter((a) => a.jobId === j.id)).length;
+    return (
+      <button
+        key={j.id}
+        type="button"
+        onClick={() => select(j.id)}
+        aria-current={j.id === job.id}
+        className={`mb-0.5 flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left ${j.id === job.id ? "bg-inset" : "hover:bg-sunken"} ${seen ? "opacity-70" : ""}`}
+      >
+        <span className="flex w-full items-center gap-1.5">
+          <b className={`min-w-0 flex-1 truncate ${seen ? "font-medium" : "font-semibold"}`}>{jobTitle(j)}</b>
+          {count > 0 && (
+            <span className="shrink-0 text-[10px] font-semibold" style={{ color: toneColor("bad") }} title={`${count} alert${count === 1 ? "" : "s"}`}>
+              ⚠ {count}
+            </span>
+          )}
+        </span>
+        <span className="text-faint w-full truncate font-mono text-[10px]">
+          {j.id} · {shortDate(j.createdAt)}
+        </span>
+        <Badge tone={stateTone(j.state)}>{j.state}</Badge>
+      </button>
+    );
+  };
+
   return (
     <div className="@container flex h-full min-h-0 text-xs">
-      <aside className="border-subtle w-44 shrink-0 overflow-y-auto border-r p-2 @2xl:w-52">
-        <div className="mb-1 flex items-center px-1">
-          <h3 className="text-faint text-[10px] font-semibold tracking-wider uppercase">Runs</h3>
-          <span className="text-faint ml-1 text-[10px]">{jobs.length}</span>
-          <button type="button" onClick={refresh} title="Refresh" aria-label="Refresh" className="text-faint hover:text-body ml-auto cursor-pointer p-0.5">
-            <RefreshIcon />
-          </button>
-        </div>
-        {listError && <p className="px-1 pb-1 text-[10px]" style={{ color: "var(--color-accent)" }}>{listError}</p>}
-        {jobs.map((j) => {
-          const count = uniqueAlerts(alerts.filter((a) => a.jobId === j.id)).length;
-          return (
-            <button
-              key={j.id}
-              type="button"
-              onClick={() => select(j.id)}
-              aria-current={j.id === job.id}
-              className={`mb-0.5 flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left ${j.id === job.id ? "bg-inset" : "hover:bg-sunken"}`}
-            >
-              <span className="flex w-full items-center gap-1.5">
-                <b className="min-w-0 flex-1 truncate font-semibold">{jobTitle(j)}</b>
-                {count > 0 && (
-                  <span className="shrink-0 text-[10px] font-semibold" style={{ color: toneColor("bad") }} title={`${count} alert${count === 1 ? "" : "s"}`}>
-                    ⚠ {count}
-                  </span>
-                )}
-              </span>
-              <span className="text-faint w-full truncate font-mono text-[10px]">
-                {j.id} · {shortDate(j.createdAt)}
-              </span>
-              <Badge tone={stateTone(j.state)}>{j.state}</Badge>
+      {jobs.length > 1 && (
+        <aside className="border-subtle w-44 shrink-0 overflow-y-auto border-r p-2 @2xl:w-52">
+          <div className="mb-1 flex items-center px-1">
+            <h3 className="text-faint text-[10px] font-semibold tracking-wider uppercase">Runs</h3>
+            <span className="text-faint ml-1 text-[10px]">{listed?.own.length ?? 0}</span>
+            <button type="button" onClick={refresh} title="Refresh" aria-label="Refresh" className="text-faint hover:text-body ml-auto cursor-pointer p-0.5">
+              <RefreshIcon />
             </button>
-          );
-        })}
-      </aside>
+          </div>
+          {listError && <p className="px-1 pb-1 text-[10px]" style={{ color: "var(--color-accent)" }}>{listError}</p>}
+          {listed?.own.map((j) => runButton(j, false))}
+          {listed && listed.seen.length > 0 && (
+            <>
+              <h3 className="text-faint mt-2 mb-1 px-1 text-[10px]" title="Runs launched elsewhere that this conversation looked at">
+                Seen here
+              </h3>
+              {listed.seen.map((j) => runButton(j, true))}
+            </>
+          )}
+        </aside>
+      )}
 
       <div className="min-w-0 flex-1 overflow-y-auto p-3">
         <header className="flex flex-wrap items-start gap-2">
@@ -314,10 +361,6 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
               {diagnostics?.convergence && <Badge tone={convergenceTone(diagnostics.convergence)}>{diagnostics.convergence}</Badge>}
               <ScoreTrend status={s} width={72} className="hidden @md:block" />
             </h2>
-            <p className="text-faint mt-0.5 truncate font-mono text-[10px]">
-              {job.id} · {typeLabel(job.type)} · {job.model ?? "default model"}
-              {runtime !== null && ` · ran ${duration(runtime)}`}
-            </p>
             <div className="-ml-1.5 mt-1 flex flex-wrap items-center gap-0.5">
               {[
                 { name: resultsFile(job), label: "Results CSV", mime: "text/csv", hint: "Every molecule REINVENT scored, step by step" },
@@ -360,7 +403,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </div>
         )}
         {confirm === "continue" && canResume(job) && (
-          <ContinueRun key={job.id} job={job} running={jobs.find((j) => isActive(j.state)) ?? null} onClose={() => setConfirm(null)} onAsk={onAsk} />
+          <ContinueRun key={job.id} job={job} running={allJobs?.find((j) => isActive(j.state)) ?? null} onClose={() => setConfirm(null)} onAsk={onAsk} />
         )}
         {busy && <Note tone="info">Working… stopping a run waits for REINVENT to write its checkpoint.</Note>}
         {notice && (
@@ -410,8 +453,14 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </Note>
         )}
 
-        <Card title="Score trajectory · mean / best / components">
-          {s ? <TrajectoryChart status={s} /> : <p className="text-faint py-8 text-center">{current ? "No status available." : "Loading status…"}</p>}
+        <Alerts alerts={jobAlerts} />
+
+        <Card title="Score trajectory">
+          {s ? (
+            <TrajectoryChart status={s} best={stepBest?.id === job.id ? stepBest.value : null} />
+          ) : (
+            <p className="text-faint py-8 text-center">{current ? "No status available." : "Loading status…"}</p>
+          )}
         </Card>
 
         {diagnostics && (
@@ -469,18 +518,6 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </Card>
         )}
 
-        {jobAlerts.length > 0 && (
-          <section className="mt-3">
-            <h3 className="text-faint mb-1 text-[10px] font-semibold tracking-wider uppercase">Alerts · {jobAlerts.length}</h3>
-            {jobAlerts.map((a) => (
-              <Note key={a.message} tone={severityTone(a.severity)}>
-                <span className="text-faint mr-1.5 text-[10px] uppercase">{a.severity}</span>
-                {a.message}
-              </Note>
-            ))}
-          </section>
-        )}
-
         {hasResults && (
           <Card
             title={`Top candidates${top?.value.length ? ` · ${top.value.length}` : ""}`}
@@ -525,7 +562,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
                               <StarButton smiles={c.smiles} source={job.id} values={() => candidateScores(c)} session={sessionId ?? "new"} />
                               <button
                                 type="button"
-                                onClick={() => onOpenMolecule?.(c.smiles)}
+                                onClick={() => onOpenMolecule?.(c.smiles, { run: job.id })}
                                 disabled={!onOpenMolecule}
                                 className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
                                 title="Open the 2D drawing"
@@ -566,13 +603,33 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
             )}
           </Card>
         )}
-
-        <p className="text-faint mt-3 font-mono text-[10px] break-all">
-          {job.workingDir}
-          {live && " · refreshing every 10 s"}
-        </p>
       </div>
     </div>
+  );
+}
+
+const SEVERITY_ORDER = ["critical", "error", "high", "warning", "medium", "low", "info"];
+
+/** The run's alerts, folded under a count until asked for. */
+function Alerts({ alerts }: { alerts: { severity: string; message: string }[] }) {
+  if (!alerts.length) return null;
+  const worst = [...alerts].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity.toLowerCase()) - SEVERITY_ORDER.indexOf(b.severity.toLowerCase()))[0];
+  return (
+    <details className="group mt-2">
+      <summary className="text-muted hover:text-body inline-flex cursor-pointer list-none items-center gap-1.5 text-[11px] select-none [&::-webkit-details-marker]:hidden">
+        <svg width={8} height={8} viewBox="0 0 10 10" aria-hidden="true" className="transition-transform group-open:rotate-90">
+          <path d="M3.5 2 6.5 5 3.5 8" fill="none" stroke="currentColor" strokeWidth={1.4} />
+        </svg>
+        Alerts
+        <Badge tone={severityTone(worst.severity)}>{alerts.length}</Badge>
+      </summary>
+      {alerts.map((a) => (
+        <Note key={a.message} tone={severityTone(a.severity)}>
+          <span className="text-faint mr-1.5 text-[10px] uppercase">{a.severity}</span>
+          {a.message}
+        </Note>
+      ))}
+    </details>
   );
 }
 

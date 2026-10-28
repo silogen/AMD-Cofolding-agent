@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { Contact, InteractionsPanel, StructurePanel } from "../../types/api";
+import type { Contact, InteractionsPanel, PropertiesPanel, StructureMetrics, StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import type { Sourced } from "../../lib/artifacts";
 import { contactsFor, runOf, sameFile, structureTitle } from "../../lib/artifacts";
@@ -22,13 +22,18 @@ import {
 import { VIEWER_HELP, type ViewerAction } from "../../lib/viewerCommands";
 import { onViewerRequest } from "../../lib/viewerBus";
 import { contactColor, contactLabel, contactLines, matchesTypes, residuesOf, sortedTypes, toggleType } from "../../lib/contacts";
-import { affinityConcentration, affinityText, gate, GATE, pIC50, type Gate } from "../../lib/gate";
-import { clock } from "../../lib/format";
-import { posebustersCheck, STRUCTURE_KINDS, structureKind, structureOption } from "../../lib/poses";
-import { buildNumbering, displayNumber, rememberNumbering, residueLabel, resolveResidue, type FileResidue, type Numbering } from "../../lib/numbering";
+import { STRUCTURE_KINDS, structureKind, structureOption } from "../../lib/poses";
+import { buildNumbering, displayNumber, rememberNumbering, residueLabel, type FileResidue, type Numbering } from "../../lib/numbering";
+import { locateResidue } from "../../lib/residueTarget";
+import { profileError } from "../../lib/profileError";
+import { matchStructure } from "../../lib/residueLinks";
+import { boltzOutput, chainSequences, fastaFile, inputFiles, parseBoltzInput, smilesFile, type BoltzInput, type RelatedFile } from "../../lib/structureFiles";
+import { metricsFromValues, predictionGroups, propertyFacts, type Fact, type FactGroup } from "../../lib/moleculeFacts";
+import { canonical, descriptors } from "../../lib/rdkit";
+import { useRDKit } from "../../hooks/useRDKit";
 import { fetchPdbEntry, isPdbId } from "../../lib/rcsb";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { CopyButton } from "../CopyButton/CopyButton";
+import { MoleculeFacts } from "../MoleculeFacts/MoleculeFacts";
 import { pickKind, pickQuestion, pickTitle, structureRef, type PickedResidue } from "./pickQuestion";
 
 interface Props {
@@ -36,6 +41,8 @@ interface Props {
   active: StructurePanel;
   onSelect: (panel: StructurePanel) => void;
   interactions: Sourced<InteractionsPanel>[];
+  /** The conversation's ADMET and RetroDMTA predictions, for the ligand's in Details. */
+  properties?: Sourced<PropertiesPanel>[];
   /** The target's canonical UniProt sequence, when the conversation looked it up. */
   targetSequence?: string | null;
   /** The conversation, for structures the user brings in; null before it has an id. */
@@ -45,7 +52,7 @@ interface Props {
   onAsk: (text: string) => void;
 }
 
-type DrawerTab = "contacts" | "quality" | "files";
+type DrawerTab = "contacts" | "details" | "files";
 interface Message {
   id: number;
   text: string;
@@ -77,10 +84,10 @@ const residueKey = (chain: string | null | undefined, resnum: number | null) => 
 
 /**
  * The 3D structure workspace: one Mol* viewport for every complex in the
- * conversation, with the quality verdict above it, quick views on it, and
- * the contacts and quality details under it.
+ * conversation, with quick views on it, and its contacts, details and files
+ * under it.
  */
-export function StructureWorkspace({ structures, active, onSelect, interactions, targetSequence, sessionId, theme, onAsk }: Props) {
+export function StructureWorkspace({ structures, active, onSelect, interactions, properties, targetSequence, sessionId, theme, onAsk }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<StructureView | null>(null);
   const pendingRef = useRef<ViewerAction | null>(null);
@@ -113,7 +120,6 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   const [hiddenSides, setHiddenSides] = useState<{ key: string; sides: Side[] } | null>(null);
 
   const profile = useMemo(() => contactsFor(active, interactions), [active, interactions]);
-  const verdict = useMemo(() => gate(active.metrics), [active.metrics]);
   const numbering = useMemo(
     () => (fileResidues && fileResidues.path === active.path ? buildNumbering(fileResidues.list, targetSequence) : null),
     [fileResidues, active.path, targetSequence],
@@ -382,21 +388,21 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         else say("This structure has no ligand.", "bad");
         break;
       case "residues": {
-        const residues = action.residues.map((r: Residue) => ({ chain: r.chain ?? null, resnum: resolveResidue(numbering, r) }));
-        const names = residues
-          .map((r, i) => {
-            const resname = nameInFile(r) || action.residues[i].resname || "";
-            const shown = nameOf(resname, r.chain, r.resnum);
-            return `${shown.label}${r.chain ? ` (chain ${r.chain})` : ""}`;
-          })
-          .join(", ");
-        if (!focusOn(view, residues, action.mode)) {
-          say(`${action.residues.map((r) => `${r.resname ?? ""}${r.resnum}`).join(", ")} is not in this structure.`, "bad");
+        const inFile = fileResidues?.path === active.path ? fileResidues.list : [];
+        const located = action.residues.map((r: Residue) => locateResidue(inFile, numbering, r));
+        const residues = located.flatMap((at) => at ?? []);
+        const asked = (r: Residue) => (r.resname ? residueLabel(null, r.resname, null, r.resnum).label : String(r.resnum)) + (r.insCode ?? "");
+        if (!residues.length || !focusOn(view, residues, action.mode)) {
+          say(`${action.residues.map(asked).join(", ")} is not in ${title}.`, "bad");
           break;
         }
+        const names = [...new Set(residues.map((r) => nameOf(nameInFile(r) || action.residues[0].resname || "", r.chain, r.resnum).label + (r.insCode ?? "")))].join(", ");
+        const missing = action.residues.filter((_, i) => !located[i]).map(asked);
         const count = profile ? profile.contacts.filter((c) => residues.some((r) => sameResidue(r, c))).length : 0;
-        if (action.mode === "highlight") say(`Highlighted ${names}.`);
-        else say(count ? `${names}: ${count} contact${count === 1 ? "" : "s"} with the ligand.` : `${names} and its neighbours.`);
+        say(
+          `${names}${action.mode !== "highlight" && count ? ` · ${count} contact${count === 1 ? "" : "s"}` : ""}${missing.length ? ` · ${missing.join(", ")} not in ${title}` : ""}`,
+          missing.length ? "bad" : "ok",
+        );
         break;
       }
       case "contacts": {
@@ -459,7 +465,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         break;
       }
       case "panel":
-        openDetails(action.tab);
+        openDetails(action.tab === "quality" ? "details" : action.tab);
         break;
       case "structure": {
         if (structures.length < 2) {
@@ -491,15 +497,19 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
     () =>
       onViewerRequest((request) => {
         if (!request.action) return;
-        // The app switches structure first; run once that one is loaded.
-        const target = request.path;
-        if (target && !sameFile(target, pathRef.current) && structures.some(({ item }) => sameFile(item.path, target))) {
-          pendingRef.current = request.action;
-          return;
+        const target = request.path ?? (request.ref ? (matchStructure(request.ref, structures.map(({ item }) => item.path), request.near) ?? request.near ?? null) : null);
+        if (target && !sameFile(target, pathRef.current)) {
+          const known = structures.find(({ item }) => sameFile(item.path, target));
+          // A path is opened by the app, a name here; either way the action runs once that structure is loaded.
+          if (known || (request.path && /\.(pdb|cif|mmcif)$/i.test(target))) {
+            pendingRef.current = request.action;
+            if (!request.path && known) onSelect(known.item);
+            return;
+          }
         }
         executeRef.current(request.action);
       }),
-    [structures],
+    [structures, onSelect],
   );
 
   /** A chip: show only that type, add it, or drop it; with nothing in focus, focus the ligand so the dashes show. */
@@ -606,8 +616,6 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         />
       </header>
 
-      <GateStrip verdict={verdict} panel={active} onQuality={() => openDetails("quality")} />
-
       <div className="relative min-h-[280px] flex-1 overflow-hidden" style={{ background: `#${backgroundValue.toString(16).padStart(6, "0")}` }}>
         <div ref={hostRef} className="molstar-host absolute inset-0" />
 
@@ -643,7 +651,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           <OverlayButton label="Fit" title="The whole complex" onClick={() => execute({ kind: "fit" })} />
           <OverlayButton label="Ligand" title="Focus the ligand and its contacts" onClick={() => execute({ kind: "ligand" })} />
           <OverlayButton label="Pocket" title="Residues within 5 Å of the ligand" onClick={() => execute({ kind: "pocket", radius: 5 })} />
-          <OverlayButton label="Details" title="Contacts, quality and files" pressed={detailsOpen} onClick={() => setDetailsOpen((open) => !open)} />
+          <OverlayButton label="Details" title="Contacts, details and files" pressed={detailsOpen} onClick={() => setDetailsOpen((open) => !open)} />
           <div className="relative">
             <OverlayButton label="Style ▾" title="Representation, colours and background" pressed={menuOpen} onClick={() => setMenuOpen((open) => !open)} />
             {menuOpen && (
@@ -739,13 +747,14 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           <button type="button" onClick={() => setDetailsOpen((open) => !open)} className="text-muted hover:text-body cursor-pointer text-[11px] font-semibold">
             {detailsOpen ? "Hide details" : "Show details"}
           </button>
-          <span className="text-faint text-[11px]">
-            {profile ? `${profile.totalContacts} contact${profile.totalContacts === 1 ? "" : "s"}` : "no contact profile"}
-            {numbering && !numbering.same && " · UniProt numbering"}
-          </span>
+          {profile && !profile.error && (
+            <span className="text-faint text-[11px]">
+              {profile.totalContacts} contact{profile.totalContacts === 1 ? "" : "s"}
+            </span>
+          )}
           {detailsOpen && (
             <nav role="tablist" className="ml-auto flex gap-0.5">
-              {(["contacts", "quality", "files"] as const).map((tab) => (
+              {(["contacts", "details", "files"] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -786,9 +795,16 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
                 onProfile={() => onAsk(`Profile the protein-ligand interactions of ${active.path}.`)}
               />
             )}
-            {drawerTab === "quality" && <QualityTab panel={active} verdict={verdict} />}
+            {drawerTab === "details" && (
+              <DetailsTab panel={active} smiles={active.smiles ?? profile?.smiles ?? null} properties={properties ?? []} theme={theme} />
+            )}
             {drawerTab === "files" && (
-              <FilesTab panel={active} at={structures[index]?.at} tool={structures[index]?.tool ?? active.tool} numbering={numbering} sequenceKnown={Boolean(targetSequence)} />
+              <FilesTab
+                panel={active}
+                title={title}
+                residues={fileResidues?.path === active.path ? fileResidues.list : null}
+                smiles={active.smiles ?? profile?.smiles ?? null}
+              />
             )}
           </div>
         )}
@@ -798,38 +814,6 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
 }
 
 // ---------------------------------------------------------------------------
-
-/** The verdict in one quiet line: the values, the affinity, and a caution when the pose is below the gate. */
-function GateStrip({ verdict, panel, onQuality }: { verdict: Gate; panel: StructurePanel; onQuality: () => void }) {
-  const m = panel.metrics;
-  if (!m || verdict.status === "unknown") return null;
-  const affinity = affinityText(m);
-  return (
-    <button
-      type="button"
-      onClick={onQuality}
-      title="Quality details"
-      className="border-subtle hover:bg-sunken flex shrink-0 cursor-pointer items-baseline gap-x-3 gap-y-0.5 overflow-hidden border-b px-3 py-1 text-left text-[11px] whitespace-nowrap"
-    >
-      {verdict.checks
-        .filter((check) => check.value !== "—")
-        .map((check) => (
-          <span key={check.label} className="text-muted">
-            {check.label} <span className="font-mono tabular-nums" style={{ color: check.ok === false ? "var(--color-warn)" : "var(--text-body)" }}>{check.value}</span>
-          </span>
-        ))}
-      {affinity && (
-        <span className="text-muted">
-          affinity <span className="text-body font-mono tabular-nums">{affinity}</span>
-          {m.affinity !== undefined && <span className="text-faint"> {affinityConcentration(m.affinity)}</span>}
-        </span>
-      )}
-      <span className="ml-auto truncate text-[10px]" style={{ color: verdict.status === "pass" ? "var(--color-ok)" : "var(--color-warn)" }}>
-        {verdict.status === "pass" ? "passes the quality gate" : "below the quality gate · read affinity with caution"}
-      </span>
-    </button>
-  );
-}
 
 const SIDE_COLORS: Record<Side, string> = { primary: "var(--color-molecule)", other: "var(--color-structure)" };
 
@@ -1089,7 +1073,14 @@ function ContactsTab({
       </div>
     );
   }
-  if (profile.error) return <p className="py-4 text-center text-xs" style={{ color: "var(--color-accent)" }}>{profile.error}</p>;
+  if (profile.error) {
+    const error = profileError(profile.error);
+    return (
+      <p className={`py-4 text-center text-xs ${error.quiet ? "text-muted" : ""}`} style={error.quiet ? undefined : { color: "var(--color-accent)" }}>
+        {error.text}
+      </p>
+    );
+  }
 
   const needle = query.trim().toLowerCase();
   const rows = profile.contacts.filter((contact) => {
@@ -1207,178 +1198,111 @@ function ContactsTab({
   );
 }
 
-function QualityTab({ panel, verdict }: { panel: StructurePanel; verdict: Gate }) {
-  const m = panel.metrics;
-  if (!m) return <p className="text-muted py-4 text-center text-xs">No confidence values were reported for this structure.</p>;
-  const affinity = affinityText(m);
-  const [confidence, ligandIptm, posebusters] = verdict.checks;
-  const failed = m.failedChecks ?? [];
-  const pbFailed = m.posebustersTotal !== undefined && m.posebustersPassed !== undefined ? m.posebustersTotal - m.posebustersPassed : null;
+/** Pose quality and affinity, the ligand's predictions and properties, and the ligand in 2D: values with units. */
+function DetailsTab({ panel, smiles, properties, theme }: { panel: StructurePanel; smiles: string | null; properties: Sourced<PropertiesPanel>[]; theme: Theme }) {
+  const { rdkit } = useRDKit(Boolean(smiles));
+  const boltz = useBoltzFiles(panel);
+  const cofold = panel.metrics ?? boltz.metrics;
+  let predictions: FactGroup[] = [];
+  let ligand: Fact[] = [];
+  if (smiles) {
+    predictions = predictionGroups(smiles, properties);
+    if (!predictions.length && rdkit) {
+      const key = (value: string) => canonical(rdkit, value) ?? value;
+      const canonicalPanels = properties.map((entry) => ({
+        ...entry,
+        item: {
+          ...entry.item,
+          molecules: entry.item.molecules.map((m) => ({ ...m, smiles: m.smiles && key(m.smiles), standardized: m.standardized && key(m.standardized) })),
+        },
+      }));
+      predictions = predictionGroups(key(smiles), canonicalPanels);
+    }
+    ligand = propertyFacts({}, rdkit ? descriptors(rdkit, smiles) : null);
+  }
 
+  if (!cofold && !predictions.length && !ligand.length && !smiles) return <p className="text-muted py-4 text-center text-xs">No details for this file.</p>;
   return (
-    <div className="grid gap-x-6 gap-y-4 text-[11px] sm:grid-cols-2">
-      <section className="space-y-3">
-        <div>
-          <h4 className="text-faint mb-1.5 text-[10px] font-semibold uppercase">Pose confidence</h4>
-          <div className="grid grid-cols-3 gap-2">
-            <Metric label="Confidence" value={confidence.value} ok={confidence.ok} rule={`gate > ${GATE.confidence}`} />
-            <Metric label="Ligand ipTM" value={ligandIptm.value} ok={ligandIptm.ok} rule={`gate > ${GATE.ligandIptm}`} />
-            <Metric label="PoseBusters" value={posebusters.value} ok={posebusters.ok} rule="gate: all pass" />
-          </div>
-          {(m.iptm !== undefined || m.plddt !== undefined) && (
-            <p className="text-muted mt-1.5">
-              {m.iptm !== undefined && (
-                <>
-                  Interface ipTM <span className="text-body font-mono">{m.iptm.toFixed(2)}</span>
-                </>
-              )}
-              {m.iptm !== undefined && m.plddt !== undefined && " · "}
-              {m.plddt !== undefined && (
-                <>
-                  complex pLDDT <span className="text-body font-mono">{m.plddt.toFixed(2)}</span>
-                </>
-              )}
-            </p>
-          )}
-        </div>
-        {posebusters.ok !== null && (
-          <div>
-            <h4 className="text-faint mb-1 text-[10px] font-semibold uppercase">PoseBusters checks</h4>
-            {failed.length > 0 && (
-              <ul className="mb-1 space-y-0.5">
-                {failed.map((name) => (
-                  <li key={name} className="flex items-baseline gap-1.5" title={name}>
-                    <span aria-hidden="true" style={{ color: "var(--color-warn)" }}>
-                      ✕
-                    </span>
-                    {posebustersCheck(name)}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {failed.length === 0 && pbFailed !== null && pbFailed > 0 && (
-              <p className="mb-1" style={{ color: "var(--color-warn)" }}>
-                {pbFailed} check{pbFailed === 1 ? "" : "s"} failed; the tool did not say which.
-              </p>
-            )}
-            <p className="text-muted flex items-baseline gap-1.5">
-              <span aria-hidden="true" style={{ color: "var(--color-ok)" }}>
-                ✓
-              </span>
-              {m.posebustersPassed} of {m.posebustersTotal} passed: bond geometry, ring flatness, clashes and distance to the protein.
-            </p>
-          </div>
-        )}
-      </section>
-
-      <section>
-        <h4 className="text-faint mb-1.5 text-[10px] font-semibold uppercase">Predicted affinity</h4>
-        {affinity && m.affinity !== undefined ? (
-          <div className="space-y-1">
-            <p>
-              <span className="font-mono text-base font-semibold tabular-nums">{affinity}</span>{" "}
-              <span className="text-muted">log₁₀(IC₅₀ / 1 µM)</span>
-            </p>
-            <p className="text-muted">
-              {affinityConcentration(m.affinity)} · pIC₅₀ ≈ {pIC50(m.affinity).toFixed(1)}
-              {m.binderProbability !== undefined && ` · binder probability ${m.binderProbability.toFixed(2)}`}
-            </p>
-            {verdict.status === "fail" && (
-              <p className="flex items-baseline gap-1.5 pt-1" style={{ color: "var(--color-warn)" }}>
-                <span aria-hidden="true">!</span>
-                Pose below the quality gate; read the affinity with caution.
-              </p>
-            )}
-            {verdict.status === "unknown" && <p className="text-faint pt-1">Not all gate values were reported; read the affinity with caution.</p>}
-            <p className="text-faint pt-1">
-              A ranking signal, not a measured constant.
-              {affinity.includes("to") && " The two ensemble members disagree by more than one log unit, so this is a range."}
-            </p>
-          </div>
-        ) : (
-          <p className="text-muted">
-            Not predicted for this structure.
-            {m.binderProbability !== undefined && ` Binder probability ${m.binderProbability.toFixed(2)}.`}
-          </p>
-        )}
-        <p className="text-faint mt-3 text-[10px]">
-          Quality gate: confidence &gt; {GATE.confidence}, ligand ipTM &gt; {GATE.ligandIptm} and every PoseBusters check passing.
-        </p>
-      </section>
-    </div>
-  );
-}
-
-function Metric({ label, value, ok, rule }: { label: string; value: string; ok: boolean | null; rule: string }) {
-  const colour = ok === null ? "var(--text-faint)" : ok ? "var(--color-ok)" : "var(--color-warn)";
-  return (
-    <div className="bg-sunken rounded-md px-2 py-1.5">
-      <p className="text-muted truncate text-[10px]">{label}</p>
-      <p className="flex items-baseline gap-1">
-        <span className="font-mono text-sm font-semibold tabular-nums">{value}</span>
-        <span aria-label={ok === null ? "not run" : ok ? "passes" : "below the gate"} style={{ color: colour }}>
-          {ok === null ? "" : ok ? "✓" : "!"}
-        </span>
-      </p>
-      <p className="text-faint truncate text-[10px]">{rule}</p>
-    </div>
-  );
-}
-
-function FilesTab({
-  panel,
-  tool,
-  at,
-  numbering,
-  sequenceKnown,
-}: {
-  panel: StructurePanel;
-  tool: string;
-  at?: number;
-  numbering: Numbering | null;
-  sequenceKnown: boolean;
-}) {
-  const rows: [string, ReactNode][] = [
-    ["File", panel.name],
-    ["Format", panel.format.toUpperCase()],
-    [
-      "Path",
-      <span key="path" className="flex items-center gap-1">
-        <span className="truncate font-mono">{panel.path}</span>
-        <CopyButton value={panel.path} label="Copy path" />
-      </span>,
-    ],
-    ["From", tool],
-    [
-      "Numbering",
-      numbering ? (numbering.same ? "UniProt (as in the file)" : "UniProt; the file's own numbers are shown small") : sequenceKnown ? "As in the file (no confident match to the UniProt sequence)" : "As in the file",
-    ],
-  ];
-  if (at) rows.push(["At", clock(at)]);
-  if (panel.smiles)
-    rows.push([
-      "Ligand",
-      <span key="smiles" className="flex items-center gap-1">
-        <span className="truncate font-mono">{panel.smiles}</span>
-        <CopyButton value={panel.smiles} label="Copy SMILES" />
-      </span>,
-    ]);
-  return (
-    <dl className="grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1 text-[11px]">
-      {rows.map(([label, value]) => (
-        <div key={label} className="contents">
-          <dt className="text-muted">{label}</dt>
-          <dd className="min-w-0 truncate">{value}</dd>
-        </div>
-      ))}
-      <div className="contents">
-        <dt />
-        <dd>
-          <a href={panel.url} download={panel.name} className="font-medium" style={{ color: "var(--color-accent)" }}>
-            Download {panel.format.toUpperCase()}
-          </a>
-        </dd>
+    <div className="flex gap-3">
+      <div className="min-w-0 flex-1">
+        <MoleculeFacts cofold={cofold} properties={ligand} predictions={predictions} />
       </div>
-    </dl>
+      {smiles && (
+        <div className="bg-sunken hidden w-36 shrink-0 self-start rounded-lg p-1 sm:block">
+          <MolDepiction smiles={smiles} theme={theme} width={200} height={160} className="h-28 w-full" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface BoltzFiles {
+  files: RelatedFile[];
+  input: BoltzInput | null;
+  /** Confidence and affinity read from its JSON files, for a prediction that came without them. */
+  metrics?: StructureMetrics;
+}
+
+/** The Boltz files next to *panel* that exist, its input YAML read for the MSA, templates and sequences, and its metrics. */
+function useBoltzFiles(panel: StructurePanel): BoltzFiles {
+  const [found, setFound] = useState<(BoltzFiles & { path: string }) | null>(null);
+  useEffect(() => {
+    const boltz = boltzOutput(panel.path);
+    if (!boltz) return;
+    const controller = new AbortController();
+    const read = (file: RelatedFile) =>
+      fetch(file.url, { signal: controller.signal })
+        .then((response) => (response.ok ? response.text() : null))
+        .catch(() => null);
+    void Promise.all([Promise.all(boltz.candidates.map(read)), read(boltz.input)]).then(([texts, input]) => {
+      if (controller.signal.aborted) return;
+      const files = boltz.candidates.filter((_, i) => texts[i] !== null);
+      if (input !== null) files.push(boltz.input);
+      const values: Record<string, number> = {};
+      boltz.candidates.forEach((file, i) => {
+        const text = texts[i];
+        if (file.type !== "JSON" || text === null) return;
+        try {
+          for (const [name, value] of Object.entries(JSON.parse(text) as Record<string, unknown>)) if (typeof value === "number") values[name] = value;
+        } catch {
+          // Not JSON after all: a gateway error page.
+        }
+      });
+      setFound({ path: panel.path, files, input: input !== null ? parseBoltzInput(input) : null, metrics: metricsFromValues(values) });
+    });
+    return () => controller.abort();
+  }, [panel.path]);
+  return found && found.path === panel.path ? found : { files: [], input: null };
+}
+
+/** Download links: the structure, its ligand, sequence, MSA and the files the prediction wrote. */
+function FilesTab({ panel, title, residues, smiles }: { panel: StructurePanel; title: string; residues: FileResidue[] | null; smiles: string | null }) {
+  const boltz = useBoltzFiles(panel);
+  const stem = panel.name.replace(/\.(cif|mmcif|pdb)$/i, "");
+  const sdf = boltz.files.find((file) => file.type === "SDF");
+  const proteins = boltz.input?.proteins.length ? boltz.input.proteins : residues ? chainSequences(residues) : [];
+  const files = [
+    { label: "Structure", type: panel.format.toUpperCase(), url: panel.url, name: panel.name },
+    sdf ?? (smiles ? smilesFile(title, smiles) : null),
+    fastaFile(stem, proteins),
+    ...(boltz.input ? inputFiles(boltz.input) : []),
+    ...boltz.files.filter((file) => file !== sdf),
+  ].filter((file): file is RelatedFile => file !== null);
+  return (
+    <ul className="flex flex-wrap gap-1.5">
+      {files.map((file) => (
+        <li key={file.url}>
+          <a
+            href={file.url}
+            download={file.name}
+            title={file.name}
+            className="bg-sunken hover:bg-inset text-body flex items-baseline gap-1.5 rounded-full px-2.5 py-1 text-[11px] no-underline"
+          >
+            {file.label}
+            <span className="text-faint text-[10px]">{file.type}</span>
+          </a>
+        </li>
+      ))}
+    </ul>
   );
 }

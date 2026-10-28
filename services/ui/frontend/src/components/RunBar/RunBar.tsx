@@ -7,9 +7,8 @@ import { callTool, jobFileUrl } from "../../lib/api";
 import { isActive, jobTitle, parseAlerts, parseJobs, parseStatus, toolError, type JobState, type JobStatus, type JobSummary } from "../../lib/jobs";
 import {
   LOG_TAIL_BYTES,
-  conversationJobIds,
   countDown,
-  etaLabel,
+  ownJobIds,
   parseStepTimes,
   runEventText,
   runProgress,
@@ -20,8 +19,9 @@ import {
   type RunEvent,
 } from "../../lib/runProgress";
 import { notifyRunsChanged, onRunsChanged, openRun, openWorkbench } from "../../lib/workbenchBus";
-import { cofoldShown, inFlightCofold, runUsesBoltz } from "../../lib/cofold";
-import { CofoldRow } from "./CofoldRow";
+import { cofoldShown, inFlightCofold, runUsesBoltz, type CofoldStatus } from "../../lib/cofold";
+import { refreshSessionList, useSessionRuns } from "../../hooks/useSessions";
+import { Bar, CofoldRow, Eta } from "./CofoldRow";
 import { ScoreTrend } from "./ScoreTrend";
 import { useCofoldStatus } from "./useCofoldStatus";
 
@@ -45,6 +45,8 @@ const POLL_MS = 20_000;
 const WATCH_MS = 60_000;
 /** How long a finished run stays in the bar. */
 const DONE_MS = 8_000;
+/** How long a run's finished cofold batch stays while the run prepares the next. */
+const HOLD_MS = 180_000;
 const ASKED_KEY = "cofold.notify.asked";
 
 const watch = new RunWatch();
@@ -108,13 +110,15 @@ async function readLive(jobId: string, withLog: boolean): Promise<Live | null> {
 }
 
 /**
- * "Design is running": a slim bar above the composer while a REINVENT run
- * goes on, with its progress, elapsed time and an estimate of the time left.
+ * "Designing": a slim bar above the composer while a REINVENT run of this
+ * conversation goes on, with its progress, elapsed time and an estimate of
+ * the time left, and under it what Boltz cofolds for the conversation.
  * A click opens the run in the workbench; Stop asks first, then calls
  * stop_optimization. A finished run stays a few seconds with its outcome.
  */
 export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, onNotice }: Props) {
-  const conversation = useMemo(() => conversationJobIds(steps), [steps]);
+  const runs = useSessionRuns(sessionId);
+  const conversation = useMemo(() => ownJobIds(steps, runs), [steps, runs]);
   const conversationKey = conversation.join(",");
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [listTick, setListTick] = useState(0);
@@ -152,7 +156,14 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
     };
   }, [sessionId, conversationKey, listTick, onNotice]);
 
-  useEffect(() => onRunsChanged(() => setListTick((t) => t + 1)), []);
+  useEffect(
+    () =>
+      onRunsChanged(() => {
+        setListTick((t) => t + 1);
+        refreshSessionList();
+      }),
+    [],
+  );
 
   const anyRunning = jobs.some((job) => isActive(job.state));
   useEffect(() => {
@@ -218,11 +229,20 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
   }, [finished]);
 
   const cofoldCalls = useMemo(() => inFlightCofold(steps, turnAt), [steps, turnAt]);
-  const designing = jobs.filter((job) => job.type === "optimization" && stateOf(job) === "running");
+  const designing = shown.filter((job) => job.type === "optimization" && job.state === "running");
   const boltzUse = designing.map((job) => runUsesBoltz(steps, job.ttpId, live[job.id]?.status.components));
   const boltzRun = boltzUse.includes(true) ? true : boltzUse.includes(null) ? null : false;
   const cofold = useCofoldStatus(cofoldCalls, boltzRun, designing.length > 0);
-  const cofoldRow = cofoldShown(cofold.status, cofoldCalls) ? <CofoldRow status={cofold.status} at={cofold.at} calls={cofoldCalls} /> : null;
+  const ownActive = cofold.status?.available === true && cofold.status.active;
+  const [held, setHeld] = useState<{ session: string | null; status: CofoldStatus; at: number } | null>(null);
+  if (ownActive && cofold.status && (held?.at !== cofold.at || held.session !== sessionId)) setHeld({ session: sessionId, status: cofold.status, at: cofold.at });
+  const holding =
+    !ownActive && held !== null && held.session === sessionId && designing.length > 0 && boltzRun !== false && cofold.at - held.at < HOLD_MS;
+  const cofoldRow = cofoldShown(cofold.status, cofoldCalls) ? (
+    <CofoldRow status={cofold.status} at={cofold.at} calls={cofoldCalls} memory={cofold.memory} />
+  ) : holding ? (
+    <CofoldRow status={held.status} at={held.at} calls={[]} finished />
+  ) : null;
 
   async function stop(job: JobSummary) {
     setConfirm(false);
@@ -260,13 +280,15 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
     if (confirm) {
       return (
         <Shell extra={cofoldRow}>
-          <span className="min-w-0 flex-1 leading-tight">
+          <span className="col-span-8 min-w-0 leading-tight whitespace-normal">
             Stop <b className="font-semibold">{title}</b> at step {progress.done}? REINVENT saves a checkpoint, so it can be resumed.
           </span>
-          <BarButton onClick={() => setConfirm(false)}>Cancel</BarButton>
-          <BarButton tone="bad" onClick={() => void stop(first)}>
-            Stop run
-          </BarButton>
+          <Actions>
+            <BarButton onClick={() => setConfirm(false)}>Cancel</BarButton>
+            <BarButton tone="bad" onClick={() => void stop(first)}>
+              Stop run
+            </BarButton>
+          </Actions>
         </Shell>
       );
     }
@@ -277,48 +299,40 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
           type="button"
           onClick={() => openRun(first.id, "jobs")}
           title={`Open ${title} (${first.id}) in the workbench`}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 overflow-hidden text-left"
+          className="col-span-8 grid min-w-0 cursor-pointer grid-cols-subgrid items-center text-left"
         >
-          <span aria-hidden="true" className="size-1.5 shrink-0 animate-pulse rounded-full" style={{ background: "var(--color-accent)" }} />
-          <span className="shrink-0 font-medium">{first.state === "queued" ? "Design is starting" : stopping ? "Stopping design…" : "Design is running"}</span>
-          <span className="text-faint hidden min-w-0 truncate @lg:inline">{title}</span>
-          <span className="bg-inset h-1 w-10 shrink-0 overflow-hidden rounded-full @md:w-20" aria-hidden="true">
-            <span
-              className="block h-full rounded-full transition-[width] duration-700"
-              style={{ width: `${Math.round((progress.fraction ?? 0) * 100)}%`, background: "var(--color-structure)" }}
-            />
-          </span>
-          <span className="text-muted shrink-0 font-mono tabular-nums" title="Steps done / maximum steps">
+          <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full" style={{ background: "var(--color-accent)" }} />
+          <span className="font-medium">{first.state === "queued" ? "Starting" : stopping ? "Stopping" : "Designing"}</span>
+          <span className="text-faint min-w-0 truncate">{error ? <span style={{ color: "var(--color-accent)" }}>{error}</span> : title}</span>
+          <Bar fraction={progress.fraction ?? 0} />
+          <span className="text-muted text-right font-mono tabular-nums" title="Steps done / maximum steps">
             {progress.done}/{progress.max ?? "—"}
           </span>
-          <ScoreTrend status={entry?.status} width={56} className="hidden @lg:block" />
-          {progress.elapsedMs !== null && (
-            <span className="text-faint shrink-0 tabular-nums" title="Elapsed">
-              {shortDuration(progress.elapsedMs)}
-            </span>
-          )}
-          <span className="text-faint shrink-0 tabular-nums" title={estimate?.remainingMs != null ? "Estimated from the recent step rate" : "Waiting for a few steps"}>
-            {first.state === "queued" ? "" : etaLabel(remaining)}
+          <span>
+            <ScoreTrend status={entry?.status} width={56} className="hidden @lg:block" />
+          </span>
+          <span className="text-faint text-right tabular-nums" title="Elapsed">
+            {progress.elapsedMs !== null ? shortDuration(progress.elapsedMs) : ""}
+          </span>
+          <span className="text-faint tabular-nums" title={estimate?.remainingMs != null ? "Estimated from the recent step rate" : "Waiting for a few steps"}>
+            {first.state === "queued" ? "" : <Eta remainingMs={remaining} />}
           </span>
         </button>
-        {error && (
-          <span className="max-w-48 shrink truncate" style={{ color: "var(--color-accent)" }} title={error}>
-            {error}
-          </span>
-        )}
-        {others.length > 0 && (
-          <BarButton onClick={() => openWorkbench("jobs")} title={`Also running: ${others.map((job) => `${jobTitle(job)} (${job.id})`).join(", ")}`}>
-            +{others.length}
+        <Actions>
+          {others.length > 0 && (
+            <BarButton onClick={() => openWorkbench("jobs")} title={`Also running: ${others.map((job) => `${jobTitle(job)} (${job.id})`).join(", ")}`}>
+              +{others.length}
+            </BarButton>
+          )}
+          <BarButton onClick={() => openRun(first.id, "results")} title="Every molecule generated so far">
+            Results
           </BarButton>
-        )}
-        <BarButton onClick={() => openRun(first.id, "results")} title="Every molecule generated so far">
-          Results
-        </BarButton>
-        {first.type === "optimization" && first.state === "running" && (
-          <BarButton tone="bad" disabled={stopping} onClick={() => setConfirm(true)} title="Stop the run (asks first)">
-            <StopIcon /> Stop
-          </BarButton>
-        )}
+          {first.type === "optimization" && first.state === "running" && (
+            <BarButton tone="bad" disabled={stopping} onClick={() => setConfirm(true)} title="Stop the run (asks first)">
+              <StopIcon /> Stop
+            </BarButton>
+          )}
+        </Actions>
       </Shell>
     );
   }
@@ -329,24 +343,31 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
     const state = job.state;
     const progress = runProgress({ state, currentStep: status.currentStep ?? null, maxSteps: job.maxSteps, startedAt: job.startedAt, finishedAt: job.finishedAt, now });
     const color = state === "completed" ? "var(--color-ok)" : state === "failed" ? "var(--color-accent)" : "var(--color-warn)";
-    const label = state === "completed" ? "Design finished" : state === "failed" ? "Design failed" : "Design stopped";
+    const label = state === "completed" ? "Finished" : state === "failed" ? "Failed" : "Stopped";
     return (
       <Shell extra={cofoldRow}>
-        <button type="button" onClick={() => openRun(job.id, "jobs")} className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 overflow-hidden text-left">
-          <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: color }} />
-          <span className="shrink-0 font-medium" style={{ color }}>
+        <button type="button" onClick={() => openRun(job.id, "jobs")} className="col-span-8 grid min-w-0 cursor-pointer grid-cols-subgrid items-center text-left">
+          <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: color }} />
+          <span className="font-medium" style={{ color }}>
             {label}
           </span>
           <span className="text-faint min-w-0 truncate">{jobTitle(job)}</span>
-          <span className="text-muted shrink-0 font-mono tabular-nums">
+          <Bar fraction={progress.fraction} colour={color} />
+          <span className="text-muted text-right font-mono tabular-nums">
             {progress.done}/{progress.max ?? "—"}
           </span>
-          {progress.elapsedMs !== null && <span className="text-faint shrink-0">ran {shortDuration(progress.elapsedMs)}</span>}
+          <span />
+          <span className="text-faint text-right tabular-nums" title="Ran for">
+            {progress.elapsedMs !== null ? shortDuration(progress.elapsedMs) : ""}
+          </span>
+          <span />
         </button>
-        {state !== "failed" && <BarButton onClick={() => openRun(job.id, "results")}>Results</BarButton>}
-        <BarButton onClick={() => setFinished(null)} title="Dismiss">
-          ×
-        </BarButton>
+        <Actions>
+          {state !== "failed" && <BarButton onClick={() => openRun(job.id, "results")}>Results</BarButton>}
+          <BarButton onClick={() => setFinished(null)} title="Dismiss">
+            ×
+          </BarButton>
+        </Actions>
       </Shell>
     );
   }
@@ -354,18 +375,23 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
   return cofoldRow ? <Shell>{cofoldRow}</Shell> : null;
 });
 
-const ROW = "flex min-h-7 items-center gap-1.5 py-0.5 pr-1 pl-2.5";
+/** Every line shares the bar's columns: dot, label, detail, progress, count, extra, elapsed, time left, actions. */
+const ROW = "col-span-full grid min-h-7 grid-cols-subgrid items-center py-0.5 pr-1 pl-2.5";
 
 /** The bar; *extra* is a second line under the run, e.g. what Boltz is cofolding. */
 function Shell({ children, extra }: { children: React.ReactNode; extra?: React.ReactNode }) {
   return (
     <div className="@container mx-auto w-full max-w-3xl px-3 sm:px-4" role="status" aria-live="polite">
-      <div className="bg-sunken border-subtle rounded-t-lg border border-b-0 text-[11px]">
+      <div className="bg-sunken border-subtle grid grid-cols-[auto_auto_minmax(0,1fr)_auto_auto_auto_auto_auto_auto] gap-x-1.5 rounded-t-lg @lg:gap-x-2 border border-b-0 text-[11px] whitespace-nowrap">
         <div className={ROW}>{children}</div>
         {extra && <div className={`${ROW} border-subtle border-t`}>{extra}</div>}
       </div>
     </div>
   );
+}
+
+function Actions({ children }: { children: React.ReactNode }) {
+  return <span className="col-start-9 -my-0.5 flex items-center justify-end gap-0.5">{children}</span>;
 }
 
 function BarButton({

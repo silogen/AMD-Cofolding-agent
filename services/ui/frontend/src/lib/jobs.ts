@@ -340,6 +340,28 @@ export function resultsFile(job: Pick<JobSummary, "csvPath">): string {
 /** Whether a job can still change, so the panel keeps polling. */
 export const isActive = (state: JobState) => state === "running" || state === "queued";
 
+/**
+ * The jobs one conversation lists, in *jobs*' order: those it launched, and
+ * apart those it only referenced. *pinned*, the run the workbench is about,
+ * counts as launched while no other conversation claims it: a run just
+ * started from the panel is not in the gateway's list yet.
+ */
+export function conversationJobs<T extends { id: string }>(
+  jobs: readonly T[],
+  runs: { jobs: readonly { id: string; launched: boolean }[] } | null,
+  pinned: string | null,
+  owners: ReadonlyMap<string, string>,
+  sessionId: string | null | undefined,
+): { own: T[]; seen: T[] } {
+  const launched = new Set((runs?.jobs ?? []).filter((j) => j.launched).map((j) => j.id));
+  if (pinned && (owners.get(pinned) ?? sessionId) === sessionId) launched.add(pinned);
+  const referenced = new Set((runs?.jobs ?? []).filter((j) => !j.launched).map((j) => j.id));
+  return {
+    own: jobs.filter((j) => launched.has(j.id)),
+    seen: jobs.filter((j) => referenced.has(j.id) && !launched.has(j.id)),
+  };
+}
+
 export function stateTone(state: JobState): Tone {
   if (state === "completed") return "ok";
   if (state === "failed") return "bad";
@@ -610,9 +632,58 @@ export function trajectoryPoints(status: JobStatus): { points: TrajectoryPoint[]
   return { points: [], from: null };
 }
 
-/** The per-step series worth plotting beside the total: the scoring components only. */
-export function componentSeriesNames(status: Pick<JobStatus, "componentTrajectories">): string[] {
-  return Object.keys(status.componentTrajectories).filter(isScoringComponent);
+/** A line the score chart can draw beside the total. */
+export interface ChartSeries {
+  key: string;
+  label: string;
+}
+
+/** Component metadata ("ligand_iptm (Boltz affinity)") worth a line on request, by the name shown. */
+const EXTRA_SERIES: Record<string, string> = { ligand_iptm: "ligand ipTM", confidence_score: "confidence" };
+const OWNED = /^(.+?)\s*\((.+)\)$/;
+const TOTAL_SERIES = new Set(["score", "total_score"]);
+
+/**
+ * The series of the score chart: one per objective of the TTP, and under
+ * *more* the Boltz confidences. The rest of what REINVENT reports per step is
+ * left out: its likelihoods are not scores, the total has a line of its own,
+ * and the metadata of a component repeats it (affinity_pred_value is Boltz
+ * affinity before its transform, affinity_pred_value1 and 2 are members of
+ * the same ensemble, n_checks_passed is pose quality as a count).
+ */
+export function chartSeries(status: Pick<JobStatus, "componentTrajectories">): { objectives: ChartSeries[]; more: ChartSeries[] } {
+  const names = Object.keys(status.componentTrajectories);
+  const ownedBy = (name: string) => {
+    const match = OWNED.exec(name);
+    return match && (match[2].toLowerCase() === "raw" || names.includes(match[2])) ? { key: match[1].trim(), owner: match[2] } : null;
+  };
+  const objectives = names.filter((name) => isScoringComponent(name) && !TOTAL_SERIES.has(name.trim().toLowerCase()) && !ownedBy(name));
+  const more: ChartSeries[] = [];
+  for (const name of names) {
+    const owned = ownedBy(name);
+    const label = owned ? EXTRA_SERIES[owned.key] : undefined;
+    if (!owned || !label) continue;
+    const taken = more.some((series) => series.label === label);
+    more.push({ key: name, label: taken ? `${label} · ${owned.owner}` : label });
+  }
+  return { objectives: objectives.map((name) => ({ key: name, label: name })), more };
+}
+
+/** The best total of each step, from results rows; for runs whose status has no per-step best. */
+export function bestPerStep(rows: readonly { step: number | null; total: number | null }[]): Map<number, number> {
+  const best = new Map<number, number>();
+  for (const row of rows) {
+    if (row.step === null || row.total === null || !Number.isFinite(row.total)) continue;
+    const seen = best.get(row.step);
+    if (seen === undefined || row.total > seen) best.set(row.step, row.total);
+  }
+  return best;
+}
+
+/** *points* with the per-step best filled in from *best* where the status has none. */
+export function withBest(points: readonly TrajectoryPoint[], best: ReadonlyMap<number, number> | null): TrajectoryPoint[] {
+  if (!best?.size) return [...points];
+  return points.map((p) => (p.max === null && best.has(p.step) ? { ...p, max: best.get(p.step) ?? null } : p));
 }
 
 /** per_component as the scoring components alone, so Agent's tens do not sit beside a desirability. */

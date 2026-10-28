@@ -749,13 +749,16 @@ def _tracked(molecules: int) -> Iterator[_TrackedRequest]:
 
 def _active_requests() -> list[dict[str, Any]]:
     progress = _pool.request_progress() if _pool is not None else {}
+    on_workers = _pool.running_elapsed() if _pool is not None else {}
     now = time.monotonic()
     active = []
     for entry in _requests.values():
         left = max(0, entry.molecules - entry.done)
+        running_s: list[float] = []
         if entry.stage == "pool":
             counts = progress.get(entry.id, {})
             queued, running = counts.get("queued", 0), counts.get("running", 0)
+            running_s = on_workers.get(entry.id, [])
         elif entry.stage == "waiting":
             queued, running = left, 0
         elif entry.stage == "running":
@@ -777,6 +780,9 @@ def _active_requests() -> list[dict[str, Any]]:
             "state": state,
             "started_at": round(entry.started_at, 3),
             "elapsed_s": round(now - entry.started, 1),
+            # How long each running molecule has been on its worker, so a
+            # client can show progress between two finished molecules.
+            "running_s": running_s,
         })
     return active
 

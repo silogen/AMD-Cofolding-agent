@@ -181,7 +181,8 @@ export function parseRunResults(text: string): RunTable {
     if (LIKELIHOOD_KEYS.includes(lower)) return column("likelihood", `${key} NLL`.replace(/ NLL NLL$/, " NLL"));
     const match = SUFFIX.exec(key);
     const owner = match && components.has(match[2]) ? match[2] : null;
-    if ((/structure|pose|complex/i.test(key) && !numeric[c]) || looksLikeFiles(c)) return column("structure", "Structure", owner);
+    // Only the metadata key counts: every PoseBusters check of a "Pose quality" component ends in "(Pose quality)".
+    if ((/structure|pose|complex/i.test(match ? match[1] : key) && !numeric[c]) || looksLikeFiles(c)) return column("structure", "Structure", owner);
     if (owner) return column("meta", key, owner);
     return column(numeric[c] ? "meta" : "text");
   });

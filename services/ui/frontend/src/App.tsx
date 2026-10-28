@@ -231,12 +231,11 @@ export default function App() {
       { id: "tab-candidates", group: "Workbench", label: "Show candidates", hint: "Molecules", run: () => showWorkbench("candidates") },
       { id: "tab-molecules", group: "Workbench", label: "Show all molecules", hint: "Molecules", run: () => showWorkbench("molecules") },
       { id: "tab-properties", group: "Workbench", label: "Show predicted properties", hint: "Molecules", run: () => showWorkbench("properties") },
-      { id: "tab-tables", group: "Workbench", label: "Show tables", run: () => showWorkbench("tables") },
       { id: "tab-jobs", group: "Workbench", label: "Show REINVENT jobs", hint: "/jobs", run: () => showWorkbench("jobs") },
       { id: "tab-results", group: "Workbench", label: "Show run results", run: () => showWorkbench("results") },
       { id: "tab-activity", group: "Workbench", label: "Show tool activity", hint: "Jobs", run: () => showWorkbench("activity") },
       { id: "tab-target", group: "Workbench", label: "Show the target", run: () => showWorkbench("target") },
-      { id: "tab-ttp", group: "Workbench", label: "Show the target product profile", run: () => showWorkbench("ttp") },
+      { id: "tab-ttp", group: "Workbench", label: "Show the therapeutic target profile", run: () => showWorkbench("ttp") },
       { id: "tab-assets", group: "Workbench", label: "Show shared assets", hint: "/shared", run: () => showWorkbench("assets") },
       ...artifacts.structures.map(({ item }) => ({
         id: `st-${item.path}`,

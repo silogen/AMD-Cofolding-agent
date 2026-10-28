@@ -262,7 +262,7 @@ export function candidatesToSdf(
 export const MAX_COFOLD = 2;
 
 /** A request to cofold the first MAX_COFOLD of the given molecules. */
-export function cofoldPrompt(candidates: Candidate[]): string {
+export function cofoldPrompt(candidates: Pick<Candidate, "smiles" | "name">[]): string {
   const chosen = candidates.slice(0, MAX_COFOLD);
   const list = chosen.map((c) => `- ${c.name ? `${c.name}: ` : ""}${c.smiles}`).join("\n");
   const rest =
@@ -274,6 +274,6 @@ export function cofoldPrompt(candidates: Candidate[]): string {
 }
 
 /** A request to predict ADMET properties of the given molecules. */
-export function admetPrompt(candidates: Candidate[]): string {
+export function admetPrompt(candidates: Pick<Candidate, "smiles">[]): string {
   return `Predict ADMET properties for these molecules:\n${candidates.map((c) => `- ${c.smiles}`).join("\n")}`;
 }

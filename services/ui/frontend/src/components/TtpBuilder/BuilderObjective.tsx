@@ -32,21 +32,35 @@ export function BuilderObjective({ objective, onChange, onRename, onRemove, weig
     transform && <NumberField value={transform[key]} onChange={(value) => setTransform(setRange(transform, { [key]: value }))} label={`${objective.name} ${key}`} />;
 
   return (
-    <li className="border-subtle bg-raised flex items-start gap-3 rounded-lg border px-2.5 py-2">
-      <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="flex items-center gap-1.5">
-          <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} />
+    <li className="flex items-center gap-3 px-2.5 py-1.5">
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex items-center gap-2">
+          <span className="flex w-44 min-w-0 shrink-0 items-center gap-1.5">
+            <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} />
+            <input
+              value={objective.name}
+              onChange={(event) => onRename(event.target.value)}
+              aria-label="Objective name"
+              className="hover:bg-sunken focus:bg-sunken min-w-0 flex-1 truncate rounded px-1 py-0.5 text-xs font-semibold outline-none"
+            />
+          </span>
           <input
-            value={objective.name}
-            onChange={(event) => onRename(event.target.value)}
-            aria-label="Objective name"
-            className="hover:bg-sunken focus:bg-sunken min-w-0 flex-1 rounded px-1 py-0.5 text-xs font-semibold outline-none"
+            type="range"
+            min={weights.min}
+            max={weights.max}
+            step={weights.step}
+            value={Math.min(weights.max, objective.weight)}
+            onChange={(event) => onChange({ weight: Number(event.target.value) })}
+            aria-label={`${objective.name} weight`}
+            title="Weight"
+            className="min-w-0 flex-1 accent-[var(--color-table)]"
           />
-          <button type="button" onClick={onRemove} aria-label={`Remove ${objective.name}`} title="Remove" className="text-faint hover:text-body cursor-pointer px-1 text-sm leading-none">
-            ×
-          </button>
+          <span className="w-8 shrink-0 text-right font-mono text-[11px] tabular-nums">{objective.weight.toFixed(2)}</span>
+          <span className="text-faint w-7 shrink-0 text-right text-[10px] tabular-nums" title="Share of the total weight">
+            {Math.round(share * 100)}%
+          </span>
         </div>
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-[11px]">
           <select
             value={transform?.type ?? ""}
             onChange={(event) => setTransform(retypeObjective(objective, event.target.value || null))}
@@ -80,38 +94,24 @@ export function BuilderObjective({ objective, onChange, onRename, onRemove, weig
             placeholder="Reference SMILES"
             aria-label={`${objective.name} reference SMILES`}
             spellCheck={false}
-            className={`${FIELD} w-full font-mono text-[10px]`}
+            className={`${FIELD} ml-3 w-[calc(100%-0.75rem)] font-mono text-[10px]`}
           />
         )}
-        <label className="flex items-center gap-2">
-          <span className="text-muted w-10 shrink-0 text-[11px]">weight</span>
-          <input
-            type="range"
-            min={weights.min}
-            max={weights.max}
-            step={weights.step}
-            value={Math.min(weights.max, objective.weight)}
-            onChange={(event) => onChange({ weight: Number(event.target.value) })}
-            aria-label={`${objective.name} weight`}
-            className="min-w-0 flex-1 accent-[var(--color-table)]"
-          />
-          <span className="w-8 shrink-0 text-right font-mono text-[11px] tabular-nums">{objective.weight.toFixed(2)}</span>
-          <span className="text-faint w-8 shrink-0 text-right text-[10px] tabular-nums" title="Share of the total weight">
-            {Math.round(share * 100)}%
-          </span>
-        </label>
       </div>
       {transform ? (
         <TransformCurve
           transform={transform}
-          width={176}
-          height={50}
+          width={132}
+          height={40}
           weight={relative}
           onRange={fields.includes("low") ? (patch) => setTransform(setRange(transform, patch)) : undefined}
         />
       ) : (
-        <span aria-hidden="true" className="w-[176px] shrink-0" />
+        <span aria-hidden="true" className="w-[132px] shrink-0" />
       )}
+      <button type="button" onClick={onRemove} aria-label={`Remove ${objective.name}`} title="Remove" className="text-faint hover:text-body cursor-pointer self-start px-1 text-sm leading-none">
+        ×
+      </button>
     </li>
   );
 }

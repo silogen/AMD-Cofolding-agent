@@ -11,7 +11,11 @@ import {
   cofoldPollDelay,
   cofoldShown,
   cofoldView,
+  EMPTY_MEMORY,
   inFlightCofold,
+  learn,
+  ownRequests,
+  ownStatus,
   runUsesBoltz,
   ttpUsesBoltz,
   type CofoldCall,
@@ -197,7 +201,7 @@ describe("cofoldView", () => {
     const loading = status({ active: true, status: "loading", workers: { total: 16, busy: 0, loading: 16, failed: 0 }, requests: [request({ queued: 2, running: 0, state: "queued" })] });
     expect(cofoldView(loading, 0, [], 0)?.note).toBe("Boltz is loading");
     const preparing = status({ active: true, requests: [request({ running: 0, state: "preparing" })] });
-    expect(cofoldView(preparing, 0, [], 0)?.label).toBe("Preparing cofold");
+    expect(cofoldView(preparing, 0, [], 0)?.label).toBe("Preparing");
   });
 
   it("falls back to busy workers for a service without request tracking", () => {
@@ -207,5 +211,76 @@ describe("cofoldView", () => {
 
   it("shows a call while the service is unreachable", () => {
     expect(cofoldView({ available: false }, 0, [sure], 1_000)?.detail).toBe("2 molecules");
+  });
+
+  it("counts running molecules for how far they likely got, and estimates the time left", () => {
+    // 10 molecules, 6 on workers for 40 s, 4 queued; a molecule takes about 80 s.
+    const busy = status({
+      active: true,
+      moleculeSeconds: 80,
+      requests: [request({ molecules: 10, queued: 4, running: 6, elapsedSeconds: 40, runningSeconds: [40, 40, 40, 40, 40, 40] })],
+    });
+    const now = cofoldView(busy, 0, [], 0)!;
+    expect(now.done).toBe(0);
+    expect(now.fraction).toBeCloseTo(0.3);
+    expect(now.remainingMs).toBe((40 + 80) * 1000);
+    // Ten seconds later, without a new answer, the bar has moved on.
+    const later = cofoldView(busy, 0, [], 10_000)!;
+    expect(later.fraction).toBeCloseTo(0.375);
+    expect(later.elapsedMs).toBe(50_000);
+  });
+
+  it("never counts a running molecule as done", () => {
+    const slow = status({ active: true, moleculeSeconds: 10, requests: [request({ molecules: 1, running: 1, runningSeconds: [500] })] });
+    expect(cofoldView(slow, 0, [], 0)?.fraction).toBeCloseTo(0.9);
+  });
+
+  it("shows a finished batch full and still", () => {
+    const busy = status({ active: true, moleculeSeconds: 80, requests: [request({ molecules: 10, done: 8, running: 2, runningSeconds: [5, 5] })] });
+    expect(cofoldView(busy, 0, [], 60_000, { finished: true })).toMatchObject({ done: 10, fraction: 1, note: "", remainingMs: null, elapsedMs: 40_000 });
+  });
+});
+
+describe("ownRequests", () => {
+  const call: CofoldCall = { id: "c", molecules: 2, at: 1_000_000, certain: true };
+  const r = (id: string, molecules: number, startedAt: number | null) => request({ id, molecules, startedAt });
+
+  it("pairs a call with the first request that started after it", () => {
+    const requests = [r("before", 2, 900), r("run", 10, 1_001), r("mine", 2, 1_002), r("later", 2, 1_003)];
+    expect(ownRequests(requests, [call], false).map((x) => x.id)).toEqual(["mine"]);
+  });
+
+  it("gives a run of the conversation every request", () => {
+    expect(ownRequests([r("a", 10, 1), r("b", 2, 2)], [], true).map((x) => x.id)).toEqual(["a", "b"]);
+  });
+
+  it("claims nothing for another conversation", () => {
+    expect(ownRequests([r("a", 10, 1_001)], [], false)).toEqual([]);
+    expect(ownStatus(status({ active: true, requests: [r("a", 10, 1_001)] }), [], false)).toMatchObject({ active: false, requests: [] });
+  });
+
+  it("pairs by size alone when the gateway does not say when a request started", () => {
+    expect(ownRequests([r("big", 10, null), r("small", 2, null)], [call], false).map((x) => x.id)).toEqual(["small"]);
+  });
+});
+
+describe("learn", () => {
+  const read = (done: number, elapsed: number, running = 6) =>
+    status({ active: true, requests: [request({ molecules: 10, done, running, queued: 10 - done - running, elapsedSeconds: elapsed })] });
+
+  it("learns the molecule time from when molecules finish, for services that do not report it", () => {
+    let memory = learn(EMPTY_MEMORY, read(0, 20));
+    expect(memory.typicalSeconds).toBeNull();
+    memory = learn(memory, read(6, 85, 4));
+    expect(memory.typicalSeconds).toBe(85);
+    expect(memory.requests.r1).toEqual({ done: 6, at: 85 });
+    // The next wave started when the first finished.
+    const view = cofoldView(read(6, 125, 4), 0, [], 0, { memory })!;
+    expect(view.fraction).toBeCloseTo((6 + 4 * (40 / 85)) / 10);
+  });
+
+  it("prefers the service's molecule time and forgets finished requests", () => {
+    const memory = learn({ typicalSeconds: 10, requests: { gone: { done: 1, at: 5 } } }, status({ active: true, moleculeSeconds: 70, requests: [] }));
+    expect(memory).toEqual({ typicalSeconds: 70, requests: {} });
   });
 });

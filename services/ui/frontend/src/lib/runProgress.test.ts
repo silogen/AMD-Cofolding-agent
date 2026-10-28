@@ -6,6 +6,7 @@ import {
   conversationJobIds,
   countDown,
   etaLabel,
+  ownJobIds,
   parseStepTimes,
   runProgress,
   runEventText,
@@ -153,14 +154,31 @@ describe("which runs", () => {
     expect(conversationJobIds(steps)).toEqual(["aaaa1111", "bbbb2222"]);
   });
 
-  it("shows the conversation's running jobs, else every running one", () => {
+  it("shows only the conversation's own running jobs", () => {
     const jobs = [
       { id: "a", state: "running" as const },
       { id: "b", state: "completed" as const },
       { id: "c", state: "queued" as const },
     ];
     expect(runsToShow(jobs, ["c", "b"]).map((j) => j.id)).toEqual(["c"]);
-    expect(runsToShow(jobs, ["b"]).map((j) => j.id)).toEqual(["a", "c"]);
-    expect(runsToShow(jobs, []).map((j) => j.id)).toEqual(["a", "c"]);
+    expect(runsToShow(jobs, ["b"])).toEqual([]);
+    expect(runsToShow(jobs, [])).toEqual([]);
+  });
+
+  it("adds transfer learning and the runs the gateway knows were launched here", () => {
+    const steps = [
+      { name: "run_transfer_learning", at: 1, result: result("aaaa1111") },
+      { name: "run_optimization", at: 2, result: result("bbbb2222") },
+    ];
+    const runs = {
+      jobs: [
+        { id: "bbbb2222", launched: true },
+        { id: "cccc3333", launched: true },
+        { id: "dddd4444", launched: false },
+      ],
+    };
+    expect(ownJobIds(steps, runs)).toEqual(["aaaa1111", "bbbb2222", "cccc3333"]);
+    expect(ownJobIds([], null)).toEqual([]);
+    expect(conversationJobIds(steps)).toEqual(["bbbb2222"]);
   });
 });

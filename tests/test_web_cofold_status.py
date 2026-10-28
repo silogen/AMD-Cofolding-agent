@@ -113,15 +113,26 @@ def test_busy_service_is_summarised(boltz, client):
         "available": True,
         "status": "ok",
         "mode": "pool",
+        "moleculeSeconds": None,
         "workers": {"total": 6, "busy": 3, "loading": 1, "failed": 1},
         "gpus": {"total": 3, "busy": 2},
         "queueLength": 1,
         "requests": [
-            {"id": "a1", "molecules": 4, "done": 1, "queued": 1, "running": 2, "state": "running", "elapsedSeconds": 41.3},
-            {"id": "b2", "molecules": 1, "done": 0, "queued": 0, "running": 1, "state": "running", "elapsedSeconds": 11.0},
+            {"id": "a1", "molecules": 4, "done": 1, "queued": 1, "running": 2, "state": "running", "elapsedSeconds": 41.3,
+             "startedAt": 1793100000.0, "runningSeconds": None},
+            {"id": "b2", "molecules": 1, "done": 0, "queued": 0, "running": 1, "state": "running", "elapsedSeconds": 11.0,
+             "startedAt": 1793100030.0, "runningSeconds": None},
         ],
         "active": True,
     }
+
+
+def test_molecule_times_are_passed_on(boltz, client):
+    first = {**BUSY_HEALTH["requests"][0], "running_s": [12.04, 30.0, "x", -1]}
+    boltz.body = {**BUSY_HEALTH, "molecule_s": 85.25, "requests": [first]}
+    body = client.get("/api/services/cofold").json()
+    assert body["moleculeSeconds"] == 85.2
+    assert body["requests"][0]["runningSeconds"] == [12.0, 30.0]
 
 
 def test_idle_pool_is_not_active(boltz, client):
@@ -154,7 +165,8 @@ def test_malformed_fields_are_dropped(boltz, client):
     assert body["workers"]["total"] == 1
     assert body["queueLength"] == 0
     assert body["requests"] == [
-        {"id": "7", "molecules": 0, "done": 0, "queued": 0, "running": 0, "state": "running", "elapsedSeconds": None},
+        {"id": "7", "molecules": 0, "done": 0, "queued": 0, "running": 0, "state": "running", "elapsedSeconds": None,
+         "startedAt": None, "runningSeconds": None},
     ]
 
 

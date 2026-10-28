@@ -130,6 +130,52 @@ class TestPoolProgress:
         assert after == {}
 
 
+class TestMoleculeTimes:
+
+    def test_running_molecules_report_how_long_they_have_run(self):
+        async def main():
+            pool = worker_pool.WorkerPool([0], 1, GatedBackend, job_timeout=60)
+            await pool.start()
+            for _ in range(100):
+                if pool.status == "ok":
+                    break
+                await asyncio.sleep(0.01)
+            before = pool.molecule_seconds()
+            futures = pool.submit("A", [{}, {}])
+            await asyncio.sleep(0.15)
+            running = pool.running_elapsed()
+            GatedBackend.gates[0].set()
+            GatedBackend.gates[1].set()
+            await asyncio.gather(*futures)
+            return before, running, pool.running_elapsed(), pool.molecule_seconds(), pool.health()
+
+        before, running, after, typical, health = asyncio.run(main())
+        assert before is None
+        assert list(running) == ["A"]
+        (seconds,) = running["A"]
+        assert 0.1 <= seconds < 5
+        assert after == {}
+        assert typical is not None and 0 <= typical < 5
+        assert health["molecule_s"] == typical
+
+    def test_failed_molecules_do_not_count_towards_the_typical_time(self):
+        class Failing(GatedBackend):
+            def call(self, payload: dict, timeout: float) -> dict:
+                return {"status": "error", "error": "boom"}
+
+        async def main():
+            pool = worker_pool.WorkerPool([0], 1, Failing, job_timeout=60)
+            await pool.start()
+            for _ in range(100):
+                if pool.status == "ok":
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.gather(*pool.submit("A", [{}]))
+            return pool.molecule_seconds()
+
+        assert asyncio.run(main()) is None
+
+
 class TestHealthRequests:
 
     def test_idle_service_lists_no_requests(self, pool_client):
@@ -152,10 +198,16 @@ class TestHealthRequests:
         assert req["elapsed_s"] >= 0
         assert abs(req["started_at"] - time.time()) < 60
 
+        assert len(req["running_s"]) == 2
+        assert all(0 <= s < 60 for s in req["running_s"])
+        assert running["molecule_s"] is None
+
         GatedBackend.gates[0].set()
         one_done = _wait_for(client, lambda d: d["requests"][0]["done"] == 1)
         assert one_done["requests"][0]["queued"] == 0
         assert one_done["requests"][0]["running"] == 2
+        assert len(one_done["requests"][0]["running_s"]) == 2
+        assert one_done["molecule_s"] is not None
 
         GatedBackend.gates[1].set()
         GatedBackend.gates[2].set()

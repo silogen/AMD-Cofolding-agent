@@ -3,16 +3,16 @@
 
 import { isPdbId } from "./rcsb";
 import { readCif } from "./sharedFiles";
-import { fetchFromRcsb } from "./uploads";
+import { fetchFromRcsb, uploadFile, type UploadedFile } from "./uploads";
 
 /**
- * What part of the target Boltz cofolds: the full UniProt sequence, a
- * residue range of it, or the construct of a deposited structure. Boltz cost
+ * What part of a looked-up target Boltz cofolds: the full UniProt sequence
+ * or a residue range of it (a structure gives its own construct). Boltz cost
  * grows steeply with length, so a kinase domain folds in a fraction of the
  * time of the full-length protein.
  */
 
-export type Region = "full" | "range" | "pdb";
+export type Region = "full" | "range";
 
 /** The residues *from*..*to* (UniProt numbering, inclusive) of *reference*, or why they cannot be cut. */
 export function sliceRegion(reference: string, from: number, to: number): { sequence: string } | { error: string } {
@@ -59,15 +59,40 @@ export function uniprotSpans(text: string): Map<string, UniprotSpan> {
 
 export const rcsbCifUrl = (id: string) => `https://files.rcsb.org/download/${id.trim().toUpperCase()}.cif`;
 
-/** A PDB entry's mmCIF, from RCSB, else through the gateway (which keeps a copy in the conversation's uploads). */
-export async function fetchRcsbCif(id: string, session: string): Promise<string> {
+/** An uploaded file's path relative to the shared volume, as TTP paths are. */
+export const sharedPath = (file: UploadedFile) => decodeURIComponent(file.url.replace(/^\/api\/artifacts\//, ""));
+
+/** A structure file as text and where it sits on the shared volume, for the server to read it too. */
+export interface SharedStructure {
+  path: string;
+  text: string;
+}
+
+/**
+ * A PDB entry's mmCIF in the conversation's uploads: fetched by the gateway,
+ * else by the browser from RCSB and uploaded.
+ */
+export async function sharedRcsbCif(id: string, session: string): Promise<SharedStructure> {
   const code = id.trim().toUpperCase();
   if (!isPdbId(code)) throw new Error(`“${id}” is not a PDB id.`);
-  const direct = await fetch(rcsbCifUrl(code)).catch(() => null);
-  if (direct?.ok) return direct.text();
-  if (direct?.status === 404) throw new Error(`${code} is not in the PDB.`);
-  const file = await fetchFromRcsb(session, code);
+  let file: UploadedFile;
+  try {
+    file = await fetchFromRcsb(session, code);
+  } catch (err) {
+    const direct = await fetch(rcsbCifUrl(code)).catch(() => null);
+    if (direct?.status === 404) throw new Error(`${code} is not in the PDB.`, { cause: err });
+    if (!direct?.ok) throw err;
+    const text = await direct.text();
+    file = await uploadFile(session, new File([text], `${code}.cif`, { type: "chemical/x-mmcif" }));
+    return { path: sharedPath(file), text };
+  }
   const response = await fetch(file.url);
-  if (!response.ok) throw new Error(`Could not fetch ${code} (HTTP ${response.status}).`);
-  return response.text();
+  if (!response.ok) throw new Error(`Could not read ${code} (HTTP ${response.status}).`);
+  return { path: sharedPath(file), text: await response.text() };
+}
+
+/** A structure from the user's disk, uploaded to the conversation. */
+export async function uploadStructure(file: File, session: string): Promise<SharedStructure> {
+  const uploaded = await uploadFile(session, file);
+  return { path: sharedPath(uploaded), text: await file.text() };
 }

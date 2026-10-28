@@ -1,9 +1,9 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchCofoldStatus } from "../../lib/api";
-import { cofoldPollDelay, type CofoldCall, type CofoldStatus } from "../../lib/cofold";
+import { cofoldPollDelay, EMPTY_MEMORY, learn, ownStatus, type CofoldCall, type CofoldMemory, type CofoldStatus } from "../../lib/cofold";
 
 const UNAVAILABLE: CofoldStatus = { available: false };
 
@@ -18,14 +18,22 @@ function usePageVisible(): boolean {
 }
 
 /**
- * The last answer of /api/services/cofold, asked for only while a cofold is
- * believed to run (see cofoldPollDelay) and never while the page is hidden.
+ * The last answer of /api/services/cofold as far as this conversation is
+ * concerned (see ownStatus), asked for only while a cofold is believed to run
+ * (see cofoldPollDelay) and never while the page is hidden. *running*: a run
+ * of this conversation is going on.
  */
-export function useCofoldStatus(calls: readonly CofoldCall[], boltzRun: boolean | null, running: boolean): { status: CofoldStatus | null; at: number } {
+export function useCofoldStatus(
+  calls: readonly CofoldCall[],
+  boltzRun: boolean | null,
+  running: boolean,
+): { status: CofoldStatus | null; at: number; memory: CofoldMemory } {
   const visible = usePageVisible();
-  const [read, setRead] = useState<{ status: CofoldStatus; at: number } | null>(null);
+  const [read, setRead] = useState<{ status: CofoldStatus; at: number; memory: CofoldMemory } | null>(null);
   const lastAt = useRef(0);
-  const lastActive = read !== null && read.status.available && read.status.active;
+  const runScoring = running && boltzRun !== false;
+  const own = useMemo(() => (read ? ownStatus(read.status, calls, runScoring) : null), [read, calls, runScoring]);
+  const lastActive = own !== null && own.available && own.active;
   const delay = cofoldPollDelay({ visible, calls, boltzRun, running, lastActive });
 
   useEffect(() => {
@@ -36,7 +44,7 @@ export function useCofoldStatus(calls: readonly CofoldCall[], boltzRun: boolean 
       lastAt.current = Date.now();
       const status = await fetchCofoldStatus().catch(() => UNAVAILABLE);
       if (cancelled) return;
-      setRead({ status, at: Date.now() });
+      setRead((previous) => ({ status, at: Date.now(), memory: learn(previous?.memory ?? EMPTY_MEMORY, status) }));
       timer = window.setTimeout(() => void poll(), delay);
     };
     timer = window.setTimeout(() => void poll(), Math.max(0, lastAt.current + delay - Date.now()));
@@ -46,5 +54,5 @@ export function useCofoldStatus(calls: readonly CofoldCall[], boltzRun: boolean 
     };
   }, [delay]);
 
-  return { status: read?.status ?? null, at: read?.at ?? 0 };
+  return { status: own, at: read?.at ?? 0, memory: read?.memory ?? EMPTY_MEMORY };
 }

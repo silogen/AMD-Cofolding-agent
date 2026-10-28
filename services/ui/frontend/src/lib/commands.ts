@@ -68,7 +68,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     cmd: "/ttp",
-    desc: "Show or edit the target product profile",
+    desc: "Show or edit the therapeutic target profile",
     template: "Show me the current TTP and {CHANGE}.",
     tools: ["get_ttp", "update_ttp"],
   },

@@ -501,9 +501,17 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session not found")
         return live
 
+    run_index = session_data.RunIndex(sessions.store.root)
+
     @app.get("/api/sessions")
     async def list_sessions() -> list[dict[str, Any]]:
-        return sessions.list()
+        listed = sessions.list()
+        try:
+            runs = await asyncio.to_thread(run_index.runs, [s["id"] for s in listed], _data_roots())
+        except Exception:
+            logger.exception("Could not tell which conversations launched which runs")
+            runs = {}
+        return [{**s, "runs": runs[s["id"]]} if s["id"] in runs else s for s in listed]
 
     @app.patch("/api/sessions/{session_id}")
     async def rename_session(session_id: str, request: Request) -> dict[str, Any]:

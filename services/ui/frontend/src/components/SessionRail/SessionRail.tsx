@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useMemo, useState, type ReactNode } from "react";
-import type { SessionSummary } from "../../types/api";
+import type { SessionRuns, SessionSummary } from "../../types/api";
 import type { AgentInfo } from "../../hooks/useSession";
 import { download, sessionEvents } from "../../lib/api";
 import { downloadReport, printReport, sessionToMarkdown, slug } from "../../lib/exportSession";
@@ -187,6 +187,8 @@ function SessionItem({
   const [problem, setProblem] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const title = session.title || "Untitled conversation";
+  const runs = session.runs;
+  const running = (runs?.running ?? 0) > 0;
 
   const fail = (reason: unknown) => setProblem(reason instanceof Error ? reason.message : String(reason));
 
@@ -264,22 +266,20 @@ function SessionItem({
           active ? "bg-raised shadow-card font-semibold" : "hover:bg-inset"
         }`}
       >
-        {active && <span aria-hidden="true" className="h-7 w-0.5 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />}
-        <span className="min-w-0 flex-1">
-          <span className="block truncate">{title}</span>
-          <span className="text-faint block text-[10px] font-normal">
-            {session.turns} turn{session.turns === 1 ? "" : "s"}
-          </span>
+        {active && <span aria-hidden="true" className="h-4 w-0.5 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />}
+        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="truncate">{title}</span>
+          {runs && runs.total > 0 && <RunCount runs={runs} />}
         </span>
-        {session.busy ? (
+        {session.busy || running ? (
           <span
-            title="Working"
-            aria-label="Working"
+            title={session.busy ? "Working" : "Run in progress"}
+            aria-label={session.busy ? "Working" : "Run in progress"}
             className="size-1.5 shrink-0 animate-pulse rounded-full"
             style={{ background: "var(--color-accent)" }}
           />
         ) : (
-          <span className="text-faint shrink-0 self-start pt-0.5 text-[10px] font-normal">{timeLabel(session.updated)}</span>
+          <span className="text-faint shrink-0 text-[10px] font-normal">{timeLabel(session.updated)}</span>
         )}
       </button>
 
@@ -337,6 +337,19 @@ function SessionItem({
         </p>
       )}
     </li>
+  );
+}
+
+/** How many REINVENT runs the conversation launched, faint beside its title. */
+function RunCount({ runs }: { runs: SessionRuns }) {
+  const label = `${runs.total} REINVENT run${runs.total === 1 ? "" : "s"}${runs.running ? `, ${runs.running} running` : ""}`;
+  return (
+    <span className="text-faint inline-flex shrink-0 items-center gap-0.5 text-[10px] font-normal tabular-nums" title={label} aria-label={label}>
+      <svg viewBox="0 0 12 12" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+        <path d="M1.5 9.5 4.5 6l2 2 4-5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      {runs.total}
+    </span>
   );
 }
 

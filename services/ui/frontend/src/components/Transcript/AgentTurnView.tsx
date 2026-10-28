@@ -1,15 +1,15 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { memo, useEffect, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
-import Markdown from "react-markdown";
+import { memo, useEffect, useMemo, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
+import Markdown, { type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentTurn, Panel, StructurePanel, TurnBlock } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { toolSteps } from "../../lib/transcript";
 import { clock, duration, summarise } from "../../lib/format";
 import { isResultPanel, panelKey } from "../../lib/artifacts";
-import { remarkResidueLinks, residueFromHref } from "../../lib/residueLinks";
+import { remarkResidueLinks, residueFromHref, structureFromHref, turnStructures } from "../../lib/residueLinks";
 import { sendToViewer } from "../../lib/viewerBus";
 import { openWorkbench } from "../../lib/workbenchBus";
 import { answerTitle, artifactLinks, remarkCallouts, withoutLeadingHeading, type ArtifactLink, type CalloutTone } from "../../lib/answer";
@@ -76,6 +76,8 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
   const links = turn.done ? artifactLinks(panels, tools) : [];
   const failedGate = uniqueStructures(panels).filter((panel) => gate(panel.metrics).status === "fail");
   const thoughts = turn.blocks.flatMap((block) => (block.kind === "thinking" ? [block] : []));
+  // One string, so the memoised answers keep their props while the turn runs.
+  const structures = linkResidues ? turnStructures(steps, panels).join("\n") : "";
 
   return (
     <article className="flex flex-col gap-3" aria-busy={running}>
@@ -109,6 +111,7 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
                 key={block.id}
                 content={block === firstText ? withoutLeadingHeading(block.content, title) : block.content}
                 linkResidues={linkResidues}
+                structures={structures}
               />
             );
           case "alert":
@@ -429,12 +432,13 @@ function AnswerLink({ href, title, children }: AnchorHTMLAttributes<HTMLAnchorEl
       </a>
     );
   }
+  const { path, ref, near } = structureFromHref(href);
   return (
     <button
       type="button"
       className="residue-link"
-      title={`Show ${residue.resnum}${residue.chain ? `.${residue.chain}` : ""} in the 3D viewer`}
-      onClick={() => sendToViewer({ action: { kind: "residues", residues: [residue], mode: "focus" }, source: "answer" })}
+      title="Show in the 3D viewer"
+      onClick={() => sendToViewer({ path, ref, near, action: { kind: "residues", residues: [residue], mode: "focus" }, source: "answer" })}
     >
       {children}
     </button>
@@ -451,15 +455,21 @@ function AnswerQuote({ children, ...props }: HTMLAttributes<HTMLQuoteElement> & 
 }
 
 const PLAIN_PLUGINS = [remarkGfm, remarkCallouts];
-const LINKED_PLUGINS = [remarkGfm, remarkCallouts, remarkResidueLinks];
 const COMPONENTS = { a: AnswerLink, blockquote: AnswerQuote };
 
-/** Memoised: the running turn re-renders on every event, and parsing Markdown is the costly part. */
-const AnswerBlock = memo(function AnswerBlock({ content, linkResidues }: { content: string; linkResidues: boolean }) {
+/**
+ * Memoised: the running turn re-renders on every event, and parsing Markdown is the costly part.
+ * *structures*: the turn's structure files, one per line, for the residue links.
+ */
+const AnswerBlock = memo(function AnswerBlock({ content, linkResidues, structures }: { content: string; linkResidues: boolean; structures: string }) {
+  const plugins = useMemo<Options["remarkPlugins"]>(
+    () => (linkResidues ? [remarkGfm, remarkCallouts, [remarkResidueLinks, { structures: structures ? structures.split("\n") : [] }]] : PLAIN_PLUGINS),
+    [linkResidues, structures],
+  );
   return (
     <div className="group relative">
       <div className="markdown">
-        <Markdown remarkPlugins={linkResidues ? LINKED_PLUGINS : PLAIN_PLUGINS} components={COMPONENTS}>
+        <Markdown remarkPlugins={plugins} components={COMPONENTS}>
           {content}
         </Markdown>
       </div>

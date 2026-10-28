@@ -27,7 +27,7 @@ describe("answerTitle", () => {
     expect(answerTitle([], ["profile_interactions"])).toBe("Profiling interactions");
     expect(answerTitle([], ["predict_admet"])).toBe("Predicting ADMET");
     expect(answerTitle([], ["run_optimization"])).toBe("Running REINVENT");
-    expect(answerTitle([], ["get_ttp"])).toBe("Reading the target product profile");
+    expect(answerTitle([], ["get_ttp"])).toBe("Reading the therapeutic target profile");
   });
 
   it("says Answer when nothing tells", () => {
@@ -57,6 +57,11 @@ describe("artifactLinks", () => {
     const links = artifactLinks(panels, ["score_molecules", "profile_interactions"]);
     expect(links.map((link) => link.label)).toEqual(["Open best pose", "Show contacts"]);
     expect(links[0].target).toEqual({ kind: "viewer", request: { path: "b.cif", source: "answer" } });
+  });
+
+  it("does not link tables", () => {
+    const table: Panel = { kind: "table", tool: "get_top_candidates", columns: ["smiles"], rows: [{ smiles: "CCO" }], totalRows: 1, truncated: false };
+    expect(artifactLinks([table], ["list_jobs"])).toEqual([]);
   });
 
   it("links runs, ADMET and the TTP to workbench tabs", () => {

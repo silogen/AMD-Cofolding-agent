@@ -69,6 +69,8 @@ COFACTORS: frozenset[str] = frozenset({
 })
 
 MIN_LIGAND_HEAVY_ATOMS = 6
+# Smaller groups count only when they are the whole of their chain.
+MIN_LONE_LIGAND_HEAVY_ATOMS = 2
 MAX_LIGAND_HEAVY_ATOMS = 200  # small molecule guardrail
 # A modified residue inside a chain (PTR, SEP, KCX ...) is part of the
 # receptor; only one this large (Trp has 14) carries a fused ligand, e.g.
@@ -222,7 +224,40 @@ class LoadedStructure:
                 continue
             out.append(LigandSelection(chain=ch, resname=rn, resnum=int(res.resid), n_heavy=heavy,
                                        in_polymer=in_polymer))
+        if not out and not (want_res or want_chain or kw):
+            out = self._lone_small_ligands()
         return self._rank_by_contacts(out)
+
+    def has_hetero_groups(self) -> bool:
+        """True when anything other than standard residues, nucleotides and water is present."""
+        return any(
+            _resname(res) not in STANDARD_AA and _resname(res) not in NUCLEIC and _resname(res) not in WATER
+            for res in self.u.residues
+        )
+
+    def _lone_small_ligands(self) -> list[LigandSelection]:
+        """Groups below the size floor that are alone in their own chain.
+
+        A cofold of a small fragment (Boltz writes it as one residue in its
+        own chain) is the ligand however few atoms it has; an ion or buffer
+        next to a protein never is.
+        """
+        by_chain: dict[str, list[Any]] = {}
+        for res in self.u.residues:
+            by_chain.setdefault(_chain_of(res), []).append(res)
+        out: list[LigandSelection] = []
+        for ch, residues in by_chain.items():
+            if not ch or len(residues) != 1:
+                continue
+            res = residues[0]
+            rn = _resname(res)
+            if rn in STANDARD_AA or rn in NUCLEIC or rn in WATER or rn in METALS or rn in SKIP_LIGAND or rn in COFACTORS:
+                continue
+            heavy = sum(1 for a in res.atoms if (getattr(a, "element", "") or "").upper() != "H"
+                        and not (getattr(a, "name", "") or "").upper().startswith("H"))
+            if MIN_LONE_LIGAND_HEAVY_ATOMS <= heavy < MIN_LIGAND_HEAVY_ATOMS:
+                out.append(LigandSelection(chain=ch, resname=rn, resnum=int(res.resid), n_heavy=heavy))
+        return out
 
     def _peptide_linked(self, res: Any) -> bool:
         """True when *res* has a backbone peptide-bonded to another residue."""

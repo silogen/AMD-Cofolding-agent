@@ -21,11 +21,9 @@ import {
   ro5Violations,
 } from "../../lib/candidates";
 import { descriptors, withMol } from "../../lib/rdkit";
-import { latestTtp, toolEvents } from "../../lib/ttp";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { SmilesText } from "../MolDepiction/SmilesText";
 import { StarButton } from "../Shortlist/StarButton";
-import { CandidateDetail } from "./CandidateDetail";
 import { CandidateScatter } from "./CandidateScatter";
 import { GateBadge } from "./GateBadge";
 import { ScoreBar } from "./ScoreBar";
@@ -34,7 +32,6 @@ interface Props {
   artifacts: Artifacts;
   theme: "dark" | "light";
   onOpenMolecule: (smiles: string) => void;
-  onOpenStructure: (path: string) => void;
   onAsk: (prompt: string) => void;
 }
 
@@ -83,13 +80,12 @@ function download(name: string, text: string, type: string) {
 /**
  * Every molecule the conversation produced, in one sortable, filterable list:
  * table rows with a SMILES, drawn molecules and cofolded ligands merged by
- * SMILES, with a scatter view and a detail pane below the table. Descriptors
- * are computed in the browser with RDKit.
+ * SMILES, with a scatter view. A click opens the molecule's page.
+ * Descriptors are computed in the browser with RDKit.
  */
-export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStructure, onAsk }: Props) {
+export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onAsk }: Props) {
   const candidates = candidatesOf(artifacts);
   const { rdkit } = useRDKit(candidates.length > 0);
-  const ttp = useMemo(() => latestTtp(toolEvents(artifacts.steps)), [artifacts.steps]);
   const props = useMemo(() => {
     const out = new Map<string, MolProps>();
     if (!rdkit) return out;
@@ -127,8 +123,6 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   /** Columns the user turned on or off; the rest follow Column.defaultOn. */
   const [shown, setShown] = useState<Record<string, boolean>>({});
-  /** undefined until the user picks or closes: the pane then shows the first row. */
-  const [detailKey, setDetailKey] = useState<string | null | undefined>(undefined);
   const [axes, setAxes] = useState<{ x: string; y: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
@@ -176,9 +170,6 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
   const chosen = candidates.filter((c) => selected.has(c.smiles));
   const scope = chosen.length ? chosen : filtered;
   const scopeLabel = chosen.length ? `${chosen.length} selected` : filtered.length === candidates.length ? `all ${candidates.length}` : `${filtered.length} shown`;
-  const detailSmiles = detailKey === undefined ? (filtered[0]?.smiles ?? null) : detailKey;
-  const detail = detailSmiles ? (candidates.find((c) => c.smiles === detailSmiles) ?? null) : null;
-
   const defaultX = columns.find((c) => c.key !== "score")?.key ?? columns[0]?.key ?? "";
   const defaultY = hasScore ? "score" : (columns.find((c) => c.key !== defaultX)?.key ?? defaultX);
   const has = (key: string) => columns.some((c) => c.key === key);
@@ -459,8 +450,8 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
               y={y}
               onAxes={(nx, ny) => setAxes({ x: nx, y: ny })}
               selected={selected}
-              detail={detail?.smiles ?? null}
-              onPick={setDetailKey}
+              detail={null}
+              onPick={onOpenMolecule}
             />
           ) : (
             <table className={`w-full border-collapse ${dense ? "text-[11px]" : "text-xs"}`}>
@@ -489,13 +480,12 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                   </tr>
                 )}
                 {filtered.slice(firstRow, lastRow).map((c) => {
-                  const isDetail = c.smiles === detail?.smiles;
                   return (
                     <tr
                       key={c.smiles}
-                      onClick={() => setDetailKey(c.smiles)}
+                      onClick={() => onOpenMolecule(c.smiles)}
                       className={`group hover:bg-sunken cursor-pointer ${selected.has(c.smiles) ? "bg-sunken" : ""}`}
-                      style={{ height: rowHeight, boxShadow: isDetail ? "inset 3px 0 0 var(--color-accent)" : undefined }}
+                      style={{ height: rowHeight }}
                     >
                       <td className={`border-subtle border-b px-2 ${cellY}`} onClick={(e) => e.stopPropagation()}>
                         <input
@@ -535,22 +525,6 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
           )}
         </div>
       </div>
-
-      {detail && (
-        <div className="border-subtle flex max-h-[42%] min-h-40 shrink-0 flex-col border-t">
-          <CandidateDetail
-            candidate={detail}
-            props={props.get(detail.smiles)}
-            theme={theme}
-            onClose={() => setDetailKey(null)}
-            onOpenMolecule={onOpenMolecule}
-            onOpenStructure={onOpenStructure}
-            onAsk={onAsk}
-            ttp={ttp.ttp}
-            ttpId={ttp.id}
-          />
-        </div>
-      )}
     </div>
   );
 }

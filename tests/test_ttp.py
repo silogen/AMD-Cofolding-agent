@@ -25,9 +25,11 @@ from reinvent4_mcp.ttp.mapper import (
     describe_external_objectives,
     extract_native_components,
     get_mapper_summary,
+    target_sequence,
     ttp_to_native_scorer_config,
     ttp_to_scorer_config,
 )
+from reinvent4_mcp.ttp.structure import cif_chains, pdb_chains, structure_sequence
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +258,30 @@ class TestTargetConfig:
     def test_template_unknown_field_rejected(self):
         with pytest.raises(ValidationError):
             TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", templates=[{"path": "a.cif", "chain": "A"}])
+
+    def test_structure_instead_of_sequence(self):
+        t = TargetConfig(structure_path=" uploads/s-1/1M17.cif ", structure_chain=" A ")
+        assert (t.protein_sequence, t.structure_path, t.structure_chain) == (None, "uploads/s-1/1M17.cif", "A")
+        assert TargetConfig(structure_path="x.pdb", structure_chain="").structure_chain is None
+        assert TargetConfig(protein_sequence="", structure_path="x.pdb").protein_sequence is None
+
+    def test_sequence_or_structure_required(self):
+        with pytest.raises(ValidationError, match="protein_sequence or structure_path"):
+            TargetConfig()
+        with pytest.raises(ValidationError, match="protein_sequence or structure_path"):
+            TargetConfig(pdb_id="1M17", msa_path="m.a3m")
+
+    def test_sequence_and_structure_exclusive(self):
+        with pytest.raises(ValidationError, match="not both"):
+            TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", structure_path="a.cif")
+
+    def test_structure_chain_needs_structure(self):
+        with pytest.raises(ValidationError, match="structure_chain needs structure_path"):
+            TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", structure_chain="A")
+
+    def test_structure_path_must_be_structure_file(self):
+        with pytest.raises(ValidationError, match="must be a"):
+            TargetConfig(structure_path="msas/x.a3m")
 
 
 # ---------------------------------------------------------------------------
@@ -1173,3 +1199,221 @@ class TestDescribeExternalObjectives:
         (comp,) = describe_external_objectives(ttp)
         assert comp["service"] == "admet"
         assert "incomplete" in comp
+
+
+# ---------------------------------------------------------------------------
+# Target sequence from a structure file
+# ---------------------------------------------------------------------------
+
+CHAIN_A = ["MSE", "ALA", "LYS", "GLU", "THR", "ALA", "ALA", "ALA", "LYS", "PHE", "GLU", "ARG", "GLN", "HIS"]
+SEQ_A = "MAKETAAAKFERQH"
+CHAIN_C = ["GLY", "SER", "HIS", "MET", "LEU", "GLU", "ASP", "PRO", "VAL", "ILE", "TRP", "TYR"]
+SEQ_C = "GSHMLEDPVIWY"
+DNA = ["DA", "DC", "DG", "DT", "DA", "DC", "DG", "DT", "DA", "DC", "DG", "DT"]
+
+
+def _pdb_atom(serial: int, name: str, resname: str, chain: str, resseq: int, icode: str = " ", alt: str = " ", record: str = "ATOM") -> str:
+    return (
+        f"{record:<6}{serial:>5} {name:<4}{alt}{resname:>3} {chain}{resseq:>4}{icode}   "
+        f"{1.0:>8.3f}{2.0:>8.3f}{3.0:>8.3f}{1.0:>6.2f}{20.0:>6.2f}           {name[0]:>1}"
+    )
+
+
+def _seqres(chain: str, residues: list[str]) -> list[str]:
+    lines = []
+    for n, start in enumerate(range(0, len(residues), 13), 1):
+        lines.append(f"SEQRES {n:>3} {chain} {len(residues):>4}  {' '.join(residues[start:start + 13])}")
+    return lines
+
+
+def _pdb(chains: dict[str, list[str]], seqres: dict[str, list[str]] | None = None) -> str:
+    lines = ["HEADER    TEST"]
+    for chain, residues in (seqres or {}).items():
+        lines += _seqres(chain, residues)
+    serial = 1
+    for chain, residues in chains.items():
+        for i, resname in enumerate(residues, 1):
+            record = "HETATM" if resname == "MSE" else "ATOM"
+            for atom in ("N", "CA"):
+                lines.append(_pdb_atom(serial, atom, resname, chain, i, record=record))
+                serial += 1
+    return "\n".join([*lines, "END", ""])
+
+
+CIF_ENTITIES = """data_TEST
+#
+_entry.id TEST
+#
+loop_
+_entity_poly.entity_id
+_entity_poly.type
+_entity_poly.pdbx_seq_one_letter_code
+_entity_poly.pdbx_seq_one_letter_code_can
+_entity_poly.pdbx_strand_id
+1 'polypeptide(L)'
+;(MSE)AKETAAAKFERQH
+;
+;MAKETAAAKF
+ERQH
+;
+A,B
+2 polydeoxyribonucleotide '(DA)(DC)(DG)(DT)(DA)(DC)(DG)(DT)(DA)(DC)' ACGTACGTAC D
+3 'polypeptide(L)' GSHMLEDPVIWYX GSHMLEDPVIWYX C
+#
+loop_
+_struct_asym.id
+_struct_asym.entity_id
+A 1
+B 1
+C 3
+D 2
+#
+"""
+
+
+def _cif_atoms(chains: dict[str, list[str]], extra: list[str] = ()) -> str:
+    rows = []
+    serial = 1
+    for chain, residues in chains.items():
+        for i, resname in enumerate(residues, 1):
+            group = "HETATM" if resname in ("MSE", "HOH", "ATP") else "ATOM"
+            for atom in ("N", "CA"):
+                rows.append(f"{group} {serial} {atom[0]} {atom} . {resname} {chain} 1 {i} ? 1.0 2.0 3.0 1.00 20.0 {i} {resname} {chain} 1")
+                serial += 1
+    return "\n".join(
+        [
+            "data_ATOMS",
+            "loop_",
+            *(f"_atom_site.{f}" for f in (
+                "group_PDB", "id", "type_symbol", "label_atom_id", "label_alt_id", "label_comp_id",
+                "label_asym_id", "label_entity_id", "label_seq_id", "pdbx_PDB_ins_code", "Cartn_x",
+                "Cartn_y", "Cartn_z", "occupancy", "B_iso_or_equiv", "auth_seq_id", "auth_comp_id",
+                "auth_asym_id", "pdbx_PDB_model_num",
+            )),
+            *rows,
+            *extra,
+            "#",
+            "",
+        ]
+    )
+
+
+class TestStructureChains:
+    def test_pdb_seqres_is_the_construct(self):
+        text = _pdb({"A": CHAIN_A[3:10], "B": DNA, "C": CHAIN_C}, {"A": CHAIN_A, "B": DNA, "C": CHAIN_C})
+        chains = pdb_chains(text)
+        assert [(c.id, c.sequence, c.source) for c in chains] == [("A", SEQ_A, "construct"), ("C", SEQ_C, "construct")]
+
+    def test_pdb_without_seqres_reads_the_first_model(self):
+        lines = _pdb({"A": CHAIN_A}).splitlines()[:-1]
+        # An alternate location, an insertion code, a ligand and water, then a second model.
+        lines += [
+            _pdb_atom(900, "CB", "HIS", "A", 14, alt="B"),
+            _pdb_atom(901, "CA", "GLY", "A", 14, icode="A"),
+            _pdb_atom(902, "PG", "ATP", "A", 101, record="HETATM"),
+            _pdb_atom(903, "O", "HOH", "A", 201, record="HETATM"),
+            "ENDMDL",
+            "MODEL        2",
+            _pdb_atom(904, "CA", "TRP", "A", 1),
+        ]
+        (chain,) = pdb_chains("\n".join(lines))
+        assert (chain.id, chain.sequence, chain.source) == ("A", SEQ_A + "G", "atoms")
+
+    def test_cif_entity_poly_by_author_chain(self):
+        chains = cif_chains(CIF_ENTITIES)
+        assert [(c.id, c.sequence, c.source) for c in chains] == [
+            ("A", SEQ_A, "construct"),
+            ("B", SEQ_A, "construct"),
+            ("C", SEQ_C, "construct"),
+        ]
+
+    def test_cif_single_entity_without_loop(self):
+        text = (
+            "data_ONE\n_entity_poly.entity_id 1\n_entity_poly.type 'polypeptide(L)'\n"
+            "_entity_poly.pdbx_seq_one_letter_code_can\n;MAKETAAAKF\nERQH\n;\n_entity_poly.pdbx_strand_id A\n"
+        )
+        assert [(c.id, c.sequence) for c in cif_chains(text)] == [("A", SEQ_A)]
+
+    def test_cif_entity_poly_seq_keeps_one_monomer_per_position(self):
+        rows = [f"1 {i} {name} n" for i, name in enumerate(CHAIN_A, 1)] + ["1 3 ARG n"]
+        text = "\n".join(
+            [
+                "data_SEQ",
+                "loop_",
+                "_entity_poly_seq.entity_id",
+                "_entity_poly_seq.num",
+                "_entity_poly_seq.mon_id",
+                "_entity_poly_seq.hetero",
+                *rows,
+                "#",
+                "loop_",
+                "_struct_asym.id",
+                "_struct_asym.entity_id",
+                "A 1",
+                "#",
+            ]
+        )
+        assert [(c.id, c.sequence) for c in cif_chains(text)] == [("A", SEQ_A)]
+
+    def test_cif_without_construct_reads_atoms(self):
+        extra = [
+            "HETATM 990 P PG . ATP E 2 . ? 1.0 2.0 3.0 1.00 20.0 301 ATP A 1",
+            "HETATM 991 O O . HOH F 3 . ? 1.0 2.0 3.0 1.00 20.0 401 HOH A 1",
+            "ATOM 992 C CA . TRP A 1 1 ? 1.0 2.0 3.0 1.00 20.0 1 TRP A 2",
+        ]
+        chains = cif_chains(_cif_atoms({"A": CHAIN_A, "C": CHAIN_C}, extra))
+        assert [(c.id, c.sequence, c.source) for c in chains] == [("A", SEQ_A, "atoms"), ("C", SEQ_C, "atoms")]
+
+
+class TestTargetFromStructure:
+    @pytest.fixture
+    def shared(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setenv("IP_SHARED_DIR", str(tmp_path))
+        (tmp_path / "uploads").mkdir()
+        (tmp_path / "uploads" / "multi.cif").write_text(CIF_ENTITIES)
+        (tmp_path / "uploads" / "dimer.pdb").write_text(_pdb({"A": CHAIN_A, "B": CHAIN_A}))
+        return tmp_path
+
+    def test_relative_to_the_shared_volume(self, shared: Path):
+        assert structure_sequence("uploads/multi.cif", "C") == SEQ_C
+        assert structure_sequence(str(shared / "uploads" / "multi.cif"), "B") == SEQ_A
+
+    def test_one_protein_needs_no_chain(self, shared: Path):
+        assert structure_sequence("uploads/dimer.pdb") == SEQ_A
+
+    def test_explains_what_is_wrong(self, shared: Path):
+        with pytest.raises(ValueError, match="several proteins.*A \\(14 aa\\).*C \\(12 aa\\)"):
+            structure_sequence("uploads/multi.cif")
+        with pytest.raises(ValueError, match="no protein chain 'D'"):
+            structure_sequence("uploads/multi.cif", "D")
+        with pytest.raises(ValueError, match="not found"):
+            structure_sequence("uploads/missing.cif", "A")
+
+    def test_mapper_folds_the_structure_chain(self, shared: Path):
+        data = {
+            **FULL_TTP,
+            "target": {"structure_path": "uploads/multi.cif", "structure_chain": "C", "pdb_id": "1ABC", "msa_path": "/data/msa/x.a3m"},
+        }
+        ttp = TTP.model_validate(data)
+        assert target_sequence(ttp.target) == SEQ_C
+        config = ttp_to_scorer_config(ttp)
+        boltz = [
+            c["ExternalRESTScorer"]["endpoint"][0]["params"]
+            for c in config["component"]
+            if "ExternalRESTScorer" in c and c["ExternalRESTScorer"]["endpoint"][0]["params"]["service"] == "boltz"
+        ]
+        assert boltz and all(p["protein_sequence"] == SEQ_C and p["msa_path"] == "/data/msa/x.a3m" for p in boltz)
+        assert all("structure_path" not in p for p in boltz)
+
+    def test_mapper_reports_an_unreadable_structure(self, shared: Path):
+        ttp = TTP.model_validate({**FULL_TTP, "target": {"structure_path": "uploads/multi.cif"}})
+        with pytest.raises(ValueError, match="structure_chain"):
+            ttp_to_scorer_config(ttp)
+        native_only = TTP.model_validate({**MINIMAL_TTP, "target": {"structure_path": "uploads/gone.cif"}})
+        assert ttp_to_scorer_config(native_only)["component"]
+
+    def test_round_trips_through_the_store(self, shared: Path, tmp_store: TTPStore):
+        created = tmp_store.create(TTP.model_validate({**MINIMAL_TTP, "target": {"structure_path": "uploads/dimer.pdb"}}))
+        loaded = tmp_store.get(created.id)
+        assert (loaded.target.structure_path, loaded.target.protein_sequence) == ("uploads/dimer.pdb", None)
+        assert target_sequence(loaded.target) == SEQ_A

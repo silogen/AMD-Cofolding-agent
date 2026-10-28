@@ -448,7 +448,7 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
               <path d="M12 3.5 19.4 7.75v8.5L12 20.5l-7.4-4.25v-8.5Z" />
               <path d="M12 7.2 16.2 9.6M7.8 14.4 12 16.8" />
             </ToolButton>
-            <ToolButton label="New target product profile" onClick={() => setTtpOpen(true)}>
+            <ToolButton label="New therapeutic target profile" onClick={() => setTtpOpen(true)}>
               <circle cx="12" cy="12" r="8" />
               <circle cx="12" cy="12" r="4" />
               <circle cx="12" cy="12" r="0.6" fill="currentColor" />

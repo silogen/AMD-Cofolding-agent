@@ -16,6 +16,7 @@ export interface FileResidue {
   resnum: number;
   /** Three-letter code, e.g. "ASN". */
   resname: string;
+  insCode?: string;
 }
 
 export interface Numbering {

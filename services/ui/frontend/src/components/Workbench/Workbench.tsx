@@ -6,7 +6,6 @@ import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { structureTitle, type Artifacts } from "../../lib/artifacts";
 import { clock, duration } from "../../lib/format";
-import { descriptors } from "../../lib/rdkit";
 import {
   DOCK_DEFAULT_WIDTH,
   DOCK_MAX_FRACTION,
@@ -23,14 +22,13 @@ import {
   type DockTab,
   type DockView,
 } from "../../lib/dock";
-import { endpointLabel, formatValue, serviceName } from "../../lib/properties";
+import { serviceName } from "../../lib/properties";
 import { sendToViewer } from "../../lib/viewerBus";
+import { onMoleculeRequest, type MoleculeContext } from "../../lib/moleculePage";
 import { StructureWorkspace } from "../StructureWorkspace/StructureWorkspace";
 import { PropertiesCard } from "../PropertiesCard/PropertiesCard";
-import { DataTable } from "../DataTable/DataTable";
-import { CopyButton } from "../CopyButton/CopyButton";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { useRDKit } from "../../hooks/useRDKit";
+import { MoleculePage } from "../MoleculePage/MoleculePage";
 import { summarise } from "../../lib/format";
 import { extractTargetFacts, toolEvents } from "../../lib/ttp";
 import { candidatesOf } from "../../lib/candidates";
@@ -76,6 +74,19 @@ const LABEL: Record<DockTab, string> = {
   ttp: "TTP",
   assets: "Assets",
 };
+/** The tabs the dock offers; "tables" is gone, though saved tab lists and old links may still name it. */
+const TABS: readonly DockTab[] = DOCK_TABS.filter((id) => id !== "tables");
+const openable = (ids: readonly DockTab[], id: DockTab) => (TABS.includes(id) ? openTab(ids, id) : [...ids]);
+/** Tabs a molecule page opens over; from any other, it opens over Molecules. */
+const PAGE_TABS: readonly DockTab[] = ["molecules", "results", "jobs"];
+
+/** A molecule's page, shown over the list of the tab it was opened from. */
+interface Page {
+  tab: DockTab;
+  smiles: string;
+  context?: MoleculeContext;
+}
+type Show = (smiles: string, context?: MoleculeContext) => void;
 
 const MOLECULE_VIEWS = [
   { id: "candidates", label: "Candidates" },
@@ -90,11 +101,11 @@ const JOB_VIEWS = [
 
 /**
  * Everything the conversation produced, in one place: the complexes, the
- * molecules, the result tables and the log of tool calls. The chat says
+ * molecules, the runs and the log of tool calls. The chat says
  * what happened; the workbench is where the results are worked with.
  */
 export const Workbench = memo(function Workbench(props: Props) {
-  const { layout, tab, onTabChange, artifacts, onClose, sessionId, openSeq } = props;
+  const { layout, tab, onTabChange, artifacts, onClose, sessionId, openSeq, selectedSmiles, onSelectSmiles } = props;
   const isSheet = layout === "sheet";
 
   useEffect(() => {
@@ -124,7 +135,7 @@ export const Workbench = memo(function Workbench(props: Props) {
     ttp: 0,
     target: 0,
     assets: 0,
-    tables: artifacts.tables.length,
+    tables: 0,
     activity: artifacts.steps.length,
   };
 
@@ -132,19 +143,31 @@ export const Workbench = memo(function Workbench(props: Props) {
   const current = dockTabOf(tab);
 
   // Open tabs, editor-style. Synced from the `tab` prop during render (no effect).
-  const [openIds, setOpenIds] = useState<DockTab[]>(() => openTab(loadTabs(sessionId, DOCK_TABS) ?? [], current));
+  const [openIds, setOpenIds] = useState<DockTab[]>(() => openable(loadTabs(sessionId, TABS) ?? [], current));
   /** The view each merged tab showed last, so going back to it lands where the user left. */
   const [lastView, setLastView] = useState<Partial<Record<DockTab, WorkbenchTab>>>(() => ({ [current]: tab }));
-  const [seen, setSeen] = useState({ sessionId, tab, openSeq });
+  // A molecule picked in the chat arrives as `selectedSmiles` with the Molecules tab.
+  const [page, setPage] = useState<Page | null>(() => (selectedSmiles && current === "molecules" ? { tab: current, smiles: selectedSmiles } : null));
+  const [seen, setSeen] = useState({ sessionId, tab, openSeq, selectedSmiles });
   if (seen.sessionId !== sessionId) {
-    setSeen({ sessionId, tab, openSeq });
-    setOpenIds(openTab(loadTabs(sessionId, DOCK_TABS) ?? [], current));
-  } else if (seen.tab !== tab || seen.openSeq !== openSeq) {
-    setSeen({ sessionId, tab, openSeq });
-    setOpenIds((ids) => openTab(ids, current));
-    setLastView((views) => ({ ...views, [current]: tab }));
+    setSeen({ sessionId, tab, openSeq, selectedSmiles });
+    setOpenIds(openable(loadTabs(sessionId, TABS) ?? [], current));
+    setPage(null);
+  } else if (seen.tab !== tab || seen.openSeq !== openSeq || seen.selectedSmiles !== selectedSmiles) {
+    setSeen({ sessionId, tab, openSeq, selectedSmiles });
+    if (selectedSmiles && selectedSmiles !== seen.selectedSmiles) setPage({ tab: current, smiles: selectedSmiles });
+    // "Open candidates" and the like ask for the list.
+    else if (seen.openSeq !== openSeq && page?.tab === current) setPage(null);
+    if (seen.tab !== tab || seen.openSeq !== openSeq) {
+      setOpenIds((ids) => openable(ids, current));
+      setLastView((views) => ({ ...views, [current]: tab }));
+    }
   }
   useEffect(() => saveTabs(sessionId, openIds), [sessionId, openIds]);
+  // Cleared once its page is closed, so picking the same molecule in the chat again opens it again.
+  useEffect(() => {
+    if (!page && selectedSmiles) onSelectSmiles(null);
+  }, [page, selectedSmiles, onSelectSmiles]);
 
   const viewOf = (id: DockTab): WorkbenchTab => lastView[id] ?? (id === "molecules" && candidateCount > 0 ? "candidates" : id);
   const active = openIds.includes(current) ? current : null;
@@ -157,6 +180,13 @@ export const Workbench = memo(function Workbench(props: Props) {
     setOpenIds((ids) => openTab(ids, id));
     onTabChange(viewOf(id));
   };
+  const show: Show = (smiles, context) => {
+    const here = active && PAGE_TABS.includes(active) ? active : "molecules";
+    setPage({ tab: here, smiles, ...(context ? { context } : {}) });
+    if (here !== active) open(here);
+  };
+  useEffect(() => onMoleculeRequest(({ smiles, context }) => show(smiles, context)));
+  const shown = page && page.tab === active ? page : null;
 
   const [menu, setMenu] = useState(false);
   const [width, setWidth] = useState<number | null>(() => loadWidth());
@@ -253,7 +283,7 @@ export const Workbench = memo(function Workbench(props: Props) {
             <>
               <button type="button" aria-label="Close menu" tabIndex={-1} className="fixed inset-0 z-30 cursor-default" onClick={() => setMenu(false)} />
               <ul role="menu" className="bg-raised border-subtle shadow-card absolute top-full right-0 z-40 mt-1 w-48 rounded-lg border py-1">
-                {DOCK_TABS.map((id) => (
+                {TABS.map((id) => (
                   <li key={id} role="none">
                     <button
                       type="button"
@@ -300,71 +330,56 @@ export const Workbench = memo(function Workbench(props: Props) {
 
       <div className="flex min-h-0 flex-1 flex-col">
         {active === null && <DockEmpty />}
-        {active === "structure" && <StructureTab {...props} />}
-        {active === "molecules" && (
-          <>
-            <ViewSwitch label="Molecules" views={MOLECULE_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
-            {tab === "candidates" && <CandidatesTab {...props} />}
-            {tab === "molecules" && <MoleculesTab {...props} />}
-            {tab === "properties" && <PropertiesTab {...props} />}
-            {tab === "shortlist" && (
-              <ShortlistPanel
-                artifacts={props.artifacts}
-                theme={props.theme}
-                sessionId={props.sessionId}
-                onOpenMolecule={(smiles) => openMolecule(props, smiles)}
-                onAsk={props.onAsk}
-              />
-            )}
-          </>
+        {shown && (
+          <MoleculePage
+            key={shown.smiles}
+            smiles={shown.smiles}
+            context={shown.context}
+            artifacts={artifacts}
+            theme={props.theme}
+            sessionId={sessionId}
+            onBack={() => setPage(null)}
+            onAsk={props.onAsk}
+          />
         )}
-        {active === "jobs" && (
-          <>
-            <ViewSwitch label="Jobs" views={JOB_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
-            {tab === "jobs" && (
-              <div className="min-h-0 flex-1">
-                <JobsPanel sessionId={props.sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={(smiles) => openMolecule(props, smiles)} />
-              </div>
-            )}
-            {tab === "activity" && <ActivityTab {...props} />}
-          </>
-        )}
-        {active === "results" && (
-          <div className="min-h-0 flex-1">
-            <RunResults artifacts={props.artifacts} theme={props.theme} sessionId={props.sessionId} onOpenMolecule={(smiles) => openMolecule(props, smiles)} onAsk={props.onAsk} />
-          </div>
-        )}
-        {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
-        {active === "tables" && <TablesTab {...props} />}
+        {/* Hidden rather than unmounted under a page, so going back finds the list as it was. */}
+        <div className={shown ? "hidden" : "contents"}>
+          {active === "structure" && <StructureTab {...props} />}
+          {active === "molecules" && (
+            <>
+              <ViewSwitch label="Molecules" views={MOLECULE_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
+              {tab === "candidates" && (
+                <div className="min-h-0 flex-1">
+                  <CandidatesPanel artifacts={artifacts} theme={props.theme} onOpenMolecule={show} onAsk={props.onAsk} />
+                </div>
+              )}
+              {tab === "molecules" && <MoleculesTab {...props} onOpen={show} />}
+              {tab === "properties" && <PropertiesTab {...props} onOpen={show} />}
+              {tab === "shortlist" && <ShortlistPanel artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />}
+            </>
+          )}
+          {active === "jobs" && (
+            <>
+              <ViewSwitch label="Jobs" views={JOB_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
+              {tab === "jobs" && (
+                <div className="min-h-0 flex-1">
+                  <JobsPanel sessionId={sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={show} />
+                </div>
+              )}
+              {tab === "activity" && <ActivityTab {...props} />}
+            </>
+          )}
+          {active === "results" && (
+            <div className="min-h-0 flex-1">
+              <RunResults artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />
+            </div>
+          )}
+          {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
+        </div>
       </div>
     </aside>
   );
 });
-
-function openMolecule({ onSelectSmiles, onTabChange }: Props, smiles: string) {
-  onSelectSmiles(smiles);
-  onTabChange("molecules");
-}
-
-function CandidatesTab(props: Props) {
-  const { artifacts, theme, onSelectStructure, onTabChange, onAsk } = props;
-  return (
-    <div className="min-h-0 flex-1">
-      <CandidatesPanel
-        artifacts={artifacts}
-        theme={theme}
-        onOpenMolecule={(smiles) => openMolecule(props, smiles)}
-        onOpenStructure={(path) => {
-          const hit = artifacts.structures.find(({ item }) => item.path === path);
-          if (!hit) return;
-          onSelectStructure(hit.item);
-          onTabChange("structure");
-        }}
-        onAsk={onAsk}
-      />
-    </div>
-  );
-}
 
 /** The tabs about the campaign rather than its results: the profile, the target and the files. */
 function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
@@ -394,6 +409,7 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
       active={activeStructure}
       onSelect={onSelectStructure}
       interactions={artifacts.interactions}
+      properties={artifacts.properties}
       targetSequence={sequence}
       sessionId={sessionId}
       theme={theme}
@@ -402,7 +418,7 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
   );
 }
 
-function PropertiesTab({ artifacts, theme, onSelectSmiles, onTabChange }: Props) {
+function PropertiesTab({ artifacts, theme, onOpen }: Props & { onOpen: Show }) {
   if (artifacts.properties.length === 0) {
     return <Empty>No predictions yet. ADMET and RetroDMTA predictions appear here, molecules by endpoints.</Empty>;
   }
@@ -415,21 +431,14 @@ function PropertiesTab({ artifacts, theme, onSelectSmiles, onTabChange }: Props)
             <span className="text-faint font-mono">{tool}</span>
             <span className="text-faint ml-auto">{clock(at)}</span>
           </h3>
-          <PropertiesCard
-            panel={item}
-            theme={theme}
-            onOpenMolecule={(smiles) => {
-              onSelectSmiles(smiles);
-              onTabChange("molecules");
-            }}
-          />
+          <PropertiesCard panel={item} theme={theme} onOpenMolecule={onOpen} />
         </section>
       ))}
     </div>
   );
 }
 
-function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk, sessionId }: Props) {
+function MoleculesTab({ artifacts, theme, sessionId, onOpen }: Props & { onOpen: Show }) {
   const [query, setQuery] = useState("");
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -455,9 +464,6 @@ function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk,
           className="bg-sunken border-subtle w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none focus:border-strong"
         />
       </div>
-      {selectedSmiles && (
-        <MoleculeDetail smiles={selectedSmiles} artifacts={artifacts} theme={theme} onClose={() => onSelectSmiles(null)} onAsk={onAsk} />
-      )}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         <ul className="grid grid-cols-2 gap-2 xl:grid-cols-3">
           {shown.map(({ item, tool }) => (
@@ -465,12 +471,9 @@ function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk,
               <StarButton smiles={item.smiles} label={item.label} source={tool} session={sessionId ?? "new"} className="absolute top-1 right-1 z-10" />
               <button
                 type="button"
-                onClick={() => onSelectSmiles(item.smiles)}
-                aria-pressed={item.smiles === selectedSmiles}
+                onClick={() => onOpen(item.smiles)}
                 title={item.smiles}
-                className={`bg-sunken border-subtle w-full cursor-pointer overflow-hidden rounded-lg border text-left ${
-                  item.smiles === selectedSmiles ? "border-strong ring-2 ring-[var(--color-accent)]" : "hover:border-strong"
-                }`}
+                className="bg-sunken border-subtle hover:border-strong w-full cursor-pointer overflow-hidden rounded-lg border text-left"
               >
                 <MolDepiction smiles={item.smiles} theme={theme} width={200} height={140} className="h-28 w-full p-1" />
                 <span className="border-subtle block truncate border-t px-2 py-1 text-[10px]">
@@ -483,162 +486,6 @@ function MoleculesTab({ artifacts, theme, selectedSmiles, onSelectSmiles, onAsk,
         </ul>
       </div>
     </>
-  );
-}
-
-/** Rows of every result table that mention this SMILES. */
-function rowsFor(smiles: string, artifacts: Artifacts) {
-  const found: { tool: string; row: Record<string, unknown> }[] = [];
-  for (const { item, tool } of artifacts.tables) {
-    for (const row of item.rows) {
-      if (Object.values(row).some((value) => value === smiles)) found.push({ tool, row });
-    }
-  }
-  return found;
-}
-
-function MoleculeDetail({
-  smiles,
-  artifacts,
-  theme,
-  onClose,
-  onAsk,
-}: {
-  smiles: string;
-  artifacts: Artifacts;
-  theme: Theme;
-  onClose: () => void;
-  onAsk: (text: string) => void;
-}) {
-  const { rdkit } = useRDKit();
-  const props = useMemo(() => (rdkit ? descriptors(rdkit, smiles) : null), [rdkit, smiles]);
-  const rows = useMemo(() => rowsFor(smiles, artifacts), [smiles, artifacts]);
-  const complex = artifacts.structures.find(({ item }) => item.smiles === smiles)?.item;
-  const predicted = artifacts.properties.flatMap(({ item }) =>
-    item.molecules.filter((m) => m.ok && (m.smiles === smiles || m.standardized === smiles)).map((m) => ({ panel: item, molecule: m })),
-  )[0];
-
-  const facts: [string, string][] = props
-    ? [
-        ["MW", props.mw.toFixed(1)],
-        ["cLogP", props.clogp.toFixed(2)],
-        ["TPSA", props.tpsa.toFixed(1)],
-        ["HBD / HBA", `${props.hbd} / ${props.hba}`],
-        ["Rot. bonds", String(props.rotb)],
-        ["Heavy atoms", String(props.heavyAtoms)],
-      ]
-    : [];
-
-  const asks: [string, string][] = [
-    ["Cofold", `Cofold ${smiles} into {TARGET} with Boltz-2 and check the pose with PoseBusters.`],
-    ["ADMET", `Predict ADMET properties for ${smiles}.`],
-    ["Analogues", `Generate analogues of ${smiles} with Mol2Mol and score them against {TARGET}.`],
-  ];
-
-  return (
-    <section aria-label="Selected molecule" className="border-subtle bg-sunken max-h-[55%] shrink-0 overflow-y-auto border-b p-3">
-      <div className="flex gap-3">
-        <div className="bg-raised border-subtle w-44 shrink-0 rounded-lg border p-1">
-          <MolDepiction smiles={smiles} theme={theme} width={240} height={180} className="h-32 w-full" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start gap-2">
-            <code className="min-w-0 flex-1 font-mono text-[11px] break-all">{smiles}</code>
-            <CopyButton value={smiles} label="Copy SMILES" />
-            <button type="button" onClick={onClose} aria-label="Close" className="text-muted hover:text-body cursor-pointer text-base leading-none">
-              ×
-            </button>
-          </div>
-          {facts.length > 0 && (
-            <dl className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-[11px]">
-              {facts.map(([label, value]) => (
-                <div key={label}>
-                  <dt className="text-faint">{label}</dt>
-                  <dd className="font-mono tabular-nums">{value}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
-          <div className="mt-2 flex flex-wrap gap-1">
-            {asks.map(([label, prompt]) => (
-              <button
-                key={label}
-                type="button"
-                onClick={() => onAsk(prompt)}
-                className="bg-raised border-subtle hover:border-strong cursor-pointer rounded-full border px-2.5 py-0.5 text-[11px]"
-              >
-                {label}…
-              </button>
-            ))}
-            {complex && (
-              <button
-                type="button"
-                onClick={() => sendToViewer({ path: complex.path, action: { kind: "ligand" }, source: "molecule" })}
-                className="cursor-pointer rounded-full px-2.5 py-0.5 text-[11px] font-medium text-white"
-                style={{ background: "var(--color-accent)" }}
-              >
-                Show complex
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-      {predicted && (
-        <dl className="bg-raised border-subtle mt-3 grid grid-cols-3 gap-x-3 gap-y-1 rounded-lg border p-2 text-[11px] sm:grid-cols-4">
-          {predicted.panel.endpoints.map((endpoint) => {
-            const value = predicted.molecule.values[endpoint];
-            return (
-              <div key={endpoint} className="min-w-0">
-                <dt className="text-faint truncate">{endpointLabel(endpoint)}</dt>
-                <dd className="truncate font-mono tabular-nums" title={value?.unit}>
-                  {formatValue(value)}
-                </dd>
-              </div>
-            );
-          })}
-        </dl>
-      )}
-      {rows.length > 0 && (
-        <div className="mt-3 space-y-2">
-          {rows.slice(0, 4).map(({ tool, row }, index) => (
-            <div key={index} className="bg-raised border-subtle rounded-lg border p-2">
-              <p className="text-faint mb-1 text-[10px] font-semibold uppercase">{tool}</p>
-              <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] sm:grid-cols-3">
-                {Object.entries(row)
-                  .filter(([, value]) => value !== smiles && value !== null && value !== "")
-                  .map(([key, value]) => (
-                    <div key={key} className="min-w-0">
-                      <dt className="text-faint truncate">{key}</dt>
-                      <dd className="truncate font-mono tabular-nums">
-                        {typeof value === "number" && !Number.isInteger(value) ? value.toFixed(3) : String(value)}
-                      </dd>
-                    </div>
-                  ))}
-              </dl>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function TablesTab({ artifacts }: Props) {
-  if (artifacts.tables.length === 0) {
-    return <Empty>No tables yet. Scores, top candidates and predictions appear here.</Empty>;
-  }
-  return (
-    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
-      {artifacts.tables.map(({ item, tool, at }, index) => (
-        <section key={index}>
-          <h3 className="text-muted mb-1 flex gap-2 text-[11px] font-medium">
-            <span className="font-mono">{tool}</span>
-            <span className="text-faint ml-auto">{clock(at)}</span>
-          </h3>
-          <DataTable panel={item} />
-        </section>
-      ))}
-    </div>
   );
 }
 

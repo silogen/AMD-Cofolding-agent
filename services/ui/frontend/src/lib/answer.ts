@@ -20,7 +20,7 @@ const TOOL_TITLES: [RegExp, string][] = [
   [/^(run|start|launch)_(optimization|reinvent|generation)/, "Running REINVENT"],
   [/^get_optimization_status$/, "Checking the run"],
   [/^get_top_candidates$/, "Ranking candidates"],
-  [/^get_ttp$/, "Reading the target product profile"],
+  [/^get_ttp$/, "Reading the therapeutic target profile"],
   [/^fetch_target_info$/, "Looking up the target"],
   [/^fetch_compound$/, "Looking up a compound"],
   [/^list_shared_assets$/, "Listing shared assets"],
@@ -110,7 +110,6 @@ export function artifactLinks(panels: Panel[], tools: string[]): ArtifactLink[] 
   if (has(/_ttps?$/)) add("Open TTP", { kind: "workbench", tab: "ttp" });
   if (has(/^fetch_target_info$/)) add("Open target", { kind: "workbench", tab: "target" });
   if (has(/^list_shared_assets$/)) add("Open assets", { kind: "workbench", tab: "assets" });
-  if (panels.some((panel) => panel.kind === "table")) add("Open tables", { kind: "workbench", tab: "tables" });
   return out;
 }
 

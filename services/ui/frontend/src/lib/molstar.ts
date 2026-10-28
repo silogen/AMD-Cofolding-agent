@@ -25,6 +25,7 @@ interface QueryBuilder {
 interface SchemaItem {
   auth_asym_id?: string;
   auth_seq_id?: number;
+  pdbx_PDB_ins_code?: string;
   auth_atom_id?: string;
   atom_index?: number;
 }
@@ -159,7 +160,7 @@ interface StructureLib {
       y: Property<number>;
       z: Property<number>;
     };
-    residue: { auth_comp_id: Property<string>; auth_seq_id: Property<number> };
+    residue: { auth_comp_id: Property<string>; auth_seq_id: Property<number>; pdbx_PDB_ins_code: Property<string> };
     chain: { auth_asym_id: Property<string> };
     entity: { type: Property<string> };
   };
@@ -239,6 +240,8 @@ export interface Residue {
   resnum: number;
   /** Three-letter code when the reference named it ("ASN140"); tells file and UniProt numbering apart. */
   resname?: string | null;
+  /** PDB insertion code, "A" in "ASN100A". */
+  insCode?: string | null;
 }
 
 /** One protein-ligand contact drawn as a dashed line. */
@@ -479,22 +482,23 @@ export class StructureView {
   }
 
   /** The polymer residues of the loaded structure, in file order, for renumbering. */
-  residues(): { chain: string | null; resnum: number; resname: string }[] {
+  residues(): { chain: string | null; resnum: number; resname: string; insCode?: string }[] {
     const lib = window.molstar?.lib?.structure;
     const structure = this.structureRef?.cell.obj?.data;
     if (!lib || !structure) return [];
     const seen = new Set<string>();
-    const out: { chain: string | null; resnum: number; resname: string }[] = [];
+    const out: { chain: string | null; resnum: number; resname: string; insCode?: string }[] = [];
     const P = lib.StructureProperties;
     lib.Structure.eachAtomicHierarchyElement(structure, {
       residue: (location) => {
         if (P.entity.type(location) !== "polymer") return;
         const chain = P.chain.auth_asym_id(location) || null;
         const resnum = P.residue.auth_seq_id(location);
-        const id = `${chain}:${resnum}`;
+        const insCode = P.residue.pdbx_PDB_ins_code?.(location) || "";
+        const id = `${chain}:${resnum}${insCode}`;
         if (seen.has(id)) return;
         seen.add(id);
-        out.push({ chain, resnum, resname: P.residue.auth_comp_id(location) });
+        out.push(insCode ? { chain, resnum, resname: P.residue.auth_comp_id(location), insCode } : { chain, resnum, resname: P.residue.auth_comp_id(location) });
       },
     });
     return out;
@@ -623,7 +627,11 @@ export class StructureView {
   /** Focus residues with their neighbours, or only light them up. False when none is in the structure. */
   focusResidues(residues: Residue[], action: "focus" | "highlight" = "focus"): boolean {
     if (!residues.length) return false;
-    const items = residues.map((r) => (r.chain ? { auth_asym_id: r.chain, auth_seq_id: r.resnum } : { auth_seq_id: r.resnum }));
+    const items = residues.map((r) => {
+      const item: SchemaItem = r.chain ? { auth_asym_id: r.chain, auth_seq_id: r.resnum } : { auth_seq_id: r.resnum };
+      if (r.insCode) item.pdbx_PDB_ins_code = r.insCode;
+      return item;
+    });
     const loci = this.lociOf({ items });
     if (!loci) return false;
     if (action === "focus") this.focus(loci, 3);

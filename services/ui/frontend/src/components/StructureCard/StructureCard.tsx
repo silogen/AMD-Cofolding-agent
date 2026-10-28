@@ -5,6 +5,7 @@ import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { affinityText, gate } from "../../lib/gate";
 import { runOf, structureTitle } from "../../lib/artifacts";
+import { STRUCTURE_KINDS, structureKind } from "../../lib/poses";
 import { sendToViewer } from "../../lib/viewerBus";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 
@@ -32,7 +33,25 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
   if (affinity) facts.push(["Affinity", affinity, null]);
   if (m.binderProbability !== undefined) facts.push(["Binder p", m.binderProbability.toFixed(2), null]);
 
-  const show = (action?: Parameters<typeof sendToViewer>[0]["action"]) => sendToViewer({ path: panel.path, action, source: "chat" });
+  const show = () => sendToViewer({ path: panel.path, source: "chat" });
+
+  if (facts.length === 0 && !panel.smiles) {
+    const kind = structureKind(panel.path, false, panel.tool);
+    return (
+      <figure className="bg-raised border-subtle m-0 flex items-center gap-2 rounded-xl border py-1.5 pr-1.5 pl-3">
+        <button
+          type="button"
+          onClick={show}
+          title={isOpen ? "In the 3D viewer" : "Open in the 3D viewer"}
+          className="flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 text-left"
+        >
+          <span className="min-w-0 truncate text-xs font-semibold">{structureTitle(panel)}</span>
+          <span className="text-faint shrink-0 text-[11px]">{kind ? STRUCTURE_KINDS[kind].label : `${panel.format.toUpperCase()} file`}</span>
+        </button>
+        <DownloadLink panel={panel} />
+      </figure>
+    );
+  }
 
   return (
     <figure className="bg-raised border-subtle m-0 overflow-hidden rounded-xl border">
@@ -65,7 +84,7 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
         ) : (
           <span className="bg-sunken text-faint grid h-20 w-28 shrink-0 place-items-center rounded-lg text-[10px]">{panel.format.toUpperCase()} file</span>
         )}
-        {facts.length > 0 ? (
+        {facts.length > 0 && (
           <div className="min-w-0 flex-1 self-center">
             <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
               {facts.map(([label, value, ok]) => (
@@ -81,41 +100,36 @@ export function StructureCard({ panel, theme, isOpen }: Props) {
               <p className="text-faint mt-1 text-[10px]">Pose below the quality gate; read the affinity with caution.</p>
             )}
           </div>
-        ) : (
-          <p className="text-muted self-center text-[11px]">No confidence values with this file. Open it to rotate it, find the pocket and read the contacts.</p>
         )}
       </button>
 
-      <div className="border-subtle flex items-center gap-1 border-t px-3 py-1.5">
+      <div className="border-subtle flex items-center gap-1 border-t py-1 pr-1.5 pl-3">
         <button
           type="button"
-          onClick={() => show()}
+          onClick={show}
           className="border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium whitespace-nowrap touch:min-h-11 touch:px-3"
         >
           {isOpen ? "Showing in viewer" : "Open viewer"}
         </button>
-        <SmallButton onClick={() => show({ kind: "ligand" })}>Ligand</SmallButton>
-        <SmallButton onClick={() => show({ kind: "pocket", radius: 5 })}>Pocket</SmallButton>
-        <a
-          href={panel.url}
-          download={panel.name}
-          className="text-muted hover:text-body ml-auto inline-flex items-center rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11 touch:px-3"
-        >
-          Download
-        </a>
+        <span className="ml-auto" />
+        <DownloadLink panel={panel} />
       </div>
     </figure>
   );
 }
 
-function SmallButton({ children, onClick }: { children: string; onClick: () => void }) {
+function DownloadLink({ panel }: { panel: StructurePanel }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium touch:min-h-11"
+    <a
+      href={panel.url}
+      download={panel.name}
+      title={`Download ${panel.name}`}
+      aria-label={`Download ${panel.name}`}
+      className="text-muted hover:text-body hover:bg-inset inline-flex size-7 shrink-0 items-center justify-center rounded-md touch:size-11"
     >
-      {children}
-    </button>
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10" />
+      </svg>
+    </a>
   );
 }

@@ -341,6 +341,9 @@ def _profile_structure_all(
         md = MoleculeMetadata(name=inp.name, ph=ph, source=inp.source, has_structure=True,
                               input_mode=mode, receptor=rkind, chains=chains, chain_types=chain_types,
                               timing_seconds=round(time.time() - t0, 3))
+        if not struct.has_hetero_groups():
+            only = ", ".join(f"{kind} chain {ch}" for ch, kind in chain_types.items()) or "no chains"
+            return [MoleculeResult(metadata=md, error=f"no ligand in this structure ({only} only)")]
         return [MoleculeResult(metadata=md, error="ValueError: no small-molecule ligand detected "
                                "(pass ligand_resname/ligand_chain)")]
 

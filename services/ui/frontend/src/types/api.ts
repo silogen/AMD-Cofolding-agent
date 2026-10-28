@@ -282,6 +282,17 @@ export interface SessionSummary {
   busy: boolean;
   inputTokens?: number;
   outputTokens?: number;
+  /** The REINVENT jobs of the conversation; absent when it has none. */
+  runs?: SessionRuns;
+}
+
+export interface SessionRuns {
+  /** Launched here and still running or queued. */
+  running: number;
+  /** Launched here, including runs continued from those. */
+  total: number;
+  /** `launched` false: only referenced here, e.g. a status asked for. */
+  jobs: { id: string; state: string | null; launched: boolean }[];
 }
 
 // ---------------------------------------------------------------------------

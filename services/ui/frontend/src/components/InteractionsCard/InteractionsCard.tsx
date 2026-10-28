@@ -5,6 +5,7 @@ import type { InteractionsPanel } from "../../types/api";
 import { contactColor, contactLabel, sortedTypes } from "../../lib/contacts";
 import { residueLabel, useNumbering } from "../../lib/numbering";
 import { sendToViewer } from "../../lib/viewerBus";
+import { profileError } from "../../lib/profileError";
 
 /**
  * The protein-ligand contacts of one complex: counts by type and the
@@ -28,18 +29,25 @@ export function InteractionsCard({ panel }: { panel: InteractionsPanel }) {
   const rank = (set: Set<string>) => Math.min(...[...set].map((type) => types.indexOf(type)));
   const top = [...residues.values()].sort((a, b) => rank(a.types) - rank(b.types)).slice(0, 12);
 
+  const error = panel.error ? profileError(panel.error) : null;
+  // Batch indices ("mol_3") and Boltz file names ("mol_0_model_0") say nothing; a PDB entry's name does.
+  const stem = path ? (path.split("/").pop() ?? path).replace(/\.(cif|mmcif|pdb)$/i, "") : null;
+  const structure = stem && !/^mol_\d+(_model_\d+)?$/.test(stem) ? stem : null;
+  const name = panel.name && !/^mol_\d+$/.test(panel.name) ? panel.name : null;
+
   return (
     <section className="bg-raised border-subtle overflow-hidden rounded-xl border">
-      <header className="flex items-center gap-2 px-3 pt-2 pb-1">
-        <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ background: "#00c2de" }} />
-        <span className="min-w-0 truncate text-xs font-semibold">Contacts{panel.name ? ` · ${panel.name}` : ""}</span>
-        <span className="text-faint ml-auto shrink-0 text-[11px]">
-          {panel.totalContacts} contact{panel.totalContacts === 1 ? "" : "s"} · {residues.size} residues
-        </span>
+      <header className="flex items-baseline gap-2 px-3 pt-2 pb-1">
+        <span className="min-w-0 truncate text-xs font-semibold">{name ?? "Contacts"}</span>
+        {structure && (
+          <span className="text-faint min-w-0 truncate text-[11px]" title={path ?? undefined}>
+            {structure}
+          </span>
+        )}
       </header>
-      {panel.error ? (
-        <p className="px-3 py-2 text-xs" style={{ color: "var(--color-accent)" }}>
-          {panel.error}
+      {error ? (
+        <p className={`px-3 pb-2.5 text-xs ${error.quiet ? "text-muted" : ""}`} style={error.quiet ? undefined : { color: "var(--color-accent)" }}>
+          {error.text}
         </p>
       ) : (
         <div className="space-y-1.5 px-3 py-1.5">
@@ -87,22 +95,17 @@ export function InteractionsCard({ panel }: { panel: InteractionsPanel }) {
           )}
         </div>
       )}
-      <footer className="flex gap-1 px-3 pt-0.5 pb-2">
-        <button
-          type="button"
-          onClick={() => sendToViewer({ path, action: { kind: "contacts", type: null }, source: "chat" })}
-          className="border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium whitespace-nowrap"
-        >
-          Show on structure
-        </button>
-        <button
-          type="button"
-          onClick={() => sendToViewer({ path, action: { kind: "ligand" }, source: "chat" })}
-          className="text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium"
-        >
-          Ligand view
-        </button>
-      </footer>
+      {!error && (
+        <footer className="flex gap-1 px-3 pt-0.5 pb-2">
+          <button
+            type="button"
+            onClick={() => sendToViewer({ path, action: { kind: "contacts", type: null }, source: "chat" })}
+            className="border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-1 text-[11px] font-medium whitespace-nowrap"
+          >
+            Show on structure
+          </button>
+        </footer>
+      )}
     </section>
   );
 }

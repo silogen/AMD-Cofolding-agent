@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import multiprocessing
+import statistics
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
@@ -26,6 +28,8 @@ logger = logging.getLogger("boltz2_pool")
 
 WORKER_LOAD_TIMEOUT_SECONDS = 1200
 MAX_WORKER_RESTARTS = 2
+# Successful molecules whose wall time makes up the typical molecule time.
+RECENT_DURATIONS = 20
 
 
 class PoolUnavailable(Exception):
@@ -127,6 +131,8 @@ class MoleculeJob:
     shared: bool = False
     retried: bool = False
     cancelled: bool = False
+    # time.monotonic() when a worker took it; None while queued.
+    started: Optional[float] = None
 
 
 @dataclass
@@ -159,6 +165,7 @@ class WorkerPool:
         self._job_timeout = job_timeout
         self._queue: deque[MoleculeJob] = deque()
         self._tasks: set[asyncio.Task] = set()
+        self._durations: deque[float] = deque(maxlen=RECENT_DURATIONS)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -228,6 +235,19 @@ class WorkerPool:
                 progress.setdefault(w.job.request_id, {"queued": 0, "running": 0})["running"] += 1
         return progress
 
+    def running_elapsed(self) -> dict[str, list[float]]:
+        """Seconds each running molecule has been on its worker, per request id."""
+        now = time.monotonic()
+        elapsed: dict[str, list[float]] = {}
+        for w in self.workers:
+            if w.job is not None and w.job.started is not None:
+                elapsed.setdefault(w.job.request_id, []).append(round(now - w.job.started, 1))
+        return elapsed
+
+    def molecule_seconds(self) -> Optional[float]:
+        """Median wall time of the recent successful molecules; None before the first."""
+        return round(statistics.median(self._durations), 1) if self._durations else None
+
     def health(self) -> dict[str, Any]:
         workers = []
         for w in self.workers:
@@ -248,6 +268,7 @@ class WorkerPool:
             "mode": "subprocess" if status == "failed" else "pool",
             "workers": workers,
             "queue_length": self.queue_length(),
+            "molecule_s": self.molecule_seconds(),
         }
 
     # ------------------------------------------------------------------
@@ -318,6 +339,7 @@ class WorkerPool:
                 if other.job is not None:
                     other.job.shared = True
             job.shared = bool(busy)
+            job.started = time.monotonic()
             slot.state = "busy"
             slot.job = job
             self._spawn(self._execute(slot, job))
@@ -350,6 +372,8 @@ class WorkerPool:
                     self._fail_queue(f"all Boltz workers failed ({slot.error})")
         else:
             slot.state = "ready"
+            if result.get("status") == "ok" and job.started is not None:
+                self._durations.append(time.monotonic() - job.started)
 
         if (
             result.get("status") == "oom"

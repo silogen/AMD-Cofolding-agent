@@ -33,8 +33,11 @@ from reinvent4_mcp.ttp.schema import (
     ConstraintConfig,
     PreScoringComponent,
     ScoringObjective,
+    TargetConfig,
     TTP,
+    check_protein_sequence,
 )
+from reinvent4_mcp.ttp.structure import structure_sequence
 
 logger = logging.getLogger(__name__)
 
@@ -564,7 +567,8 @@ def _map_external_objective(
 
     # Inject protein target info for structure prediction (Boltz)
     if ttp.target and objective.service in ("boltz",):
-        params["protein_sequence"] = ttp.target.protein_sequence
+        sequence = target_sequence(ttp.target)
+        params["protein_sequence"] = sequence
         if ttp.target.msa_path:
             params["msa_path"] = ttp.target.msa_path
             # A precomputed MSA and the colabfold server are mutually
@@ -575,7 +579,7 @@ def _map_external_objective(
             # No explicit MSA: reuse a cached one for this sequence if
             # present, else auto-enable the MSA server so the cofold never
             # fails for lack of an alignment.
-            params.update(_resolve_boltz_msa(ttp.target.protein_sequence))
+            params.update(_resolve_boltz_msa(sequence))
         if ttp.target.templates:
             # None values would reach the job TOML as the string "None".
             params["templates"] = [
@@ -595,6 +599,25 @@ def _map_external_objective(
     return {
         "ExternalRESTScorer": {"endpoint": [endpoint]},
     }
+
+
+def target_sequence(target: TargetConfig) -> str:
+    """The protein Boltz folds: ``protein_sequence``, else read from ``structure_path``.
+
+    Raises ``ValueError`` when the structure cannot be read, names no such
+    chain, holds several proteins without ``structure_chain``, or its chain
+    is not a sequence ``TargetConfig`` would accept.
+    """
+
+    if target.protein_sequence:
+        return target.protein_sequence
+    assert target.structure_path is not None
+    sequence = structure_sequence(target.structure_path, target.structure_chain)
+    try:
+        return check_protein_sequence(sequence)
+    except ValueError as exc:
+        chain = f" chain {target.structure_chain}" if target.structure_chain else ""
+        raise ValueError(f"{target.structure_path}{chain}: {exc}") from None
 
 
 def _resolve_service_url(service: str | None, ttp_url: str | None) -> str | None:

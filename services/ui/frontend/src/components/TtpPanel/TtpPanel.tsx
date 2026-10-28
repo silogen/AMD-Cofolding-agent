@@ -162,7 +162,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
     <div className="@container flex min-h-0 flex-1 flex-col">
       <div className="border-subtle flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <div className="min-w-0 flex-1">
-          <h2 className="text-xs font-semibold">Target product profiles</h2>
+          <h2 className="text-xs font-semibold">Therapeutic target profiles</h2>
           <p className="text-faint text-[10px]">
             {list.state === "ready" ? `${items.length} stored · most recently used first` : list.state === "loading" ? "Loading…" : "TTP store unavailable"}
           </p>
@@ -180,7 +180,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
         <button
           type="button"
           onClick={() => setBuilder({})}
-          title="Define a new target product profile"
+          title="Define a new therapeutic target profile"
           className="bg-inset text-body hover:bg-sunken shrink-0 cursor-pointer rounded-md px-2 py-1 text-[11px] font-semibold touch:min-h-11"
         >
           + New TTP

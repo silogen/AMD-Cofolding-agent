@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchRcsbCif, rcsbCifUrl, sliceRegion, uniprotSpans } from "./region";
+import { rcsbCifUrl, sharedPath, sharedRcsbCif, sliceRegion, uniprotSpans } from "./region";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -61,28 +61,38 @@ describe("uniprotSpans", () => {
   });
 });
 
-describe("fetchRcsbCif", () => {
-  it("reads the entry from RCSB", async () => {
-    const fetch = vi.fn(async () => new Response("data_1M17"));
+describe("sharedRcsbCif", () => {
+  const stored = (name: string) => Response.json({ path: `/shared/uploads/new/${name}`, url: `/api/artifacts/uploads/new/${name}`, name, size: 9 });
+
+  it("has the gateway keep a copy on the shared volume", async () => {
+    const fetch = vi.fn(async (url: string) => (url === "/api/uploads/rcsb" ? stored("1M17.cif") : new Response("data_1M17")));
     vi.stubGlobal("fetch", fetch);
-    await expect(fetchRcsbCif(" 1m17 ", "new")).resolves.toBe("data_1M17");
-    expect(fetch).toHaveBeenCalledWith(rcsbCifUrl("1M17"));
+    await expect(sharedRcsbCif(" 1m17 ", "new")).resolves.toEqual({ path: "uploads/new/1M17.cif", text: "data_1M17" });
+    expect(fetch).toHaveBeenLastCalledWith("/api/artifacts/uploads/new/1M17.cif");
+    expect(fetch).not.toHaveBeenCalledWith(rcsbCifUrl("1M17"));
   });
 
-  it("goes through the gateway when RCSB cannot be reached", async () => {
+  it("uploads what the browser fetched when the gateway cannot reach RCSB", async () => {
     const fetch = vi.fn(async (url: string) => {
-      if (url.startsWith("https://")) throw new TypeError("Failed to fetch");
-      if (url === "/api/uploads/rcsb") return Response.json({ path: "/shared/uploads/new/1M17.cif", url: "/api/artifacts/uploads/new/1M17.cif", name: "1M17.cif", size: 9 });
+      if (url === "/api/uploads/rcsb") return Response.json({ detail: "RCSB unreachable" }, { status: 502 });
+      if (url.startsWith("/api/uploads?")) return stored("1M17.cif");
       return new Response("data_1M17");
     });
     vi.stubGlobal("fetch", fetch);
-    await expect(fetchRcsbCif("1M17", "new")).resolves.toBe("data_1M17");
-    expect(fetch).toHaveBeenLastCalledWith("/api/artifacts/uploads/new/1M17.cif");
+    await expect(sharedRcsbCif("1M17", "s 1")).resolves.toEqual({ path: "uploads/new/1M17.cif", text: "data_1M17" });
+    expect(fetch).toHaveBeenCalledWith(rcsbCifUrl("1M17"));
+    expect(fetch.mock.calls.at(-1)?.[0]).toBe("/api/uploads?session=s+1&name=1M17.cif");
   });
 
   it("says when the entry does not exist", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
-    await expect(fetchRcsbCif("9ZZZ", "new")).rejects.toThrow("9ZZZ is not in the PDB.");
-    await expect(fetchRcsbCif("hello", "new")).rejects.toThrow("not a PDB id");
+    await expect(sharedRcsbCif("9ZZZ", "new")).rejects.toThrow("9ZZZ is not in the PDB.");
+    await expect(sharedRcsbCif("hello", "new")).rejects.toThrow("not a PDB id");
+  });
+});
+
+describe("sharedPath", () => {
+  it("reads the path from the artifact URL", () => {
+    expect(sharedPath({ path: "/shared/uploads/a b/x.cif", url: "/api/artifacts/uploads/a%20b/x.cif", name: "x.cif", size: 1 })).toBe("uploads/a b/x.cif");
   });
 });

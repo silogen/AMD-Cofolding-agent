@@ -49,6 +49,12 @@ def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
+def _seconds(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return round(float(value), 1)
+
+
 def summarize(health: dict[str, Any]) -> dict[str, Any]:
     """The run bar's view of one Boltz ``/health`` answer."""
     workers = [w for w in health.get("workers") or [] if isinstance(w, dict)]
@@ -58,7 +64,7 @@ def summarize(health: dict[str, Any]) -> dict[str, Any]:
     for entry in health.get("requests") or []:
         if not isinstance(entry, dict):
             continue
-        elapsed = entry.get("elapsed_s")
+        running_s = entry.get("running_s")
         requests.append(
             {
                 "id": str(entry.get("id", "")),
@@ -67,7 +73,9 @@ def summarize(health: dict[str, Any]) -> dict[str, Any]:
                 "queued": _int(entry.get("queued")),
                 "running": _int(entry.get("running")),
                 "state": entry.get("state") if entry.get("state") in ("preparing", "queued", "running") else "running",
-                "elapsedSeconds": round(float(elapsed), 1) if isinstance(elapsed, (int, float)) else None,
+                "elapsedSeconds": _seconds(entry.get("elapsed_s")),
+                "startedAt": _seconds(entry.get("started_at")),
+                "runningSeconds": [s for s in map(_seconds, running_s) if s is not None] if isinstance(running_s, list) else None,
             }
         )
     queue_length = _int(health.get("queue_length"))
@@ -76,6 +84,7 @@ def summarize(health: dict[str, Any]) -> dict[str, Any]:
         "available": True,
         "status": str(health.get("status", "unknown")),
         "mode": str(health.get("mode") or ("pool" if workers else "subprocess")),
+        "moleculeSeconds": _seconds(health.get("molecule_s")),
         "workers": {
             "total": len(workers),
             "busy": busy,

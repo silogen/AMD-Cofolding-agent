@@ -15,6 +15,10 @@ import type { ViewerAction } from "./viewerCommands";
 export interface ViewerRequest {
   /** Show this structure first (job file path). */
   path?: string | null;
+  /** Or the conversation's structure this names ("3MXF", "mol_3_model_0.pdb"), when there is no path. */
+  ref?: string | null;
+  /** The prediction *ref* was said near, so a Boltz molecule ("mol_3") is looked up in its run. */
+  near?: string | null;
   /** Then run this, if anything. */
   action?: ViewerAction;
   /** What asked, for the viewer's message line. */

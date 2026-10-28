@@ -132,22 +132,32 @@ export function etaLabel(remainingMs: number | null): string {
   return `~${shortDuration(remainingMs)} left`;
 }
 
+type LaunchStep = { name: string; at: number; result?: { result: string; isError: boolean } };
+
 /** The jobs this conversation started, from the results of its run_optimization calls, oldest first. */
-export function conversationJobIds(steps: readonly { name: string; at: number; result?: { result: string; isError: boolean } }[]): string[] {
+export function conversationJobIds(steps: readonly LaunchStep[], tools: readonly string[] = ["run_optimization"]): string[] {
   const ids: string[] = [];
   for (const step of [...steps].sort((a, b) => a.at - b.at)) {
-    if (step.name !== "run_optimization" || !step.result || step.result.isError) continue;
+    if (!tools.includes(step.name) || !step.result || step.result.isError) continue;
     const id = startedJobId(parseResult(step.result.result));
     if (id && !ids.includes(id)) ids.push(id);
   }
   return ids;
 }
 
-/** The runs the bar follows: the conversation's own running jobs, else every running job. */
+/**
+ * Every job this conversation launched: its own calls, which are seen at
+ * once, and what the gateway knows (runs continued from those outside the chat).
+ */
+export function ownJobIds(steps: readonly LaunchStep[], runs: { jobs: readonly { id: string; launched: boolean }[] } | null | undefined): string[] {
+  const ids = conversationJobIds(steps, ["run_optimization", "run_transfer_learning"]);
+  for (const job of runs?.jobs ?? []) if (job.launched && !ids.includes(job.id)) ids.push(job.id);
+  return ids;
+}
+
+/** The runs the bar follows: the conversation's own running jobs, never another conversation's. */
 export function runsToShow<T extends { id: string; state: JobState }>(jobs: readonly T[], conversation: readonly string[]): T[] {
-  const live = jobs.filter((job) => job.state === "running" || job.state === "queued");
-  const own = live.filter((job) => conversation.includes(job.id));
-  return own.length ? own : live;
+  return jobs.filter((job) => (job.state === "running" || job.state === "queued") && conversation.includes(job.id));
 }
 
 // -- Notifications -------------------------------------------------------------

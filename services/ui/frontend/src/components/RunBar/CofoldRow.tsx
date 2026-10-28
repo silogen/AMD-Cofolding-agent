@@ -2,46 +2,79 @@
 // SPDX-License-Identifier: MIT
 
 import { useEffect, useState } from "react";
-import { clock, cofoldView, type CofoldCall, type CofoldStatus } from "../../lib/cofold";
+import { clock, cofoldView, type CofoldCall, type CofoldMemory, type CofoldStatus } from "../../lib/cofold";
+import { etaLabel } from "../../lib/runProgress";
 
 interface Props {
   status: CofoldStatus | null;
   /** When *status* was read. */
   at: number;
   calls: readonly CofoldCall[];
+  memory?: CofoldMemory;
+  /** The batch is done and the run prepares the next one. */
+  finished?: boolean;
 }
 
-/** "Cofolding · 2 molecules ▬▬ 1/2 · 0:41": one line of the run bar while Boltz works. */
-export function CofoldRow({ status, at, calls }: Props) {
+/**
+ * "Cofolding · 10 molecules ▬▬ 6/10 · 4 queued · 1:23 · ~1 min left": the
+ * cells of one run bar line while Boltz works, in the bar's columns.
+ */
+export function CofoldRow({ status, at, calls, memory, finished = false }: Props) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (finished) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, []);
-  const view = cofoldView(status, at, calls, now);
+  }, [finished]);
+  const view = cofoldView(status, at, calls, now, { memory, finished });
   if (!view) return null;
-  const fraction = view.total > 0 ? view.done / view.total : 0;
 
   return (
-    <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden" title={view.title}>
-      <span aria-hidden="true" className="size-1.5 shrink-0 animate-pulse rounded-full" style={{ background: "var(--color-structure)" }} />
-      <span className="shrink-0 font-medium">{view.label}</span>
-      <span className="text-faint min-w-0 truncate">{view.detail}</span>
-      {view.total > 0 && (
-        <>
-          <span className="bg-inset h-1 w-10 shrink-0 overflow-hidden rounded-full @md:w-20" aria-hidden="true">
-            <span className="block h-full rounded-full transition-[width] duration-700" style={{ width: `${Math.round(fraction * 100)}%`, background: "var(--color-structure)" }} />
-          </span>
-          <span className="text-muted shrink-0 font-mono tabular-nums" title="Molecules cofolded / asked for">
-            {view.done}/{view.total}
-          </span>
-        </>
-      )}
-      {view.note && <span className="text-faint shrink-0">{view.note}</span>}
-      {view.elapsedMs !== null && (
-        <span className="text-faint shrink-0 tabular-nums" title="Elapsed">
-          {clock(view.elapsedMs)}
-        </span>
+    <>
+      <span
+        aria-hidden="true"
+        className={`size-1.5 rounded-full ${finished ? "opacity-50" : "animate-pulse"}`}
+        style={{ background: "var(--color-structure)" }}
+      />
+      <span className="font-medium" title={view.title}>
+        {view.label}
+      </span>
+      <span className="text-faint min-w-0 truncate" title={view.title}>
+        {view.detail}
+      </span>
+      <Bar fraction={view.total > 0 ? view.fraction : null} />
+      <span className="text-muted text-right font-mono tabular-nums" title="Molecules cofolded / asked for">
+        {view.total > 0 ? `${view.done}/${view.total}` : ""}
+      </span>
+      <span className="text-faint">{view.note}</span>
+      <span className="text-faint text-right tabular-nums" title="Elapsed">
+        {view.elapsedMs !== null ? clock(view.elapsedMs) : ""}
+      </span>
+      <span className="text-faint tabular-nums" title={view.remainingMs !== null ? "Estimated from recent molecule times" : undefined}>
+        {view.remainingMs !== null && <Eta remainingMs={view.remainingMs} />}
+      </span>
+    </>
+  );
+}
+
+/** "~7 min left", without "left" when the bar is narrow. */
+export function Eta({ remainingMs }: { remainingMs: number | null }) {
+  const label = etaLabel(remainingMs);
+  if (!label.endsWith(" left")) return label;
+  return (
+    <>
+      {label.slice(0, -" left".length)}
+      <span className="hidden @lg:inline"> left</span>
+    </>
+  );
+}
+
+/** The bar's progress track; empty without a fraction. */
+export function Bar({ fraction, colour = "var(--color-structure)" }: { fraction: number | null; colour?: string }) {
+  return (
+    <span className="bg-inset block h-1 w-10 overflow-hidden rounded-full @md:w-20" aria-hidden="true">
+      {fraction !== null && (
+        <span className="block h-full rounded-full transition-[width] duration-1000 ease-linear" style={{ width: `${Math.round(fraction * 1000) / 10}%`, background: colour }} />
       )}
     </span>
   );

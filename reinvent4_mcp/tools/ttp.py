@@ -13,6 +13,7 @@ import logging
 from typing import Any, Optional
 
 from reinvent4_mcp.config import get_config
+from reinvent4_mcp.ttp.mapper import target_sequence
 from reinvent4_mcp.ttp.schema import TTP
 from reinvent4_mcp.ttp.store import TTPStore
 
@@ -35,6 +36,31 @@ def reset_store() -> None:
     _store = None
 
 
+def _structure_problem(ttp: TTP) -> str | None:
+    """Why the target's structure file cannot give a sequence, if it cannot."""
+    if not (ttp.target and ttp.target.structure_path):
+        return None
+    try:
+        target_sequence(ttp.target)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _exclusive_target_fields(updates: dict[str, Any]) -> dict[str, Any]:
+    """Setting one of protein_sequence / structure_path clears the other."""
+    target = updates.get("target")
+    if not isinstance(target, dict):
+        return updates
+    target = dict(target)
+    if target.get("structure_path") and "protein_sequence" not in target:
+        target["protein_sequence"] = None
+    if target.get("protein_sequence") and "structure_path" not in target:
+        target["structure_path"] = None
+        target.setdefault("structure_chain", None)
+    return {**updates, "target": target}
+
+
 def create_ttp(ttp_data: dict[str, Any]) -> dict[str, Any]:
     """Validate and persist a new TTP.
 
@@ -44,6 +70,9 @@ def create_ttp(ttp_data: dict[str, Any]) -> dict[str, Any]:
         ttp = TTP.model_validate(ttp_data)
     except Exception as exc:
         return {"error": f"Invalid TTP: {exc}"}
+    problem = _structure_problem(ttp)
+    if problem:
+        return {"error": f"Invalid TTP target: {problem}"}
 
     try:
         created = _get_store().create(ttp)
@@ -66,19 +95,23 @@ def update_ttp(ttp_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     updated TTP so the agent can inspect the result.
     """
     try:
-        updated = _get_store().update(ttp_id, updates)
+        updated = _get_store().update(ttp_id, _exclusive_target_fields(updates))
     except FileNotFoundError as exc:
         return {"error": str(exc)}
     except Exception as exc:
         return {"error": f"Invalid update: {exc}"}
 
-    return {
+    result = {
         "status": "updated",
         "id": updated.id,
         "name": updated.name,
         "version": updated.version,
         "ttp": updated.model_dump(mode="json"),
     }
+    problem = _structure_problem(updated)
+    if problem:
+        result["warning"] = f"The target structure cannot be read yet: {problem}"
+    return result
 
 
 def get_ttp(

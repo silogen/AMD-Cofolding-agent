@@ -24,6 +24,7 @@ import {
   useShortlist,
   type KnownValues,
 } from "../../lib/shortlist";
+import type { MoleculeContext } from "../../lib/moleculePage";
 import { latestTtp, toolEvents } from "../../lib/ttp";
 import { DownloadIcon, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
@@ -34,11 +35,13 @@ interface Props {
   artifacts: Artifacts;
   theme: Theme;
   sessionId: string | null;
-  onOpenMolecule: (smiles: string) => void;
+  onOpenMolecule: (smiles: string, context?: MoleculeContext) => void;
   onAsk: (prompt: string) => void;
 }
 
 const DESCRIPTORS = ["MW", "cLogP", "TPSA"];
+/** Molecules starred in Results or Jobs keep their run's id as the source. */
+const RUN_ID = /^[0-9a-f]{8}$/;
 /** Score columns shown in the list; every known value goes into the exports. */
 const SHOWN_SCORES = 3;
 
@@ -164,7 +167,12 @@ export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, on
                 <tr key={e.smiles} className="group hover:bg-sunken">
                   <td className="border-subtle border-b px-2 py-1">
                     <span className="flex items-center gap-2">
-                      <button type="button" onClick={() => onOpenMolecule(e.smiles)} className="hover:bg-inset h-12 w-16 shrink-0 cursor-pointer rounded" title="Open the 2D drawing">
+                      <button
+                        type="button"
+                        onClick={() => onOpenMolecule(e.smiles, e.source && RUN_ID.test(e.source) ? { run: e.source, name: e.label ?? null } : undefined)}
+                        className="hover:bg-inset h-12 w-16 shrink-0 cursor-pointer rounded"
+                        title="Open the molecule"
+                      >
                         <MolDepiction smiles={e.smiles} theme={theme} width={128} height={96} className="size-full" />
                       </button>
                       <span className="flex min-w-0 flex-col">

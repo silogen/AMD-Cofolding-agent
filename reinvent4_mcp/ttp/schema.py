@@ -169,19 +169,37 @@ class TemplateConfig(BaseModel):
 class TargetConfig(BaseModel):
     """Protein target information for structure-based scoring.
 
-    ``protein_sequence`` is required for Boltz cofolding.  Other fields
-    supply additional structural context.
+    The protein Boltz folds is ``protein_sequence``, or the chain
+    ``structure_chain`` of ``structure_path``: exactly one of the two is
+    required.  Other fields supply additional structural context.
     """
 
     model_config = {"extra": "forbid"}
 
-    protein_sequence: str = Field(
+    protein_sequence: Optional[str] = Field(
+        default=None,
         description=(
             "Amino-acid sequence Boltz folds. Prefer the construct (the chain "
             "of a crystal structure, or the domain) to the full-length "
             "protein: Boltz cost grows steeply with length. Must match the "
-            "query sequence of msa_path, else Boltz folds the MSA's query."
+            "query sequence of msa_path, else Boltz folds the MSA's query. "
+            "Leave out when structure_path gives the protein."
         ),
+    )
+    structure_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Structure file (.cif/.mmcif or .pdb/.ent), relative to the shared "
+            "volume or absolute, whose chain structure_chain is the protein "
+            "Boltz folds: the deposited construct (SEQRES / entity_poly) when "
+            "the file has one, else the residues with coordinates. Read when "
+            "the scorer is built; instead of protein_sequence. Not a template: "
+            "add it to templates for that."
+        ),
+    )
+    structure_chain: Optional[str] = Field(
+        default=None,
+        description="Chain of structure_path (author chain id); may be left out when the file holds one protein",
     )
     pdb_id: Optional[str] = Field(
         default=None,
@@ -219,19 +237,58 @@ class TargetConfig(BaseModel):
             )
         return v
 
-    @field_validator("protein_sequence")
+    @field_validator("structure_path")
     @classmethod
-    def _validate_sequence(cls, v: str) -> str:
-        v = v.strip().upper()
-        if len(v) < 10:
-            raise ValueError("Protein sequence must be at least 10 residues")
-        invalid = set(v) - _VALID_AMINO_ACIDS
-        if invalid:
+    def _validate_structure_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        if not v.lower().endswith(TEMPLATE_SUFFIXES):
             raise ValueError(
-                f"Invalid amino-acid characters: {', '.join(sorted(invalid))}. "
-                f"Sequence must only contain standard amino acids."
+                f"structure_path '{v}' must be a {', '.join(TEMPLATE_SUFFIXES)} file"
             )
         return v
+
+    @field_validator("structure_chain")
+    @classmethod
+    def _validate_structure_chain(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return v.strip() or None
+
+    @model_validator(mode="after")
+    def _validate_protein(self) -> "TargetConfig":
+        if self.protein_sequence and self.structure_path:
+            raise ValueError(
+                "Give protein_sequence or structure_path (the sequence is read "
+                "from the structure's chain), not both"
+            )
+        if not self.protein_sequence and not self.structure_path:
+            raise ValueError("The target needs protein_sequence or structure_path")
+        if self.structure_chain and not self.structure_path:
+            raise ValueError("structure_chain needs structure_path")
+        return self
+
+    @field_validator("protein_sequence")
+    @classmethod
+    def _validate_sequence(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        return check_protein_sequence(v)
+
+
+def check_protein_sequence(v: str) -> str:
+    """The sequence upper-cased, or ValueError when Boltz cannot fold it."""
+    v = v.strip().upper()
+    if len(v) < 10:
+        raise ValueError("Protein sequence must be at least 10 residues")
+    invalid = set(v) - _VALID_AMINO_ACIDS
+    if invalid:
+        raise ValueError(
+            f"Invalid amino-acid characters: {', '.join(sorted(invalid))}. "
+            f"Sequence must only contain standard amino acids."
+        )
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +648,7 @@ class TTP(BaseModel):
         if boltz_objectives and self.target is None:
             raise ValueError(
                 f"Objectives {boltz_objectives} use Boltz scoring which requires "
-                f"a 'target' section with at least 'protein_sequence'."
+                f"a 'target' section with 'protein_sequence' or 'structure_path'."
             )
         return self
 

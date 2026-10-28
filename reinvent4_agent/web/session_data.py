@@ -321,6 +321,140 @@ def stored_references(store_root: Path, shared_root: Path, exclude: str) -> list
     return found
 
 
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_mtime_ns, info.st_size
+
+
+class RunIndex:
+    """Which REINVENT jobs each conversation launched, for the conversation list.
+
+    The list is polled every few seconds, so nothing is read again unless it
+    changed: a conversation's events when its ``events.jsonl`` did, a job's
+    state when its ``job_metadata.json`` did, a job's ``config.toml`` once.
+
+    A run continued from the Jobs panel is started by a direct tool call,
+    outside any conversation; a job no conversation launched belongs to the
+    one that launched a job its configuration resumes from.
+    """
+
+    ACTIVE = frozenset({"running", "queued"})
+
+    def __init__(self, store_root: Path) -> None:
+        self._store_root = store_root
+        self._refs: dict[str, tuple[tuple[int, int], list[str], list[str]]] = {}
+        self._states: dict[str, tuple[tuple[int, int], str | None]] = {}
+        self._parents: dict[str, tuple[tuple[int, int], frozenset[str]]] = {}
+
+    def runs(self, session_ids: Iterable[str], roots: Roots) -> dict[str, dict[str, Any]]:
+        """``{session id: {"running", "total", "jobs": [{"id", "state", "launched"}]}}``.
+
+        ``total`` and ``running`` count the jobs launched there, ``jobs`` also
+        lists the ones it only referenced.  Jobs that are gone are left out.
+        """
+        ids = [sid for sid in session_ids if valid_session_id(sid)]
+        launched_by: dict[str, str] = {}
+        referenced: dict[str, list[str]] = {}
+        for sid in ids:
+            launched, seen = self._references(sid, roots.shared)
+            for job_id in launched:
+                launched_by.setdefault(job_id, sid)
+            referenced[sid] = seen
+        self._inherit(launched_by, roots.jobs)
+
+        out: dict[str, dict[str, Any]] = {}
+        for sid in ids:
+            own = [job_id for job_id, owner in launched_by.items() if owner == sid]
+            jobs = [{"id": job_id, "state": self._state(job_id, roots.jobs), "launched": True} for job_id in own]
+            jobs += [
+                {"id": job_id, "state": self._state(job_id, roots.jobs), "launched": False}
+                for job_id in referenced[sid]
+                if job_id not in own
+            ]
+            jobs = [job for job in jobs if job["state"] is not None]
+            mine = [job for job in jobs if job["launched"]]
+            out[sid] = {
+                "running": sum(1 for job in mine if job["state"] in self.ACTIVE),
+                "total": len(mine),
+                "jobs": jobs,
+            }
+        for stale in set(self._refs) - set(ids):
+            del self._refs[stale]
+        return out
+
+    def _references(self, session_id: str, shared_root: Path) -> tuple[list[str], list[str]]:
+        path = self._store_root / session_id / "events.jsonl"
+        stamp = _stamp(path)
+        if stamp is None:
+            return [], []
+        cached = self._refs.get(session_id)
+        if cached is not None and cached[0] == stamp:
+            return cached[1], cached[2]
+        refs = collect_references(_read_events(path), shared_root)
+        launched = list(refs.launched)
+        seen = [job_id for job_id in refs.jobs if job_id not in refs.launched]
+        self._refs[session_id] = (stamp, launched, seen)
+        return launched, seen
+
+    def _state(self, job_id: str, jobs_root: Path) -> str | None:
+        """The job's state; None when it has no readable metadata (gone, or not a job)."""
+        if not _JOB_ID.match(job_id):
+            return None
+        path = jobs_root / f"job_{job_id}" / "job_metadata.json"
+        stamp = _stamp(path)
+        if stamp is None:
+            return None
+        cached = self._states.get(job_id)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        meta = _job_metadata(path.parent)
+        state = meta.get("state") if isinstance(meta.get("state"), str) else None
+        self._states[job_id] = (stamp, state)
+        return state
+
+    def _inherit(self, launched_by: dict[str, str], jobs_root: Path) -> None:
+        parents = self._job_parents(jobs_root)
+        changed = True
+        while changed:
+            changed = False
+            for job_id, names in parents.items():
+                if job_id in launched_by:
+                    continue
+                owner = next((launched_by[parent] for parent in sorted(names) if parent in launched_by), None)
+                if owner is not None:
+                    launched_by[job_id] = owner
+                    changed = True
+
+    def _job_parents(self, jobs_root: Path) -> dict[str, frozenset[str]]:
+        """The other jobs each job's config.toml names, e.g. the checkpoint it resumes."""
+        found: dict[str, frozenset[str]] = {}
+        try:
+            directories = [d for d in jobs_root.iterdir() if _JOB_DIR.match(d.name)]
+        except OSError:
+            return found
+        for directory in directories:
+            job_id = directory.name[4:]
+            path = directory / "config.toml"
+            stamp = _stamp(path)
+            if stamp is None:
+                continue
+            cached = self._parents.get(job_id)
+            if cached is None or cached[0] != stamp:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                names = frozenset(m.group(1) for m in _JOB_IN_PATH.finditer(text.replace("\\", "/"))) - {job_id}
+                cached = (stamp, names)
+                self._parents[job_id] = cached
+            if cached[1]:
+                found[job_id] = cached[1]
+        return found
+
+
 def _read_events(path: Path) -> Iterator[dict[str, Any]]:
     try:
         with open(path, encoding="utf-8") as fh:

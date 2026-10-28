@@ -3,6 +3,8 @@
 
 import type { StructureMetrics, StructurePanel } from "../types/api";
 import { fetchJobStructures } from "./api";
+import type { ScoreComponent } from "./moleculeFacts";
+import type { MoleculeContext } from "./moleculePage";
 import { structurePanel, type RunRow, type RunTable } from "./runResults";
 import { addUserStructure } from "./userStructures";
 import { sendToViewer } from "./viewerBus";
@@ -45,6 +47,29 @@ export function rowMetrics(table: RunTable, row: RunRow): StructureMetrics | und
     if (name && typeof value === "number" && !(name in metrics)) metrics[name] = value;
   });
   return Object.keys(metrics).length ? (metrics as StructureMetrics) : undefined;
+}
+
+/** A results row as what the molecule page shows: run, step, score, components and complex. */
+export function rowMolecule(table: RunTable, row: RunRow, run: string, ttp?: { ttpId?: string | null; ttpVersion?: number | null }): MoleculeContext {
+  const number = (i: number) => (i >= 0 && typeof row.cells[i] === "number" ? (row.cells[i] as number) : null);
+  const cofold = new Set(
+    table.columns.flatMap((c) => (c.component && (c.role === "structure" || METRIC_KEYS[SUFFIXED.exec(c.key)?.[1] ?? ""]) ? [c.component] : [])),
+  );
+  const components: ScoreComponent[] = table.components.map((name) => ({
+    name,
+    value: number(table.columns.findIndex((c) => c.role === "component" && c.key === name)),
+    raw: number(table.columns.findIndex((c) => c.role === "raw" && c.component === name)),
+    ...(cofold.has(name) ? { cofold: true } : {}),
+  }));
+  const metrics = rowMetrics(table, row);
+  return {
+    run,
+    step: row.step,
+    score: row.total,
+    components,
+    structure: row.structure ? { path: row.structure, ...(metrics ? { metrics } : {}) } : null,
+    ...(ttp?.ttpId ? { ttpId: ttp.ttpId, ttpVersion: ttp.ttpVersion ?? null } : {}),
+  };
 }
 
 /** A run molecule's complex as a viewer panel, titled by run and step; null when the gateway cannot serve it. */

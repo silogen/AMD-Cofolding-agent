@@ -3,10 +3,12 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  bestPerStep,
   bestScore,
   canResume,
-  componentSeriesNames,
+  chartSeries,
   continueCost,
+  conversationJobs,
   continueSteps,
   errorSummary,
   isActive,
@@ -32,6 +34,7 @@ import {
   trajectoryPoints,
   toolError,
   uniqueAlerts,
+  withBest,
 } from "./jobs";
 
 const job = {
@@ -359,9 +362,51 @@ describe("scoring components", () => {
     expect(isScoringComponent(" Target ")).toBe(false);
     expect(isScoringComponent("Score")).toBe(false);
     expect(isScoringComponent("Boltz affinity")).toBe(true);
-    expect(componentSeriesNames(status)).toEqual(["QED", "Synthetic accessibility"]);
+    expect(chartSeries(status).objectives.map((s) => s.key)).toEqual(["QED", "Synthetic accessibility"]);
     expect(scoringComponents(status).map((c) => c.name)).toEqual(["QED", "Synthetic accessibility"]);
     expect(scoringComponents(null)).toEqual([]);
+  });
+
+  it("charts one line per objective and keeps the Boltz confidences apart", () => {
+    // The series a Boltz + PoseBusters run reports, as get_optimization_status names them.
+    const names = [
+      "Agent", "Prior", "Target", "Score", "Boltz affinity", "QED", "Molecular weight", "cLogP", "TPSA", "Synthetic accessibility", "Pose quality",
+      "affinity_pred_value2 (Boltz affinity)", "affinity_probability_binary2 (Boltz affinity)", "ligand_iptm (Boltz affinity)",
+      "confidence_score (Boltz affinity)", "affinity_pred_value (Boltz affinity)", "affinity_probability_binary (Boltz affinity)",
+      "affinity_pred_value1 (Boltz affinity)", "affinity_probability_binary1 (Boltz affinity)", "n_checks_passed (Pose quality)",
+      "n_checks_total (Pose quality)", "QED (raw)",
+    ];
+    const series = chartSeries({ componentTrajectories: Object.fromEntries(names.map((n) => [n, [{ step: 1, mean: 0.5 }]])) });
+    expect(series.objectives.map((s) => s.label)).toEqual(["Boltz affinity", "QED", "Molecular weight", "cLogP", "TPSA", "Synthetic accessibility", "Pose quality"]);
+    expect(series.more).toEqual([
+      { key: "ligand_iptm (Boltz affinity)", label: "ligand ipTM" },
+      { key: "confidence_score (Boltz affinity)", label: "confidence" },
+    ]);
+  });
+
+  it("keeps an objective whose own name has brackets", () => {
+    const series = chartSeries({ componentTrajectories: { "Binding (BRD4)": [], "ligand_iptm (Binding (BRD4))": [] } });
+    expect(series.objectives.map((s) => s.key)).toEqual(["Binding (BRD4)"]);
+  });
+
+  it("fills in the per-step best from the results", () => {
+    const best = bestPerStep([
+      { step: 1, total: 0.2 },
+      { step: 1, total: 0.7 },
+      { step: 2, total: null },
+      { step: 2, total: 0.4 },
+      { step: null, total: 0.9 },
+    ]);
+    expect([...best]).toEqual([
+      [1, 0.7],
+      [2, 0.4],
+    ]);
+    const points = [
+      { step: 1, mean: 0.3, max: null, molecules: null },
+      { step: 3, mean: 0.5, max: 0.8, molecules: null },
+    ];
+    expect(withBest(points, best).map((p) => p.max)).toEqual([0.7, 0.8]);
+    expect(withBest(points, null)).toEqual(points);
   });
 
   it("keeps the Score series reachable as the chart's own line", () => {
@@ -378,5 +423,29 @@ describe("scoring components", () => {
     const candidates = parseCandidates({ candidates: [{ smiles: "CCO", components: { Score: { transformed: 0.59 } } }, { smiles: "CCN", components: { Score: { transformed: 0.81 } } }] });
     expect(bestScore(bare, candidates)).toBe(0.81);
     expect(bestScore(null)).toBeNull();
+  });
+});
+
+describe("conversationJobs", () => {
+  const all = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+  const runs = {
+    jobs: [
+      { id: "c", launched: true },
+      { id: "a", launched: true },
+      { id: "b", launched: false },
+    ],
+  };
+  const ids = (list: { id: string }[]) => list.map((j) => j.id);
+
+  it("lists the conversation's runs in the list's order, and apart the ones it only looked at", () => {
+    const { own, seen } = conversationJobs(all, runs, null, new Map(), "s1");
+    expect(ids(own)).toEqual(["a", "c"]);
+    expect(ids(seen)).toEqual(["b"]);
+  });
+
+  it("adds the focused run unless another conversation launched it", () => {
+    expect(ids(conversationJobs(all, runs, "d", new Map(), "s1").own)).toEqual(["a", "c", "d"]);
+    expect(ids(conversationJobs(all, runs, "d", new Map([["d", "s2"]]), "s1").own)).toEqual(["a", "c"]);
+    expect(ids(conversationJobs(all, null, "b", new Map(), "s1").own)).toEqual(["b"]);
   });
 });

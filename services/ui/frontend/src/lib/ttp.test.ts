@@ -33,8 +33,11 @@ import {
   normaliseSequence,
   objectiveCatalogue,
   objectiveKey,
-  presetOn,
-  togglePreset,
+  objectiveGroups,
+  groupState,
+  toggleGroup,
+  toggleObjective,
+  dropObjectives,
   parseComponents,
   parseServices,
   presetObjectives,
@@ -352,8 +355,9 @@ describe("builder inputs", () => {
       { name: "customalerts", class: "CustomAlerts", component_type: "filter", parameters: [] },
       { name: "fragmentqed", class: "FragmentQed", component_type: "scorer", parameters: [] },
       { name: "tanimotosimilarity", class: "TanimotoSimilarity", component_type: "scorer", parameters: [{ name: "smiles" }] },
+      { name: "tpsa", class: "TPSA", component_type: "scorer", parameters: [{ name: "includeSandP", required: false }] },
     ]);
-    expect(components).toEqual(["Qed", "SAScore"]);
+    expect(components).toEqual(["Qed", "SAScore", "TPSA"]);
   });
 
   it("slugs names into ids and cleans sequences", () => {
@@ -384,47 +388,112 @@ describe("objectives", () => {
     expect(nativeObjective("QED").transform).toBeNull();
   });
 
-  it("offers every service selector and native scorer", () => {
-    const keys = objectiveCatalogue(services, ["QED", "Csp3"]).map((e) => e.key);
-    expect(keys).toContain("boltz");
-    expect(keys).toContain("admet:caco2_permeability");
-    expect(keys).toContain("retrodmta:FXA:FXA_logD");
-    expect(keys).toContain("native:QED");
-    expect(keys).toContain("native:Csp3");
-    expect(keys).toContain("native:TanimotoSimilarity");
-    expect(keys).not.toContain("native:SlogP");
-    expect(keys).not.toContain("ip:hbond");
+  it("offers every service selector and native scorer, keyed as objectiveKey", () => {
+    const catalogue = objectiveCatalogue(services, ["QED", "Csp3"]);
+    const keys = catalogue.map((e) => e.key);
+    expect(keys).toEqual(expect.arrayContaining(["boltz:", "posebusters:", "admet:caco2_permeability", "retrodmta:FXA:FXA_logD", "native:QED", "native:Csp3", "native:TanimotoSimilarity"]));
+    expect(keys).toContain("native:SlogP");
+    expect(keys).not.toContain("native:HBondDonors");
+    expect(keys).not.toContain("interaction_profiler:hbond");
+    for (const e of catalogue) expect(objectiveKey(e.make())).toBe(e.key);
+    expect(catalogue.find((e) => e.key === "native:Csp3")).toMatchObject({ extra: true, core: false });
+    expect(catalogue.find((e) => e.key === "posebusters:")).toMatchObject({ core: true, after: "boltz:" });
   });
 
-  it("labels the catalogue by metric, without where the score comes from", () => {
-    const labels = objectiveCatalogue(services, ["QED", "MolecularWeight"]).map((e) => `${e.group}/${e.label}`);
+  it("matches REINVENT's class names to the usual metrics, whatever their case", () => {
+    const keys = objectiveCatalogue(services, ["Qed", "SlogP", "Csp3"]).filter((e) => e.group === "Drug-likeness").map((e) => e.key);
+    expect(keys).toEqual(["native:QED", "native:MolecularWeight", "native:SlogP", "native:TPSA", "native:SAScore", "native:TanimotoSimilarity", "native:Csp3"]);
+  });
+
+  it("labels the catalogue by metric, grouped Cofold, Drug-likeness, ADMET, RetroDMTA", () => {
+    const catalogue = objectiveCatalogue(services, ["QED", "MolecularWeight"]);
+    const labels = catalogue.map((e) => `${e.group}/${e.label}`);
     expect(labels).toContain("Drug-likeness/Molecular weight");
-    expect(labels).toContain("Cofolding/Binding affinity");
+    expect(labels).toContain("Cofold/Binding affinity");
     expect(labels.join(" ")).not.toMatch(/RDKit|PoseBusters|Boltz|\(MolecularWeight\)/);
+    expect(objectiveGroups(catalogue).map((g) => g.name)).toEqual(["Cofold", "Drug-likeness", "ADMET", "RetroDMTA"]);
+    expect(objectiveCatalogue({ admet: services.admet }, []).some((e) => e.group === "Cofold")).toBe(false);
   });
 
-  it("combines presets: ADMET adds to drug-likeness instead of replacing it", () => {
-    const druglike = presetObjectives("druglike", services);
-    const both = togglePreset(druglike, "admet", services, true);
-    expect(both.slice(0, druglike.length)).toEqual(druglike);
-    expect(both.map((o) => o.name)).toEqual(["QED", "Molecular weight", "cLogP", "TPSA", "Synthetic accessibility", "LogD", "Aqueous solubility", "Caco-2 permeability", "MDCK efflux"]);
-    expect(presetOn(both, "druglike", services)).toBe(true);
-    expect(presetOn(both, "admet", services)).toBe(true);
-    expect(togglePreset(both, "admet", services, true)).toBe(both);
-    expect(togglePreset(both, "admet", services, false)).toEqual(druglike);
-    const admetOnly = togglePreset(both, "druglike", services, false);
-    expect(admetOnly.map((o) => o.name)).toEqual(["QED", "LogD", "Aqueous solubility", "Caco-2 permeability", "MDCK efflux"]);
-    expect(presetOn(admetOnly, "druglike", services)).toBe(false);
+  it("starts each metric at its preset weight", () => {
+    const groups = objectiveGroups(objectiveCatalogue(services, []));
+    const druglike = groups.find((g) => g.name === "Drug-likeness")!;
+    const core = druglike.entries.filter((e) => e.core).map((e) => e.make());
+    expect(core).toEqual(presetObjectives("druglike", services));
+    expect(druglike.entries.find((e) => e.key === "native:HBondDonors")?.make().weight).toBe(0.5);
   });
 
-  it("keeps hand-added and cofolding objectives when presets change", () => {
-    const list = [...withCofolding([], services, true), serviceObjective(services, "admet", "logp")];
-    const on = togglePreset(list, "admet", services, true);
-    expect(on.slice(0, 3)).toEqual(list);
-    expect(togglePreset(on, "admet", services, false)).toEqual(list);
-    expect(objectiveKey(serviceObjective(services, "admet", "logd"))).toBe("admet:logd");
-    const renamed: Objective = { ...nativeObjective("QED"), name: "Renamed" };
-    expect(objectiveKey(renamed)).toBe("native:QED");
+  describe("picking", () => {
+    const groups = objectiveGroups(objectiveCatalogue(services, []));
+    const group = (name: string) => groups.find((g) => g.name === name)!;
+    const pick = (key: string) => groups.flatMap((g) => g.entries).find((e) => e.key === key)!;
+    const names = (list: Objective[]) => list.map((o) => o.name);
+
+    it("adds or removes exactly the metric", () => {
+      const start = presetObjectives("druglike", services);
+      const more = toggleObjective(start, pick("admet:logd"), true);
+      expect(more.slice(0, start.length)).toEqual(start);
+      expect(names(more)).toEqual([...names(start), "LogD"]);
+      expect(toggleObjective(more, pick("admet:logd"), true)).toBe(more);
+      expect(toggleObjective(more, pick("native:TPSA"), false)).toEqual(more.filter((o) => o.name !== "TPSA"));
+      expect(toggleObjective(start, pick("admet:logp"), false)).toBe(start);
+    });
+
+    it("finds a metric whatever it is named", () => {
+      const renamed: Objective = { ...nativeObjective("QED"), name: "Renamed" };
+      expect(objectiveKey(renamed)).toBe("native:QED");
+      expect(toggleObjective([renamed], pick("native:QED"), false)).toEqual([]);
+      expect(objectiveKey(serviceObjective(services, "admet", "logd"))).toBe("admet:logd");
+    });
+
+    it("adds pose checks only after Boltz, and drops them with it", () => {
+      expect(toggleObjective([], pick("posebusters:"), true)).toEqual([]);
+      const boltz = toggleObjective([], pick("boltz:"), true);
+      const both = toggleObjective(boltz, pick("posebusters:"), true);
+      expect(both.map((o) => [o.service, o.depends_on ?? null])).toEqual([
+        ["boltz", null],
+        ["posebusters", "Boltz affinity"],
+      ]);
+      expect(toggleObjective(both, pick("boltz:"), false)).toEqual([]);
+      const renamed = renameObjective(boltz, 0, "Affinity");
+      expect(toggleObjective(renamed, pick("posebusters:"), true)[1].depends_on).toBe("Affinity");
+    });
+
+    it("shows a group as all, some or none of its core metrics", () => {
+      const druglike = group("Drug-likeness");
+      expect(groupState([], druglike)).toBe("none");
+      expect(groupState(presetObjectives("druglike", services), druglike)).toBe("all");
+      expect(groupState([nativeObjective("HBondDonors")], druglike)).toBe("some");
+      expect(groupState(presetObjectives("druglike", services).slice(1), druglike)).toBe("some");
+    });
+
+    it("selects a group's core metrics without touching other groups", () => {
+      const start = [serviceObjective(services, "admet", "logd"), nativeObjective("QED")];
+      const next = toggleGroup(start, group("Drug-likeness"));
+      expect(next.slice(0, 2)).toEqual(start);
+      expect(names(next)).toEqual(["LogD", "QED", "Molecular weight", "cLogP", "TPSA", "Synthetic accessibility"]);
+      const cofold = toggleGroup([], group("Cofold"));
+      expect(names(cofold)).toEqual(["Boltz affinity", "Pose quality"]);
+      expect(cofold[1].depends_on).toBe("Boltz affinity");
+      expect(names(toggleGroup([], group("ADMET")))).toHaveLength(services.admet.endpoints.length);
+    });
+
+    it("clears a group but keeps objectives edited by hand and what they run after", () => {
+      const list = [...toggleGroup([], group("Cofold")), ...presetObjectives("druglike", services), serviceObjective(services, "admet", "logd")];
+      const tuned = list.find((o) => o.name === "TPSA")!;
+      expect(names(toggleGroup(list, group("Drug-likeness"), (o) => o === tuned))).toEqual(["Boltz affinity", "Pose quality", "TPSA", "LogD"]);
+      const pose = list[1];
+      expect(names(toggleGroup(list, group("Cofold"), (o) => o === pose)).slice(0, 2)).toEqual(["Boltz affinity", "Pose quality"]);
+      expect(names(toggleGroup(list, group("Cofold")))).toEqual(names(list.slice(2)));
+      const extra = toggleObjective(list, pick("native:HBondDonors"), true);
+      expect(names(toggleGroup(extra, group("Drug-likeness")))).toEqual(["Boltz affinity", "Pose quality", "LogD"]);
+    });
+
+    it("drops what runs after a removed objective", () => {
+      const list = [...toggleGroup([], group("Cofold")), nativeObjective("QED")];
+      expect(names(dropObjectives(list, (o) => o.service === "boltz"))).toEqual(["QED"]);
+      expect(dropObjectives(list, () => false)).toBe(list);
+    });
   });
 
   it("names and renames without breaking links", () => {
@@ -456,7 +525,7 @@ describe("formProblems and buildTtp", () => {
   it("explains what the server would reject", () => {
     expect(formProblems(form({ id: "Bad id" }))[0]).toMatch(/lowercase/);
     expect(formProblems(form(), ["brd4-cofold"])[0]).toMatch(/already exists/);
-    expect(formProblems(form({ sequence: "" }))).toContain("Boltz scoring needs the target's protein sequence.");
+    expect(formProblems(form({ sequence: "" }))).toContain("Cofolding needs the protein: a structure or a sequence.");
     expect(formProblems(form({ objectives: [] }))).toContain("Add at least one objective.");
     const objectives = presetObjectives("cofolding", services);
     expect(formProblems(form({ objectives: objectives.slice(1) })).join(" ")).toMatch(/runs after "Boltz affinity"/);
@@ -498,7 +567,16 @@ describe("formProblems and buildTtp", () => {
     expect(buildTtp(form({ msaPath: " msas/brd4.a3m " })).target).toEqual({ protein_sequence: SEQ, msa_path: "msas/brd4.a3m" });
     expect(buildTtp(form({ proteinPdbPath: "/shared/p.pdb" })).target).toEqual({ protein_sequence: SEQ, protein_pdb_path: "/shared/p.pdb" });
     expect(buildTtp(form({ msaPath: "", proteinPdbPath: null })).target).toEqual({ protein_sequence: SEQ });
-    expect(formProblems(form({ sequence: "", objectives: [nativeObjective("QED")], msaPath: "msas/brd4.a3m" }))).toEqual(["An MSA needs the protein sequence it was built for."]);
+    expect(formProblems(form({ sequence: "", objectives: [nativeObjective("QED")], msaPath: "msas/brd4.a3m" }))).toEqual(["An MSA needs the protein it was built for."]);
+  });
+
+  it("sends a structure's chain instead of the sequence", () => {
+    const structured = form({ sequence: "not sent", structurePath: " uploads/s-1/1M17.cif ", structureChain: "A", pdbId: "1m17", msaPath: "msas/egfr.a3m" });
+    expect(formProblems(structured)).toEqual([]);
+    expect(buildTtp(structured).target).toEqual({ structure_path: "uploads/s-1/1M17.cif", structure_chain: "A", pdb_id: "1M17", msa_path: "msas/egfr.a3m" });
+    expect(buildTtp(form({ sequence: "", structurePath: "x.pdb", structureChain: null })).target).toEqual({ structure_path: "x.pdb" });
+    expect(formProblems(form({ sequence: "", structurePath: "msas/x.a3m" }))).toEqual(["x.a3m is not a .cif or .pdb file."]);
+    expect(buildTtp(form({ structurePath: "" })).target).toEqual({ protein_sequence: SEQ });
   });
 
   it("writes templates into the target, leaving out empty fields", () => {
@@ -630,6 +708,17 @@ describe("browsing stored TTPs", () => {
     const templated = formFromTtp({ ...ttp, target: { protein_sequence: SEQ, templates: [{ path: "uploads/s/1M17_A.cif", chain_id: "A", force: true, threshold: 1.5 }] } });
     expect(buildTtp(templated).target).toEqual({ protein_sequence: SEQ, templates: [{ path: "uploads/s/1M17_A.cif", chain_id: "A", force: true, threshold: 1.5 }] });
     expect(targetSummary({ ...ttp, target: { protein_sequence: SEQ, templates: [{ path: "a.cif" }] } })).toMatch(/· template$/);
+    const fromStructure = formFromTtp({ ...ttp, target: { structure_path: "uploads/s/1M17.cif", structure_chain: "B", pdb_id: "1M17" } });
+    expect(fromStructure).toMatchObject({ sequence: "", structurePath: "uploads/s/1M17.cif", structureChain: "B" });
+    expect(buildTtp(fromStructure).target).toEqual({ structure_path: "uploads/s/1M17.cif", structure_chain: "B", pdb_id: "1M17" });
+    expect(targetSummary({ ...ttp, target: { structure_path: "uploads/s/1M17.cif", structure_chain: "B", msa_path: "m.a3m" } })).toBe("1M17.cif chain B · MSA");
+  });
+
+  it("diffs a target read from a structure", () => {
+    const structured: Ttp = { ...ttp, target: { structure_path: "uploads/s/1M17.cif", structure_chain: "A" } };
+    expect(versionDiff(ttp, structured).other).toEqual(["target from 1M17.cif chain A", "PDB 3MXF → —"]);
+    expect(versionDiff(structured, { ...ttp, target: null }).other).toEqual(["target removed"]);
+    expect(versionDiff({ ...ttp, target: null }, ttp).other).toEqual([`target added (${SEQ.length} aa)`, "PDB — → 3MXF"]);
   });
 
   it("diffs two versions", () => {

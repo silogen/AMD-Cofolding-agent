@@ -14,6 +14,10 @@ export interface CofoldRequest {
   running: number;
   state: "preparing" | "queued" | "running";
   elapsedSeconds: number | null;
+  /** Epoch seconds on the compute node; absent from older gateways. */
+  startedAt?: number | null;
+  /** How long each running molecule has been on its worker; absent from older Boltz services. */
+  runningSeconds?: number[] | null;
 }
 
 export type CofoldStatus =
@@ -22,6 +26,8 @@ export type CofoldStatus =
       available: true;
       status: string;
       mode: string;
+      /** Typical wall time of one molecule lately; absent before the first, and from older services. */
+      moleculeSeconds?: number | null;
       workers: { total: number; busy: number; loading: number; failed: number };
       gpus: { total: number; busy: number };
       queueLength: number;
@@ -126,15 +132,92 @@ export function clock(ms: number): string {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+/** How far the browser's clock and the compute node's may disagree when a call is paired with a request. */
+const SKEW_MS = 30_000;
+
+/**
+ * The requests of this conversation. Boltz does not say who sent a request,
+ * so a call in flight claims the first request with no more molecules that
+ * started after it, and a run of the conversation that scores with Boltz
+ * (*runScoring*) claims the rest.
+ */
+export function ownRequests(requests: readonly CofoldRequest[], calls: readonly CofoldCall[], runScoring: boolean): CofoldRequest[] {
+  if (runScoring) return [...requests];
+  const claimed = new Set<string>();
+  for (const call of [...calls].sort((a, b) => a.at - b.at)) {
+    const match = requests
+      .filter((r) => !claimed.has(r.id) && (call.molecules === 0 || r.molecules <= call.molecules) && (r.startedAt == null || r.startedAt * 1000 >= call.at - SKEW_MS))
+      .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))[0];
+    if (match) claimed.add(match.id);
+  }
+  return requests.filter((r) => claimed.has(r.id));
+}
+
+/** *status* as far as this conversation is concerned: its own requests, active only for those. */
+export function ownStatus(status: CofoldStatus, calls: readonly CofoldCall[], runScoring: boolean): CofoldStatus {
+  if (!status.available) return status;
+  const requests = ownRequests(status.requests, calls, runScoring);
+  // A service without request tracking only says that it is busy.
+  const untracked = status.requests.length === 0 && status.active && (runScoring || calls.length > 0);
+  return { ...status, requests, active: requests.length > 0 || untracked };
+}
+
+/**
+ * What earlier answers taught: how long a molecule takes, and when each
+ * request last finished one, for services that do not report the time of
+ * each running molecule.
+ */
+export interface CofoldMemory {
+  typicalSeconds: number | null;
+  /** Request id → molecules done, and the request's elapsed seconds when that count was reached. */
+  requests: Record<string, { done: number; at: number }>;
+}
+
+export const EMPTY_MEMORY: CofoldMemory = { typicalSeconds: null, requests: {} };
+
+export function learn(memory: CofoldMemory, status: CofoldStatus): CofoldMemory {
+  if (!status.available) return memory;
+  let typical = status.moleculeSeconds ?? memory.typicalSeconds;
+  const requests: CofoldMemory["requests"] = {};
+  for (const r of status.requests) {
+    if (r.elapsedSeconds === null) continue;
+    const seen = memory.requests[r.id];
+    if (!seen) {
+      requests[r.id] = { done: r.done, at: r.done === 0 ? 0 : r.elapsedSeconds };
+    } else if (r.done > seen.done) {
+      const sample = r.elapsedSeconds - seen.at;
+      if (status.moleculeSeconds == null && sample > 0) typical = typical === null ? sample : (typical + sample) / 2;
+      requests[r.id] = { done: r.done, at: r.elapsedSeconds };
+    } else requests[r.id] = seen;
+  }
+  return { typicalSeconds: typical, requests };
+}
+
+/** A running molecule counts for at most this much of itself until it is done. */
+const MAX_PARTIAL = 0.9;
+
+/** Seconds each running molecule of *r* has run, from the service or else estimated from *memory*. */
+function runningSeconds(r: CofoldRequest, memory: CofoldMemory): number[] {
+  if (r.runningSeconds) return r.runningSeconds;
+  const since = memory.requests[r.id]?.at;
+  const elapsed = r.elapsedSeconds;
+  if (elapsed === null || since === undefined) return [];
+  return Array.from({ length: r.running }, () => Math.max(0, elapsed - since));
+}
+
 export interface CofoldView {
   label: string;
   /** "2 molecules", "4 molecules on 3 GPUs". */
   detail: string;
   done: number;
   total: number;
+  /** 0..1: molecules done, and those running for how far they likely got. */
+  fraction: number;
   /** "1 queued", "Boltz is loading"; empty when there is nothing to add. */
   note: string;
   elapsedMs: number | null;
+  /** Null without a molecule time to go by. */
+  remainingMs: number | null;
   /** One line per request, for a tooltip. */
   title: string;
 }
@@ -147,30 +230,53 @@ export const cofoldShown = (status: CofoldStatus | null, calls: readonly CofoldC
  * What the cofold strip says, from the last answer of the service (read at
  * *readAt*) and the cofolding calls in flight; null when nothing cofolds.
  * Calls show at once, before any answer, and the service then fills in the
- * progress.
+ * progress. *finished* shows the answer as a batch that completed, while a
+ * run prepares its next one.
  */
-export function cofoldView(status: CofoldStatus | null, readAt: number, calls: readonly CofoldCall[], now: number): CofoldView | null {
-  const since = Math.max(0, now - readAt);
+export function cofoldView(
+  status: CofoldStatus | null,
+  readAt: number,
+  calls: readonly CofoldCall[],
+  now: number,
+  { memory = EMPTY_MEMORY, finished = false }: { memory?: CofoldMemory; finished?: boolean } = {},
+): CofoldView | null {
+  const since = finished ? 0 : Math.max(0, now - readAt) / 1000;
   if (status?.available && status.active) {
     const requests = status.requests;
     const total = requests.reduce((sum, r) => sum + r.molecules, 0);
-    const done = requests.reduce((sum, r) => sum + Math.min(r.done, r.molecules), 0);
-    const queued = requests.length ? requests.reduce((sum, r) => sum + r.queued, 0) : status.queueLength;
+    const done = finished ? total : requests.reduce((sum, r) => sum + Math.min(r.done, r.molecules), 0);
+    const queued = finished ? 0 : requests.length ? requests.reduce((sum, r) => sum + r.queued, 0) : status.queueLength;
     const oldest = requests.reduce<number | null>((max, r) => (r.elapsedSeconds === null ? max : Math.max(max ?? 0, r.elapsedSeconds)), null);
     const preparing = requests.length > 0 && requests.every((r) => r.state === "preparing");
     const loading = status.workers.busy === 0 && status.workers.loading > 0;
     const gpus = status.gpus.busy;
+    const typical = status.moleculeSeconds ?? memory.typicalSeconds;
+
+    let partial = 0;
+    let remaining: number | null = typical ? 0 : null;
+    if (!finished && typical) {
+      for (const r of requests) {
+        const running = runningSeconds(r, memory).map((s) => s + since);
+        partial += running.reduce((sum, s) => sum + Math.min(MAX_PARTIAL, s / typical), 0);
+        const wave = running.reduce((max, s) => Math.max(max, typical - s), 0);
+        const waves = r.queued > 0 ? Math.ceil(r.queued / Math.max(1, r.running)) : 0;
+        remaining = Math.max(remaining ?? 0, Math.max(0, wave) + waves * typical);
+      }
+    }
+
     let detail: string;
     if (requests.length === 0) detail = plural(gpus, "GPU") + " busy";
     else if (requests.length === 1 || gpus < 2) detail = plural(total, "molecule");
     else detail = `${plural(total, "molecule")} on ${gpus} GPUs`;
     return {
-      label: preparing ? "Preparing cofold" : "Cofolding",
+      label: preparing ? "Preparing" : "Cofolding",
       detail,
       done,
       total,
-      note: loading ? "Boltz is loading" : queued > 0 ? `${queued} queued` : "",
-      elapsedMs: oldest === null ? null : oldest * 1000 + since,
+      fraction: total > 0 ? Math.min(1, (done + partial) / total) : 0,
+      note: finished ? "" : loading ? "Boltz is loading" : queued > 0 ? `${queued} queued` : "",
+      elapsedMs: oldest === null ? null : (oldest + since) * 1000,
+      remainingMs: finished || remaining === null || requests.length === 0 ? null : remaining * 1000,
       title: requests.length
         ? requests.map((r) => `${r.state}: ${r.done}/${r.molecules} done${r.queued ? `, ${r.queued} queued` : ""}`).join("\n")
         : `${status.workers.busy} of ${status.workers.total} Boltz workers busy`,
@@ -185,8 +291,10 @@ export function cofoldView(status: CofoldStatus | null, readAt: number, calls: r
     detail: plural(total, "molecule"),
     done: 0,
     total,
+    fraction: 0,
     note: "",
     elapsedMs: now - started,
+    remainingMs: null,
     title: "Scoring with Boltz-2",
   };
 }
