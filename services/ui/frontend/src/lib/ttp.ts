@@ -730,7 +730,7 @@ export function serviceObjective(services: Record<string, ServiceInfo>, service:
   const base = { type: "external" as const, service, service_url: serviceUrl(services, service), weight: 1 };
   switch (service) {
     case "boltz":
-      return { ...base, name: BOLTZ_NAME, transform: { type: "reverse_sigmoid", low: -3, high: 1, k: 1 }, comment: "log10 IC50 in µM; lower binds tighter" };
+      return { ...base, name: BOLTZ_NAME, transform: { type: "reverse_sigmoid", low: -1.5, high: 2.5, k: 0.5 }, comment: "log10 IC50 in µM; lower binds tighter" };
     case "posebusters":
       return { ...base, name: "Pose quality", weight: 0.5, depends_on: BOLTZ_NAME, transform: null, comment: "PoseBusters checks passed, 0-1" };
     case "interaction_profiler":

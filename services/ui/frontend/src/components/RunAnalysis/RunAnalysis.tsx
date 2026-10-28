@@ -8,7 +8,7 @@ import { callTool, jobFileUrl } from "../../lib/api";
 import { conversationJobs, errorSummary, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
 import { rowMolecule } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
-import { countMask, moleculesOf, selectionMask, spreads, stepStats, topByWeight, TOTAL, type Endpoint, type Molecules, type Ranges, type StepStats } from "../../lib/runAnalysis";
+import { countMask, goalOf, heading, moleculesOf, selectionMask, spreads, stepStats, topByWeight, TOTAL, type Endpoint, type Goal, type Molecules, type Ranges, type StepStats, type TransformLike } from "../../lib/runAnalysis";
 import { parseRunResults, type RunTable } from "../../lib/runResults";
 import { loadTtp } from "../../lib/scoreWhy";
 import { objectivesOf } from "../../lib/ttp";
@@ -17,7 +17,7 @@ import { SelectionTable } from "./SelectionTable";
 import { endpointColours } from "./plotUtils";
 import { Card, PickMenu } from "./shared";
 import { TrajectoryPlot } from "./TrajectoryPlot";
-import { DENSITY, STEP, UmapPlot } from "./UmapPlot";
+import { DENSITY, STEP, UmapPlot, type MapMode } from "./UmapPlot";
 import { useUmap } from "./useUmap";
 import { ViolinPlot } from "./ViolinPlot";
 
@@ -45,12 +45,14 @@ let lastLoaded: Loaded | null = null;
 
 interface Picks {
   jobId: string | null;
-  trajectory: Set<string> | null;
-  violins: string[] | null;
+  /** The endpoints the trajectory and the distribution show; null for the defaults. */
+  shown: Set<string> | null;
   ranges: Ranges;
   region: Set<string> | null;
 }
-const noPicks = (jobId: string | null): Picks => ({ jobId, trajectory: null, violins: null, ranges: {}, region: null });
+const noPicks = (jobId: string | null): Picks => ({ jobId, shown: null, ranges: {}, region: null });
+
+const NO_GOAL: Goal = { direction: "none" };
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -114,10 +116,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
         if (cancelled) return;
         const table = parseRunResults(text);
         const molecules = moleculesOf(table);
-        const stats = stepStats(
-          table,
-          molecules.endpoints.filter((e) => e.kind !== "raw"),
-        );
+        const stats = stepStats(table, molecules.endpoints);
         const next = { id: runId, table, molecules, stats, error: null, final };
         lastLoaded = next;
         setLoaded(next);
@@ -138,15 +137,15 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
     return () => window.clearInterval(timer);
   }, [running]);
 
-  // Weights of the TTP's objectives, to pick the few lines and violins shown first.
+  // The TTP's objectives: weights pick the few lines and violins shown first, transforms tell the better side of each.
   const ttpKey = job?.ttpId ? `${job.ttpId}@${job.ttpVersion ?? ""}` : null;
-  const [weights, setWeights] = useState<{ key: string; list: { name: string; weight: number }[] } | null>(null);
+  const [weights, setWeights] = useState<{ key: string; list: { name: string; weight: number; transform: TransformLike | null }[] } | null>(null);
   useEffect(() => {
     if (!ttpKey || !job?.ttpId) return;
     let cancelled = false;
     loadTtp(job.ttpId, job.ttpVersion).then((ttp) => {
       if (cancelled) return;
-      const list = ttp ? [...objectivesOf(ttp, "pre_scoring"), ...objectivesOf(ttp, "scoring")].map((o) => ({ name: o.name, weight: o.weight })) : [];
+      const list = ttp ? [...objectivesOf(ttp, "pre_scoring"), ...objectivesOf(ttp, "scoring")].map((o) => ({ name: o.name, weight: o.weight, transform: o.transform ?? null })) : [];
       setWeights({ key: ttpKey, list });
     });
     return () => {
@@ -160,25 +159,40 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
   const colours = useMemo(() => endpointColours(endpoints), [endpoints]);
   const components = useMemo(() => endpoints.filter((e) => e.kind === "component").map((e) => e.key), [endpoints]);
   const weightList = weights && weights.key === ttpKey ? weights.list : null;
-  const spread = useMemo(() => (molecules ? spreads(molecules.values) : undefined), [molecules]);
+  const spread = useMemo(() => (molecules ? spreads(molecules.scores) : undefined), [molecules]);
   const top = useMemo(() => topByWeight(components, weightList ?? [], 3, spread), [components, weightList, spread]);
   const defaults = useMemo(() => [...(endpoints.some((e) => e.kind === "total") ? [TOTAL] : []), ...top], [endpoints, top]);
 
   const [picks, setPicks] = useState<Picks>(() => noPicks(runId));
   if (picks.jobId !== runId) setPicks(noPicks(runId));
-  const trajectoryShown = useMemo(() => picks.trajectory ?? new Set(defaults), [picks.trajectory, defaults]);
-  const violins = picks.violins ?? defaults;
+  const shown = useMemo(() => picks.shown ?? new Set(defaults), [picks.shown, defaults]);
+  const shownEndpoints = useMemo(() => endpoints.filter((e) => shown.has(e.key)), [endpoints, shown]);
+  const onToggle = useCallback(
+    (key: string) =>
+      setPicks((p) => {
+        const next = new Set(p.shown ?? defaults);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return { ...p, shown: next };
+      }),
+    [defaults],
+  );
+  const goals = useMemo(() => {
+    const transforms = new Map((weightList ?? []).map((o) => [o.name.trim().toLowerCase(), o.transform]));
+    return new Map<string, Goal>(endpoints.map((e) => [e.key, goalOf(e, weightList ? transforms.get(e.key.trim().toLowerCase()) : undefined)]));
+  }, [endpoints, weightList]);
   const mask = useMemo(() => (molecules ? selectionMask(molecules, picks.ranges, picks.region) : null), [molecules, picks.ranges, picks.region]);
   const selected = countMask(mask);
   const filtered = mask !== null;
 
   const [colourBy, setColourBy] = useState<string>(TOTAL);
-  const [mode, setMode] = useState<"box" | "lasso">("lasso");
+  const [mode, setMode] = useState<MapMode>("lasso");
   const [hoverSmiles, setHoverSmiles] = useState<string | null>(null);
   const hovered = hoverSmiles !== null && molecules ? (molecules.index.get(hoverSmiles) ?? null) : null;
   const onHover = useCallback((i: number | null) => setHoverSmiles(i === null || !molecules ? null : molecules.smiles[i]), [molecules]);
 
   const { layout, working } = useUmap(runId, molecules);
+  const mapColour = endpoints.some((e) => e.key === colourBy) || colourBy === STEP || colourBy === DENSITY ? colourBy : DENSITY;
 
   const onRange = useCallback(
     (key: string, range: [number, number] | null) =>
@@ -200,12 +214,6 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
     [],
   );
   const clear = () => setPicks((p) => ({ ...p, ranges: {}, region: null }));
-  const toggle = (set: ReadonlySet<string>, key: string) => {
-    const next = new Set(set);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    return next;
-  };
   const open = useCallback(
     (i: number) => {
       if (!molecules || !table || !job || !onOpenMolecule) return;
@@ -300,10 +308,10 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
           <Card title="Score trajectory">
             <TrajectoryPlot
-              endpoints={endpoints.filter((e) => e.kind !== "raw")}
+              endpoints={endpoints}
               stats={current.stats}
-              shown={trajectoryShown}
-              onToggle={(key) => setPicks((p) => ({ ...p, trajectory: toggle(p.trajectory ?? new Set(defaults), key) }))}
+              shown={shown}
+              onToggle={onToggle}
               colours={colours}
               live={running}
             />
@@ -314,18 +322,13 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
               actions={
                 <PickMenu
                   label="Endpoints"
-                  items={endpoints.map((e) => ({ key: e.key, label: e.label, colour: colours.get(e.key), group: e.kind === "raw" ? "Raw values" : "Scores" }))}
-                  checked={new Set(violins)}
-                  onToggle={(key) =>
-                    setPicks((p) => {
-                      const list = p.violins ?? defaults;
-                      return { ...p, violins: list.includes(key) ? list.filter((k) => k !== key) : [...list, key] };
-                    })
-                  }
+                  items={endpoints.map((e) => ({ key: e.key, label: e.source === "score" ? "${e.label} (score)" : heading(e), colour: colours.get(e.key) }))}
+                  checked={shown}
+                  onToggle={onToggle}
                 />
               }
             >
-              <ViolinPlot molecules={molecules} endpoints={endpoints} shown={violins} mask={mask} ranges={picks.ranges} onRange={onRange} colours={colours} hovered={hovered} />
+              <ViolinPlot molecules={molecules} endpoints={shownEndpoints} mask={mask} ranges={picks.ranges} onRange={onRange} colours={colours} hovered={hovered} theme={theme} />
             </Card>
             <Card
               title="Chemical space"
@@ -340,7 +343,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
                   >
                     {endpoints.map((e: Endpoint) => (
                       <option key={e.key} value={e.key}>
-                        {e.label}
+                        {e.source === "score" ? "${e.label} (score)" : heading(e)}
                       </option>
                     ))}
                     <option value={STEP}>Step</option>
@@ -353,15 +356,21 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
                     <ModeButton on={mode === "box"} onClick={() => setMode("box")} title="Box (shift adds)">
                       <rect x={3} y={4} width={10} height={8} rx={1} strokeDasharray="2 1.5" />
                     </ModeButton>
+                    <ModeButton on={mode === "pan"} onClick={() => setMode("pan")} title="Pan (or drag with the middle button; wheel zooms)">
+                      <path d="M8 2v12M2 8h12M8 2 6.5 3.5M8 2l1.5 1.5M8 14l-1.5-1.5M8 14l1.5-1.5M2 8l1.5-1.5M2 8l1.5 1.5M14 8l-1.5-1.5M14 8l-1.5 1.5" />
+                    </ModeButton>
                   </span>
                 </>
               }
             >
               <UmapPlot
+                key={job.id}
                 molecules={molecules}
                 layout={layout}
                 working={working}
-                colourBy={endpoints.some((e) => e.key === colourBy) || colourBy === STEP || colourBy === DENSITY ? colourBy : DENSITY}
+                colourBy={mapColour}
+                endpoint={endpoints.find((e) => e.key === mapColour) ?? null}
+                goal={goals.get(mapColour) ?? NO_GOAL}
                 mask={mask}
                 mode={mode}
                 onRegion={onRegion}
@@ -376,7 +385,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
             <SelectionTable
               molecules={molecules}
               mask={mask}
-              columns={endpoints.filter((e) => top.includes(e.key))}
+              columns={endpoints}
               colours={colours}
               hovered={hovered}
               onHover={onHover}

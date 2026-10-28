@@ -1,17 +1,16 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Theme } from "../../hooks/useTheme";
-import { sortedIndices, TOTAL, type Endpoint, type Molecules } from "../../lib/runAnalysis";
+import { formatEndpoint, heading, sortedIndices, TOTAL, type Endpoint, type Molecules } from "../../lib/runAnalysis";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { SmilesText } from "../MolDepiction/SmilesText";
-import { short } from "./plotUtils";
 
 interface Props {
   molecules: Molecules;
   mask: Uint8Array | null;
-  /** Score columns after the total: the components with the highest weight. */
+  /** The total and every component, in their order. */
   columns: readonly Endpoint[];
   colours: ReadonlyMap<string, string>;
   hovered: number | null;
@@ -21,77 +20,100 @@ interface Props {
 }
 
 const PAGE = 20;
+const THUMB = 88;
 
-/** The molecules the plots select (all when nothing is), best total first, a page at a time. */
+/**
+ * The molecules the plots select (all when nothing is), best total first, a
+ * page at a time: raw values in their units, each with a hairline of its
+ * 0–1 score. Scrolls both ways inside its own box, the header and the
+ * structures staying in view.
+ */
 export const SelectionTable = memo(function SelectionTable({ molecules, mask, columns, colours, hovered, onHover, onOpen, theme }: Props) {
   const [sort, setSort] = useState<{ key: string; desc: boolean }>({ key: TOTAL, desc: true });
   const [paging, setPaging] = useState<{ mask: Uint8Array | null; page: number }>({ mask, page: 0 });
+  const scroller = useRef<HTMLDivElement>(null);
   const page = paging.mask === mask ? paging.page : 0;
   const rows = useMemo(() => sortedIndices(molecules, mask, sort.key, sort.desc), [molecules, mask, sort]);
   const pages = Math.max(1, Math.ceil(rows.length / PAGE));
   const at = Math.min(page, pages - 1);
   const shown = rows.slice(at * PAGE, at * PAGE + PAGE);
-  const scoreColumns = [{ key: TOTAL, label: "Total" }, ...columns.filter((c) => c.key !== TOTAL)];
-  const template = `64px minmax(120px,1fr) 44px ${scoreColumns.map(() => "minmax(56px,80px)").join(" ")}`;
-  const go = (p: number) => setPaging({ mask, page: Math.max(0, Math.min(pages - 1, p)) });
-  const header = (key: string, label: string, title?: string) => (
-    <button
-      type="button"
-      onClick={() => setSort(sort.key === key ? { key, desc: !sort.desc } : { key, desc: key !== "step" })}
-      title={title ?? label}
-      className={`flex min-w-0 cursor-pointer items-center justify-end gap-0.5 px-1.5 text-right ${sort.key === key ? "text-body" : "hover:text-body"}`}
-    >
-      <span className="truncate">{label}</span>
-      {sort.key === key && <span className="shrink-0 text-[8px]">{sort.desc ? "▼" : "▲"}</span>}
-    </button>
+  const go = (p: number) => {
+    setPaging({ mask, page: Math.max(0, Math.min(pages - 1, p)) });
+    scroller.current?.scrollTo({ top: 0 });
+  };
+  const header = (key: string, label: string, unit: string, title: string) => (
+    <th key={key} scope="col" className="bg-raised border-subtle sticky top-0 z-10 border-b p-0 align-bottom font-medium" style={{ minWidth: 84 }}>
+      <button
+        type="button"
+        onClick={() => setSort(sort.key === key ? { key, desc: !sort.desc } : { key, desc: key !== "step" })}
+        title={title}
+        className={`flex w-full cursor-pointer flex-col items-end px-2 py-1 text-right leading-tight ${sort.key === key ? "text-body" : "text-muted hover:text-body"}`}
+      >
+        <span className="whitespace-nowrap">
+          {label}
+          {sort.key === key && <span className="ml-0.5 text-[8px]">{sort.desc ? "▼" : "▲"}</span>}
+        </span>
+        <span className="text-faint text-[9.5px] font-normal whitespace-nowrap">{unit || "\u00a0"}</span>
+      </button>
+    </th>
   );
 
   return (
     <div className="text-[11px]">
-      <div className="overflow-x-auto">
-        <div style={{ minWidth: 64 + 120 + 44 + scoreColumns.length * 56 }}>
-          <div className="text-muted border-subtle grid h-7 items-center border-b font-medium" style={{ gridTemplateColumns: template }}>
-            <span />
-            <span className="px-1.5">SMILES</span>
-            {header("step", "Step")}
-            {scoreColumns.map((c) => header(c.key, c.label, c.key))}
-          </div>
-          {shown.length === 0 ? (
-            <p className="text-faint py-8 text-center">No molecule matches the selection.</p>
-          ) : (
-            shown.map((i) => (
-              <div
-                key={molecules.smiles[i]}
-                role="row"
-                onClick={() => onOpen(i)}
-                onPointerEnter={() => onHover(i)}
-                onPointerLeave={() => onHover(null)}
-                title="Open the molecule"
-                className={`group border-subtle grid h-12 cursor-pointer items-center border-b last:border-b-0 ${hovered === i ? "bg-inset" : "hover:bg-sunken"}`}
-                style={{ gridTemplateColumns: template }}
-              >
-                <MolDepiction smiles={molecules.smiles[i]} theme={theme} width={128} height={88} className="h-11 w-16" />
-                <span className="min-w-0 px-1.5">
-                  <SmilesText smiles={molecules.smiles[i]} className="text-[10px]" />
-                </span>
-                <span className="text-muted px-1.5 text-right font-mono tabular-nums">{molecules.step[i]}</span>
-                {scoreColumns.map((c) => {
-                  const v = molecules.values.get(c.key)?.[i] ?? NaN;
-                  return (
-                    <span key={c.key} className={`flex items-center justify-end gap-1 px-1.5 font-mono tabular-nums ${c.key === TOTAL ? "font-semibold" : ""}`}>
-                      {c.key !== TOTAL && Number.isFinite(v) && v >= 0 && v <= 1 && (
-                        <span className="bg-inset hidden h-1 w-6 overflow-hidden rounded-full @lg:inline-block" aria-hidden="true">
-                          <span className="block h-full rounded-full" style={{ width: `${Math.round(v * 100)}%`, background: colours.get(c.key) }} />
-                        </span>
-                      )}
-                      {short(v)}
-                    </span>
-                  );
-                })}
-              </div>
-            ))
-          )}
-        </div>
+      <div ref={scroller} className="border-subtle max-h-[560px] overflow-auto rounded-md border">
+        <table className="w-full border-separate border-spacing-0">
+          <thead>
+            <tr>
+              <th scope="col" className="bg-raised border-subtle sticky top-0 left-0 z-20 border-b" style={{ width: THUMB, minWidth: THUMB }}>
+                <span className="sr-only">Structure</span>
+              </th>
+              <th scope="col" className="bg-raised border-subtle text-muted sticky top-0 z-10 border-b px-2 py-1 text-left align-bottom font-medium" style={{ minWidth: 180 }}>
+                SMILES
+              </th>
+              {header("step", "Step", "", "The step of its best score")}
+              {columns.map((c) => header(c.key, c.label, c.source === "score" ? "score" : c.unit, `${heading(c)}${c.key !== c.label ? ` · ${c.key}` : ""}${c.source === "score" ? " · 0–1 score: no raw value in the CSV" : c.source === "raw" ? " · raw value; the bar is its 0–1 score" : ""}`))}
+            </tr>
+          </thead>
+          <tbody>
+            {shown.length === 0 ? (
+              <tr>
+                <td colSpan={columns.length + 3} className="text-faint py-8 text-center">
+                  No molecule matches the selection.
+                </td>
+              </tr>
+            ) : (
+              shown.map((i) => {
+                const active = hovered === i;
+                const cell = `border-subtle border-b ${active ? "bg-inset" : "group-hover:bg-sunken"}`;
+                return (
+                  <tr key={molecules.smiles[i]} onClick={() => onOpen(i)} onPointerEnter={() => onHover(i)} onPointerLeave={() => onHover(null)} title="Open the molecule" className="group cursor-pointer">
+                    <td className={`${cell} sticky left-0 z-[5] p-0 ${active ? "" : "bg-raised"}`} style={{ width: THUMB, minWidth: THUMB }}>
+                      <LazyDepiction smiles={molecules.smiles[i]} theme={theme} root={scroller} />
+                    </td>
+                    <td className={`${cell} max-w-[260px] px-2`}>
+                      <SmilesText smiles={molecules.smiles[i]} className="text-[10px]" />
+                    </td>
+                    <td className={`${cell} text-muted px-2 text-right font-mono tabular-nums`}>{molecules.step[i]}</td>
+                    {columns.map((c) => {
+                      const v = molecules.values.get(c.key)?.[i] ?? NaN;
+                      const score = c.source === "raw" ? (molecules.scores.get(c.key)?.[i] ?? NaN) : NaN;
+                      return (
+                        <td key={c.key} className={`${cell} px-2 text-right font-mono whitespace-nowrap tabular-nums ${c.key === TOTAL ? "text-body font-semibold" : ""}`}>
+                          {formatEndpoint(c, v)}
+                          {Number.isFinite(score) && (
+                            <span className="bg-inset mt-0.5 ml-auto block h-[2px] w-10 overflow-hidden rounded-full" aria-hidden="true" title={`Score ${score.toFixed(2)}`}>
+                              <span className="block h-full rounded-full" style={{ width: `${Math.round(Math.min(1, Math.max(0, score)) * 100)}%`, background: colours.get(c.key), opacity: 0.55 }} />
+                            </span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
       </div>
       {rows.length > PAGE && (
         <div className="text-faint mt-1.5 flex items-center justify-end gap-1 tabular-nums">
@@ -109,6 +131,29 @@ export const SelectionTable = memo(function SelectionTable({ molecules, mask, co
     </div>
   );
 });
+
+/** A structure drawn once it scrolls near the view. */
+function LazyDepiction({ smiles, theme, root }: { smiles: string; theme: Theme; root: RefObject<HTMLDivElement | null> }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [seen, setSeen] = useState(() => typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    const element = box.current;
+    if (!element || seen) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) setSeen(true);
+      },
+      { root: root.current, rootMargin: "200px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [seen, root]);
+  return (
+    <div ref={box} className="grid h-16 place-items-center" style={{ width: THUMB }}>
+      {seen && <MolDepiction smiles={smiles} theme={theme} width={176} height={128} className="h-16 w-[88px]" />}
+    </div>
+  );
+}
 
 function PageButton({ label, disabled, onClick, children }: { label: string; disabled: boolean; onClick: () => void; children: string }) {
   return (

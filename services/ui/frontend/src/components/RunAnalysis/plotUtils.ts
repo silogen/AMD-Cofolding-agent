@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useEffect, useState } from "react";
-import type { Endpoint } from "../../lib/runAnalysis";
+import { formatValue, type Endpoint } from "../../lib/runAnalysis";
 
 export const TOTAL_COLOUR = "var(--color-structure)";
 const PALETTE = [
@@ -16,15 +16,11 @@ const PALETTE = [
   "oklch(0.7 0.1 150)",
 ];
 
-/** One colour per endpoint, the same in every plot; a raw value takes its component's. */
+/** One colour per endpoint, the same in every plot. */
 export function endpointColours(endpoints: readonly Endpoint[]): Map<string, string> {
   const map = new Map<string, string>();
   let next = 0;
-  for (const e of endpoints) {
-    if (e.kind === "total") map.set(e.key, TOTAL_COLOUR);
-    else if (e.kind === "component") map.set(e.key, PALETTE[next++ % PALETTE.length]);
-  }
-  for (const e of endpoints) if (e.kind === "raw") map.set(e.key, map.get(e.key.replace(/\s*\(raw\)$/i, "")) ?? "var(--text-muted)");
+  for (const e of endpoints) map.set(e.key, e.kind === "total" ? TOTAL_COLOUR : PALETTE[next++ % PALETTE.length]);
   return map;
 }
 
@@ -41,12 +37,8 @@ export function useWidth<T extends HTMLElement>(): [(node: T | null) => void, nu
   return [setNode, width];
 }
 
-/** "0.72", "412", "1.2e-4": short numbers for axes and tooltips. */
+/** "0.72", "41.2", "412": short numbers for score axes and tooltips. */
 export function short(v: number): string {
-  if (!Number.isFinite(v)) return "—";
   const a = Math.abs(v);
-  if (a !== 0 && (a < 0.001 || a >= 100_000)) return v.toExponential(1);
-  if (a >= 100) return v.toFixed(0);
-  if (a >= 10) return v.toFixed(1);
-  return v.toFixed(2);
+  return formatValue(v, a >= 100 ? 0 : a >= 10 ? 1 : 2);
 }

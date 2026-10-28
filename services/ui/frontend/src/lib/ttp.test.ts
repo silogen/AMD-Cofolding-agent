@@ -540,7 +540,7 @@ describe("formProblems and buildTtp", () => {
       weight: 1,
       service: "boltz",
       service_url: "http://localhost:8091/score",
-      transform: { type: "reverse_sigmoid", low: -3, high: 1, k: 1 },
+      transform: { type: "reverse_sigmoid", low: -1.5, high: 2.5, k: 0.5 },
       comment: "log10 IC50 in µM; lower binds tighter",
     });
     expect(posebusters.depends_on).toBe("Boltz affinity");
@@ -628,7 +628,7 @@ describe("curve editing", () => {
     expect(defaultTransform(nativeObjective("MolecularWeight"))).toMatchObject({ low: 200, high: 500 });
     expect(defaultTransform(nativeObjective("QED"))).toMatchObject({ type: "sigmoid", low: 0.4, high: 0.8 });
     expect(defaultTransform(serviceObjective(services, "admet", "aqueous_solubility"))).toMatchObject({ low: -6, high: -3 });
-    expect(defaultTransform(serviceObjective(services, "boltz"))).toMatchObject({ type: "reverse_sigmoid", low: -3, high: 1 });
+    expect(defaultTransform(serviceObjective(services, "boltz"))).toMatchObject({ type: "reverse_sigmoid", low: -1.5, high: 2.5 });
     expect(defaultTransform(nativeObjective("Csp3"))).toMatchObject({ low: 0.2, high: 0.6 });
   });
 

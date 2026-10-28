@@ -8,11 +8,11 @@ import { structureTitle, type Artifacts } from "../../lib/artifacts";
 import { clock } from "../../lib/format";
 import {
   DOCK_DEFAULT_WIDTH,
-  DOCK_MAX_FRACTION,
   DOCK_MIN_WIDTH,
   DOCK_TABS,
   clampWidth,
   closeTab,
+  dockRoom,
   dockTabOf,
   loadTabs,
   loadWidth,
@@ -194,20 +194,23 @@ export const Workbench = memo(function Workbench(props: Props) {
   const [width, setWidth] = useState<number | null>(() => loadWidth());
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [aside, setAside] = useState<HTMLElement | null>(null);
+  const room = useDockRoom(aside, !isSheet);
 
   const shell = isSheet
     ? "fixed inset-0 z-50 flex flex-col bg-raised"
     : "relative flex shrink-0 flex-col border-l border-subtle bg-raised";
+  // Whatever the saved width or the expanded state, the chat keeps CHAT_MIN_WIDTH.
   const style: CSSProperties | undefined = isSheet
     ? undefined
     : {
-        width: expanded ? `${DOCK_MAX_FRACTION * 100}vw` : width ? `${width}px` : DOCK_DEFAULT_WIDTH,
-        minWidth: DOCK_MIN_WIDTH,
-        maxWidth: `${DOCK_MAX_FRACTION * 100}vw`,
+        width: expanded ? `${room}px` : width ? `${clampWidth(width, window.innerWidth, room)}px` : `min(${DOCK_DEFAULT_WIDTH}, ${room}px)`,
+        minWidth: Math.min(DOCK_MIN_WIDTH, room),
+        maxWidth: `${room}px`,
       };
 
   return (
-    <aside className={shell} style={style} role={isSheet ? "dialog" : undefined} aria-modal={isSheet || undefined} aria-label="Workbench">
+    <aside ref={setAside} className={shell} style={style} role={isSheet ? "dialog" : undefined} aria-modal={isSheet || undefined} aria-label="Workbench">
       {!isSheet && (
         <div
           role="separator"
@@ -221,12 +224,12 @@ export const Workbench = memo(function Workbench(props: Props) {
           onPointerMove={(event) => {
             if (!dragging) return;
             setExpanded(false);
-            setWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth));
+            setWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth, room));
           }}
           onPointerUp={(event) => {
             if (!dragging) return;
             setDragging(false);
-            saveWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth));
+            saveWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth, room));
           }}
           className={`absolute inset-y-0 -left-[3px] z-20 w-1.5 cursor-col-resize transition-colors hover:bg-[var(--color-accent)] ${
             dragging ? "bg-[var(--color-accent)]" : ""
@@ -530,6 +533,34 @@ function ViewSwitch({
       })}
     </div>
   );
+}
+
+/** The chat column the dock sits beside: the <main> just before it or one of its wrappers. */
+function chatOf(aside: HTMLElement): HTMLElement | null {
+  for (let node: HTMLElement | null = aside; node; node = node.parentElement) {
+    const before = node.previousElementSibling;
+    if (before instanceof HTMLElement && before.tagName === "MAIN") return before;
+  }
+  return document.querySelector("main");
+}
+
+/** The widest the dock can be beside the chat (dockRoom), followed as the window and the session rail change. */
+function useDockRoom(aside: HTMLElement | null, on: boolean): number {
+  const [room, setRoom] = useState(() => dockRoom(window.innerWidth));
+  useEffect(() => {
+    if (!aside || !on) return;
+    const update = () => setRoom(dockRoom(window.innerWidth, chatOf(aside)?.getBoundingClientRect().left ?? 0));
+    update();
+    const chat = chatOf(aside);
+    const observer = new ResizeObserver(update);
+    if (chat) observer.observe(chat);
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [aside, on]);
+  return room;
 }
 
 function DockEmpty() {

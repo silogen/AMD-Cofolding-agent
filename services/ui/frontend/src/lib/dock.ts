@@ -88,9 +88,26 @@ export function saveTabs(sessionId: string | null, tabs: readonly string[], stor
   }
 }
 
-export function clampWidth(width: number, viewport: number): number {
-  const max = Math.max(DOCK_MIN_WIDTH, viewport * DOCK_MAX_FRACTION);
-  return Math.round(Math.min(max, Math.max(DOCK_MIN_WIDTH, width)));
+/** The chat beside the dock never gets narrower than this; the dock gives way first. */
+export const CHAT_MIN_WIDTH = 360;
+/** Below this the dock is no use; on a window too small for both, the chat gives way. */
+export const DOCK_FLOOR_WIDTH = 300;
+
+/**
+ * The widest the dock can be: what is right of the chat's left edge
+ * (*chatLeft*, after the session rail) less the chat's minimum, and never
+ * more than 78% of the window.
+ */
+export function dockRoom(viewport: number, chatLeft = 0): number {
+  const room = viewport - Math.max(0, chatLeft) - CHAT_MIN_WIDTH;
+  return Math.round(Math.max(DOCK_FLOOR_WIDTH, Math.min(viewport * DOCK_MAX_FRACTION, room)));
+}
+
+/** A width the dock can take: at least 380px (less on a small window), at most *room*. */
+export function clampWidth(width: number, viewport: number, room = dockRoom(viewport)): number {
+  const max = Math.max(DOCK_FLOOR_WIDTH, Math.min(room, viewport * DOCK_MAX_FRACTION));
+  const min = Math.min(DOCK_MIN_WIDTH, max);
+  return Math.round(Math.min(max, Math.max(min, width)));
 }
 
 export function loadWidth(store: Storage | null = storage()): number | null {
