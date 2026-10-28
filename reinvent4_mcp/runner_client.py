@@ -13,6 +13,12 @@ into the same shape here, so a tool cannot tell transport trouble from an
 application refusal by accident. The one thing it must never do is raise
 where the local manager would have returned a dict.
 
+The list-returning methods are the exception, and raise ``RunnerUnavailable``
+instead. There is no error dict to hand back without breaking every caller
+that iterates, and an empty list is a lie a caller acts on: ``job_for_ttp``
+reads it as "the agent started no run" and starts a second one on the same
+GPU. A transient runner blip must not become a duplicate RL job.
+
 The three registry lookups and ``score_molecules`` are not manager methods, so
 they are proxied as functions.
 """
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 __all__ = [
     "RemoteJobManager",
+    "RunnerUnavailable",
     "runner_enabled",
     "runner_health",
     "remote_list_scoring_components",
@@ -62,9 +69,21 @@ def runner_enabled() -> bool:
     return bool(_config().enabled)
 
 
+class RunnerUnavailable(RuntimeError):
+    """The runner could not be reached, or answered with something unusable."""
+
+
 def _error(message: str) -> dict[str, Any]:
     logger.error("runner: %s", message)
     return {"error": message}
+
+
+def _as_list(result: Any, what: str) -> list[dict[str, Any]]:
+    """A list from the runner, or ``RunnerUnavailable`` carrying its message."""
+    if isinstance(result, list):
+        return result
+    detail = result.get("error") if isinstance(result, dict) else repr(result)
+    raise RunnerUnavailable(f"could not list {what} on reinvent-runner: {detail}")
 
 
 def _request(
@@ -150,14 +169,10 @@ class RemoteJobManager:
         )
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        result = _request("GET", "/jobs")
-        # These two return lists locally, so an error dict would break every
-        # caller that iterates. Report it and hand back nothing instead.
-        return result if isinstance(result, list) else []
+        return _as_list(_request("GET", "/jobs"), "jobs")
 
     def get_alerts(self) -> list[dict[str, Any]]:
-        result = _request("GET", "/alerts")
-        return result if isinstance(result, list) else []
+        return _as_list(_request("GET", "/alerts"), "alerts")
 
 
 # ---------------------------------------------------------------------------

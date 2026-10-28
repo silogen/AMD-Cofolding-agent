@@ -707,11 +707,16 @@ class JobManager:
                 )
                 self._signal_and_wait(job, signal.SIGTERM, 10.0)
 
-        job.state = JobState.STOPPED
-        job.finished_at = datetime.now(timezone.utc).isoformat()
-        if job._process:
-            job.exit_code = job._process.returncode
-        self._save_metadata(job)
+        # ``_monitor_process`` sees the same exit from its own thread and would
+        # otherwise finalize the job as FAILED (a signalled process exits
+        # non-zero). Under the lock both orderings settle on STOPPED, which is
+        # what the caller asked for.
+        with self._lock:
+            job.state = JobState.STOPPED
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            if job._process:
+                job.exit_code = job._process.returncode
+            self._save_metadata(job)
 
         result = job.to_dict()
         if job.checkpoint_path.exists():
@@ -951,26 +956,32 @@ class JobManager:
         proc.wait()
         exit_code = proc.returncode
 
-        if job.state == JobState.STOPPED:
-            return
-
-        job.exit_code = exit_code
-        job.finished_at = datetime.now(timezone.utc).isoformat()
-
-        if exit_code == 0:
-            job.state = JobState.COMPLETED
-        else:
-            job.state = JobState.FAILED
-            stderr_output = ""
+        stderr_output = ""
+        if exit_code != 0:
             try:
                 stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[-2000:]
             except Exception:
                 pass
-            job.error = f"Process exited with code {exit_code}"
-            if stderr_output:
-                job.error += f". Last stderr: {stderr_output}"
 
-        self._save_metadata(job)
+        with self._lock:
+            # ``stop_job`` may be finalizing this same exit; it owns the
+            # outcome when it is, so leave its STOPPED in place.
+            if job.state == JobState.STOPPED:
+                return
+
+            job.exit_code = exit_code
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+
+            if exit_code == 0:
+                job.state = JobState.COMPLETED
+            else:
+                job.state = JobState.FAILED
+                job.error = f"Process exited with code {exit_code}"
+                if stderr_output:
+                    job.error += f". Last stderr: {stderr_output}"
+
+            self._save_metadata(job)
+
         logger.info(
             "Job %s finished: state=%s exit_code=%d",
             job.job_id, job.state.value, exit_code,

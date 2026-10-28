@@ -275,13 +275,17 @@ class TestRemoteJobManager:
         assert "unparseable" in result["error"]
 
     @patch.object(runner_client.requests, "request")
-    def test_list_methods_degrade_to_an_empty_list(self, request, config):
-        # These return lists locally, so an error dict would break every
-        # caller that iterates over them.
+    def test_list_methods_raise_rather_than_report_nothing(self, request, config):
+        # An empty list reads as "no jobs", which job_for_ttp acts on by
+        # starting a second run for a TTP that already has one.
         request.side_effect = requests.ConnectionError("down")
 
-        assert runner_client.RemoteJobManager().list_jobs() == []
-        assert runner_client.RemoteJobManager().get_alerts() == []
+        for call in (
+            runner_client.RemoteJobManager().list_jobs,
+            runner_client.RemoteJobManager().get_alerts,
+        ):
+            with pytest.raises(runner_client.RunnerUnavailable, match="unreachable"):
+                call()
 
     @patch.object(runner_client.requests, "request")
     def test_a_job_id_is_url_encoded(self, request, config):

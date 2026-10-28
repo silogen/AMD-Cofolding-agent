@@ -646,8 +646,12 @@ class CoscientistTaskRunner:
 
         args = self.args
         spec = task.get("spec") or {}
-        ttp_id = prepare_ttp_variant(
-            self._base_ttp_id(task),
+        # Both reach the store and the TTP tools over HTTP, and a call that
+        # blocks here also stops _heartbeat_forever and _presence_forever.
+        base_ttp_id = await asyncio.to_thread(self._base_ttp_id, task)
+        ttp_id = await asyncio.to_thread(
+            prepare_ttp_variant,
+            base_ttp_id,
             task["task_id"],
             spec.get("weight_overrides"),
             spec.get("transform_overrides"),
@@ -711,7 +715,7 @@ class CoscientistTaskRunner:
                 await driver.chat(goal)
                 verdict, turns = "single-agent", 1
 
-            job_id = job_for_ttp(ttp_id)
+            job_id = await asyncio.to_thread(job_for_ttp, ttp_id)
             if not job_id and not default_run_substitutes_for(spec):
                 raise RuntimeError(
                     f"the agent did not start a run for TTP '{ttp_id}' "
@@ -763,7 +767,9 @@ class CoscientistTaskRunner:
         """
 
         try:
-            return self._harvest(task, job_id, verdict, turns, tokens, timed_out)
+            return await asyncio.to_thread(
+                self._harvest, task, job_id, verdict, turns, tokens, timed_out
+            )
         except Exception:
             logger.warning(
                 "task %s failed; stopping its job %s", task["task_id"], job_id

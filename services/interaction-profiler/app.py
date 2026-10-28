@@ -608,7 +608,12 @@ def _add_profile_complex_route(app_instance) -> None:
             if req.ligand_sdf:
                 try:
                     from interaction_profiler.metrics.strain import compute_strain_from_sdf
-                    sdf_abs = req.ligand_sdf if req.ligand_sdf.startswith("/") else f"{_shared_dir()}/{req.ligand_sdf}"
+                    sdf_path = _resolve_shared_path(req.ligand_sdf)
+                    if sdf_path is None:
+                        raise ValueError(
+                            f"ligand_sdf path {req.ligand_sdf!r} is outside the shared directory"
+                        )
+                    sdf_abs = str(sdf_path)
                     result.strain = compute_strain_from_sdf(sdf_abs, coordinate_source=req.coordinate_source)
                     logger.info("Strain computed from SDF %s: %.3f kcal/mol", sdf_abs, result.strain.strain_kcal_mol or 0)
                 except Exception as strain_exc:
