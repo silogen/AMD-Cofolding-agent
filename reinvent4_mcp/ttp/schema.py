@@ -112,6 +112,60 @@ class TransformConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+TEMPLATE_SUFFIXES = (".cif", ".mmcif", ".pdb", ".ent")
+
+
+class TemplateConfig(BaseModel):
+    """A structure Boltz-2 conditions the cofold on (its YAML ``templates:``)."""
+
+    model_config = {"extra": "forbid"}
+
+    path: str = Field(
+        description=(
+            "Template structure (.cif/.mmcif or .pdb/.ent), relative to the "
+            "shared volume or absolute. Boltz names templates after the file "
+            "stem, so stems must be unique."
+        ),
+    )
+    chain_id: Optional[str] = Field(
+        default=None,
+        description="Protein chain of the template file to use; None lets Boltz pick",
+    )
+    force: bool = Field(
+        default=False,
+        description="Hold the cofold to the template with a potential; needs threshold",
+    )
+    threshold: Optional[float] = Field(
+        default=None,
+        description="Distance in Angstrom the forced template may deviate by",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v.lower().endswith(TEMPLATE_SUFFIXES):
+            raise ValueError(
+                f"Template '{v}' must be a {', '.join(TEMPLATE_SUFFIXES)} file"
+            )
+        return v
+
+    @field_validator("chain_id")
+    @classmethod
+    def _validate_chain(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return v.strip() or None
+
+    @model_validator(mode="after")
+    def _validate_force(self) -> "TemplateConfig":
+        if self.threshold is not None and self.threshold <= 0:
+            raise ValueError("Template threshold must be positive (Angstrom)")
+        if self.force and self.threshold is None:
+            raise ValueError("A forced template needs a threshold (Angstrom)")
+        return self
+
+
 class TargetConfig(BaseModel):
     """Protein target information for structure-based scoring.
 
@@ -122,20 +176,48 @@ class TargetConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     protein_sequence: str = Field(
-        description="Full amino-acid sequence of the target protein",
+        description=(
+            "Amino-acid sequence Boltz folds. Prefer the construct (the chain "
+            "of a crystal structure, or the domain) to the full-length "
+            "protein: Boltz cost grows steeply with length. Must match the "
+            "query sequence of msa_path, else Boltz folds the MSA's query."
+        ),
     )
     pdb_id: Optional[str] = Field(
         default=None,
-        description="PDB identifier (e.g. '3KRR')",
+        description="PDB identifier (e.g. '3KRR'); provenance only, no service reads it",
     )
     msa_path: Optional[str] = Field(
         default=None,
-        description="Path to pre-computed MSA file (.a3m)",
+        description="Pre-computed MSA (.a3m), relative to the shared volume or absolute; Boltz uses it instead of the MSA server",
     )
     protein_pdb_path: Optional[str] = Field(
         default=None,
-        description="Path to protein structure PDB file",
+        description=(
+            "Protein structure PoseBusters checks Boltz poses against, instead "
+            "of the Boltz complex itself; it must be in the frame of the "
+            "predicted poses and readable by the PoseBusters service. Boltz "
+            "does not read it."
+        ),
     )
+    templates: list[TemplateConfig] = Field(
+        default_factory=list,
+        description=(
+            "Structures Boltz-2 uses as templates for the cofold, e.g. a "
+            "cleaned single-chain crystal structure of the target."
+        ),
+    )
+
+    @field_validator("templates")
+    @classmethod
+    def _validate_templates(cls, v: list[TemplateConfig]) -> list[TemplateConfig]:
+        stems = [re.split(r"[\\/]", t.path)[-1].rsplit(".", 1)[0] for t in v]
+        dupes = sorted({s for s in stems if stems.count(s) > 1})
+        if dupes:
+            raise ValueError(
+                f"Template file names must be unique (Boltz names templates by file name): {', '.join(dupes)}"
+            )
+        return v
 
     @field_validator("protein_sequence")
     @classmethod

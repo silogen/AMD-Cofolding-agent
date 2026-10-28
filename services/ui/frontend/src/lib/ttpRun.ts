@@ -16,7 +16,8 @@ export interface RunSettings {
   enabled: boolean;
   maxSteps: number;
   batchSize: number;
-  prior: Prior;
+  /** Null until the user picks one: there is no default way to generate. */
+  prior: Prior | null;
   /** The Mol2Mol prior to use when `prior` is "mol2mol". */
   model: string;
   /** Seed SMILES for Mol2Mol, one per line. */
@@ -24,7 +25,7 @@ export interface RunSettings {
 }
 
 /** run_optimization's defaults and the server config's batch_size (reinvent4_mcp_config.yaml). */
-export const DEFAULT_RUN: RunSettings = { enabled: false, maxSteps: 300, batchSize: 16, prior: "reinvent", model: ".m2m_medium", seeds: "" };
+export const DEFAULT_RUN: RunSettings = { enabled: false, maxSteps: 300, batchSize: 16, prior: null, model: ".m2m_medium", seeds: "" };
 
 export const MAX_STEPS = 5000;
 export const MAX_BATCH = 512;
@@ -44,6 +45,7 @@ export const RUN_KEY = "cofold.ttp-run";
 const whole = (value: unknown, fallback: number, max: number) =>
   typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= max ? value : fallback;
 
+/** The last settings used; the prior is never restored, so each run starts with an explicit choice. */
 export function loadRunSettings(storage: KeyValueStore | null = browserStorage()): RunSettings {
   try {
     const value = JSON.parse(storage?.getItem(RUN_KEY) ?? "null") as Partial<RunSettings> | null;
@@ -52,7 +54,7 @@ export function loadRunSettings(storage: KeyValueStore | null = browserStorage()
       enabled: value.enabled === true,
       maxSteps: whole(value.maxSteps, DEFAULT_RUN.maxSteps, MAX_STEPS),
       batchSize: whole(value.batchSize, DEFAULT_RUN.batchSize, MAX_BATCH),
-      prior: value.prior === "mol2mol" ? "mol2mol" : "reinvent",
+      prior: null,
       model: typeof value.model === "string" && value.model.startsWith(".m2m") ? value.model : DEFAULT_RUN.model,
       seeds: typeof value.seeds === "string" ? value.seeds : "",
     };
@@ -83,9 +85,39 @@ export function runProblems(settings: RunSettings): string[] {
   const problems: string[] = [];
   if (!Number.isInteger(settings.maxSteps) || settings.maxSteps < 1 || settings.maxSteps > MAX_STEPS) problems.push(`Steps must be a whole number from 1 to ${MAX_STEPS}.`);
   if (!Number.isInteger(settings.batchSize) || settings.batchSize < 1 || settings.batchSize > MAX_BATCH) problems.push(`Batch size must be a whole number from 1 to ${MAX_BATCH}.`);
+  if (!settings.prior) problems.push("Choose how to generate: from scratch or analogues of your molecules.");
   if (settings.prior === "mol2mol" && seedList(settings.seeds).length === 0) problems.push("Mol2Mol needs at least one seed SMILES.");
   return problems;
 }
+
+/** Seed text with more SMILES added, keeping the order and skipping ones already there. */
+export function addSeeds(text: string, smiles: readonly string[]): string {
+  const have = seedList(text);
+  const fresh = [...new Set(smiles.map((s) => s.trim()).filter((s) => s && !have.includes(s)))];
+  return [...have, ...fresh].join("\n");
+}
+
+/** A molecule of the conversation that can seed Mol2Mol. */
+export interface SeedMolecule {
+  smiles: string;
+  label?: string;
+}
+
+/** The conversation's molecules once each, in the order given. */
+export function seedChoices(...lists: readonly (readonly SeedMolecule[] | undefined)[]): SeedMolecule[] {
+  const seen = new Set<string>();
+  const out: SeedMolecule[] = [];
+  for (const m of lists.flatMap((list) => list ?? [])) {
+    const smiles = m.smiles.trim();
+    if (!smiles || seen.has(smiles)) continue;
+    seen.add(smiles);
+    out.push({ smiles, ...(m.label ? { label: m.label } : {}) });
+  }
+  return out;
+}
+
+/** Seed text without one SMILES. */
+export const removeSeed = (text: string, smiles: string) => seedList(text).filter((s) => s !== smiles).join("\n");
 
 export const runModel = (settings: RunSettings) => (settings.prior === "mol2mol" ? settings.model : ".reinvent");
 

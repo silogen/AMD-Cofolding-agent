@@ -295,7 +295,12 @@ interactions require a BOUND protein-ligand complex (e.g. a Boltz cofold); the \
 profiler does NOT dock or geometrically overlay a SMILES onto an apo (ligand- \
 free) structure. If you only have an apo structure or no structure, cofold \
 first (score_molecules with a TTP target) to produce the complex, then profile \
-the resulting `/shared` path. To REWARD \
+the resulting `/shared` path. In a deposited PDB entry the ligand may be \
+a non-polymer group (e.g. MI1 in 3EYG) or fused into the chain as a modified \
+residue carrying a covalent inhibitor (e.g. CY0 797 in 2J5E, Cys797 plus the \
+inhibitor); the profiler handles both and says which in its warnings. For a \
+separate ligand group, pass its SMILES when you have it (`fetch_compound`): \
+deposited files hold no bond orders. To REWARD \
 interactions in RL, add a TTP external objective with \
 `service='interaction_profiler'` + `service_params={'interaction_type': 'hbond'}` \
 chained after a structure producer (e.g. Boltz) via `depends_on`. Note: raw \
@@ -304,12 +309,30 @@ specific interaction type and a normalizing transform.
 - **Shared asset discovery**: call `list_shared_assets` to see the structures \
 (PDB/mmCIF), MSAs (.a3m), and Boltz cofold outputs already on the shared \
 volume. Use the exact `/shared`-relative paths it returns for \
-`profile_interactions` and TTP `msa_path` -- never guess or fabricate a path.
-- **Target lookup (UniProt)**: call `fetch_target_info` with a UniProt \
+`profile_interactions` and TTP `msa_path` -- never guess or fabricate a path. \
+A listing is a snapshot (`listed_at`): users upload or open structures during \
+the conversation, so an earlier listing goes stale. When the user's message \
+names a file path (e.g. `uploads/s-.../2J5E.cif` from the structure viewer), \
+use that path directly. NEVER say a file is not on the shared volume from an \
+earlier listing: call `list_shared_assets` again (its `uploads` list is \
+newest first) or try the path with the tool that needs it, and only report \
+it missing if that fresh check fails.
+- **Target lookup (UniProt + RCSB)**: call `fetch_target_info` with a UniProt \
 accession (e.g. `O60885`) or free text (e.g. "BRD4 human") to get the \
-canonical protein sequence, names, organism, function, and cross-referenced \
-PDB IDs. Use its sequence as `target.protein_sequence` instead of recalling \
-sequences from memory.
+protein's names, organism, function, its ranked PDB entries \
+(`pdb_structures`, with the UniProt residue range each covers) and, for the \
+top entries, the construct actually crystallised (`constructs`: sequence, \
+length, UniProt range, ligands). Its `sequence` is the FULL-LENGTH protein \
+(`sequence_kind: full_length`), not what a structure contains. The lookup \
+prepares no structure. Never recall sequences from memory.
+- **Which sequence to cofold**: by default cofold the construct present in \
+the structure you work with (usually one domain, e.g. the ~330-residue EGFR \
+kinase domain, not the 1,210-residue receptor): take it from \
+`fetch_target_info` `constructs[].sequence`, or cut the full-length \
+`sequence` to that entry's `uniprot_range`. Use the full length only when the \
+user asks for it. Say why: Boltz time grows with the square to cube of the \
+length, so a domain folds 10-50x faster (minutes instead of a quarter of an \
+hour per cofold), and the MSA must be for the same sequence.
 - **Compound lookup (PubChem)**: when a molecule is named (e.g. "JQ1", \
 "aspirin", "imatinib") and you do NOT have its SMILES, call `fetch_compound` \
 to get the real SMILES. NEVER recall or guess a SMILES from memory - \
@@ -348,8 +371,10 @@ A TTP defines a complete multi-property optimization objective:
 
 1. **Define target**: protein sequence, PDB structure, binding site. If the \
 user names a target but gives no sequence, call `fetch_target_info` (UniProt) \
-to obtain the canonical sequence and candidate PDB IDs -- do NOT recall a \
-sequence from memory. For the MSA: call `list_shared_assets` and set \
+and set `target.protein_sequence` to the crystallised construct of the chosen \
+PDB entry (`constructs[].sequence`, typically the domain), not the \
+full-length `sequence`, unless the user asks for full length -- do NOT recall \
+a sequence from memory. For the MSA: call `list_shared_assets` and set \
 `target.msa_path` to a real discovered `.a3m` if one matches the target (e.g. \
 `brd4_bd1.a3m` for BRD4 BD1). IMPORTANT: an MSA must match the sequence you \
 fold -- a domain MSA goes with the domain sequence, not the full-length \

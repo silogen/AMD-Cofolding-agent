@@ -1,25 +1,39 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { callTool } from "../../lib/api";
+import { moleculesFromFile } from "../../lib/dropFiles";
+import { readSeedFile } from "../../lib/sharedFiles";
+import { useShortlist, useShortlistSession } from "../../lib/shortlist";
 import { asTtpList, type TtpSummary } from "../../lib/ttp";
 import {
   MAX_BATCH,
   MAX_STEPS,
+  addSeeds,
   loadRunSettings,
   mol2molChoices,
   parseMol2MolModels,
   rememberRun,
+  removeSeed,
   runCost,
   runProblems,
   runRequest,
+  seedChoices,
+  seedList,
   withOfferedModel,
+  type Prior,
   type PriorModel,
   type RunSettings,
+  type SeedMolecule,
 } from "../../lib/ttpRun";
 
 const int = (n: number) => n.toLocaleString("en");
+
+const PRIORS: [Prior, string][] = [
+  ["reinvent", "From scratch"],
+  ["mol2mol", "Analogues of my molecules"],
+];
 
 interface FieldsProps {
   run: RunSettings;
@@ -28,11 +42,14 @@ interface FieldsProps {
   cofold?: boolean;
   /** Mol2Mol only: the seeds are the point. */
   mol2molOnly?: boolean;
+  /** Molecules of the conversation to offer as seeds, besides its shortlist. */
+  molecules?: SeedMolecule[];
   onChange: (patch: Partial<RunSettings>) => void;
 }
 
 /** Steps, batch size, prior and seeds of a REINVENT run. */
-export function RunFields({ run, models, cofold = false, mol2molOnly = false, onChange }: FieldsProps) {
+export function RunFields({ run, models, cofold = false, mol2molOnly = false, molecules, onChange }: FieldsProps) {
+  const name = useId();
   const effective = withOfferedModel(run, models);
   const cost = runCost(run, cofold);
   return (
@@ -64,28 +81,21 @@ export function RunFields({ run, models, cofold = false, mol2molOnly = false, on
           = {int(cost.molecules)} molecules{cofold ? `, each cofolded` : ""}
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-muted text-[11px]">Prior</span>
-        <div role="radiogroup" aria-label="Prior" className="bg-sunken border-subtle inline-flex rounded-md border p-0.5">
-          {(
-            [
-              ["reinvent", "Reinvent · de novo"],
-              ["mol2mol", "Mol2Mol · from seeds"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              role="radio"
-              aria-checked={run.prior === value}
+      <div role="radiogroup" aria-label="How to generate" className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+        {PRIORS.map(([value, label]) => (
+          <label key={value} className={`flex items-center gap-1.5 ${mol2molOnly && value !== "mol2mol" ? "opacity-40" : "cursor-pointer"}`}>
+            <input
+              type="radio"
+              name={name}
+              value={value}
+              checked={run.prior === value}
               disabled={mol2molOnly && value !== "mol2mol"}
-              onClick={() => onChange({ prior: value })}
-              className={`cursor-pointer rounded px-2 py-0.5 text-[11px] disabled:cursor-default disabled:opacity-40 ${run.prior === value ? "bg-raised text-body shadow-card font-medium" : "text-muted hover:text-body"}`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+              onChange={() => onChange({ prior: value })}
+              className="accent-[var(--color-accent)]"
+            />
+            {label}
+          </label>
+        ))}
         {run.prior === "mol2mol" && models.length > 1 && (
           <select value={effective.model} onChange={(event) => onChange({ model: event.target.value })} aria-label="Mol2Mol prior" className={INPUT}>
             {models.map((m) => (
@@ -96,18 +106,119 @@ export function RunFields({ run, models, cofold = false, mol2molOnly = false, on
           </select>
         )}
       </div>
-      {run.prior === "mol2mol" && (
-        <textarea
-          value={run.seeds}
-          onChange={(event) => onChange({ seeds: event.target.value })}
-          rows={2}
-          spellCheck={false}
-          aria-label="Seed SMILES"
-          placeholder="Seed SMILES, one per line: the molecules Mol2Mol starts from"
-          className={`${INPUT} w-full resize-y font-mono text-[10px]`}
-        />
-      )}
+      {run.prior === "mol2mol" && <Seeds seeds={run.seeds} molecules={molecules} onChange={(seeds) => onChange({ seeds })} />}
     </>
+  );
+}
+
+type Reading = { state: "idle" } | { state: "busy" } | { state: "done"; text: string } | { state: "error"; text: string };
+
+/** Seed SMILES from the conversation's molecules, a file, or typed. */
+function Seeds({ seeds, molecules, onChange }: { seeds: string; molecules?: SeedMolecule[]; onChange: (seeds: string) => void }) {
+  const shortlist = useShortlist(useShortlistSession());
+  const chat = seedChoices(molecules, shortlist);
+  const chosen = new Set(seedList(seeds));
+  const [path, setPath] = useState("");
+  const [reading, setReading] = useState<Reading>({ state: "idle" });
+  const picker = useRef<HTMLInputElement>(null);
+
+  const took = (found: { smiles: string[]; failed: number }, from: string) => {
+    onChange(addSeeds(seeds, found.smiles));
+    const skipped = found.failed ? `, ${found.failed} unreadable` : "";
+    setReading({ state: found.smiles.length ? "done" : "error", text: found.smiles.length ? `${found.smiles.length} from ${from}${skipped}` : `No SMILES in ${from}${skipped}` });
+  };
+
+  const read = async (task: () => Promise<{ smiles: string[]; failed: number }>, from: string) => {
+    setReading({ state: "busy" });
+    try {
+      took(await task(), from);
+    } catch (err) {
+      setReading({ state: "error", text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const fromShared = () => {
+    const file = path.trim();
+    if (file) void read(() => readSeedFile(file), file.split("/").pop() ?? file);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      {chat.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-muted mr-1 text-[11px]">In this chat</span>
+          {chat.map((m) => {
+            const on = chosen.has(m.smiles);
+            return (
+              <button
+                key={m.smiles}
+                type="button"
+                aria-pressed={on}
+                title={m.smiles}
+                onClick={() => onChange(on ? removeSeed(seeds, m.smiles) : addSeeds(seeds, [m.smiles]))}
+                className={`max-w-40 cursor-pointer truncate rounded-full border px-2 py-px text-[10px] ${on ? "border-strong bg-sunken text-body font-medium" : "border-subtle text-muted hover:text-body"} ${m.label ? "" : "font-mono"}`}
+              >
+                {m.label ?? m.smiles}
+              </button>
+            );
+          })}
+          {chat.some((m) => !chosen.has(m.smiles)) && chat.length > 1 && (
+            <button type="button" onClick={() => onChange(addSeeds(seeds, chat.map((m) => m.smiles)))} className="text-faint hover:text-body cursor-pointer px-1 text-[10px]">
+              all
+            </button>
+          )}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <input
+          value={path}
+          onChange={(event) => setPath(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            fromShared();
+          }}
+          placeholder="Shared file: .smi, .csv or .sdf"
+          aria-label="Seed file on the shared volume"
+          spellCheck={false}
+          className={`${INPUT} min-w-40 flex-1 font-mono text-[10px]`}
+        />
+        <button type="button" onClick={fromShared} disabled={!path.trim() || reading.state === "busy"} className={ACTION}>
+          Read
+        </button>
+        <button type="button" onClick={() => picker.current?.click()} disabled={reading.state === "busy"} className={ACTION}>
+          From computer
+        </button>
+        <input
+          ref={picker}
+          type="file"
+          accept=".smi,.smiles,.csv,.sdf,.mol"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) void read(() => moleculesFromFile(file), file.name);
+          }}
+        />
+      </div>
+      <textarea
+        value={seeds}
+        onChange={(event) => onChange(event.target.value)}
+        rows={2}
+        spellCheck={false}
+        aria-label="Seed SMILES"
+        placeholder="Seed SMILES, one per line"
+        className={`${INPUT} w-full resize-y font-mono text-[10px]`}
+      />
+      {(reading.state !== "idle" || chosen.size > 0) && (
+        <p className="text-faint text-[10px]" aria-live="polite">
+          {chosen.size > 0 && `${chosen.size} seed${chosen.size === 1 ? "" : "s"}`}
+          {reading.state === "busy" && " · reading…"}
+          {reading.state === "done" && ` · added ${reading.text}`}
+          {reading.state === "error" && <span style={{ color: "var(--color-accent)" }}>{chosen.size > 0 ? " · " : ""}{reading.text}</span>}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -118,6 +229,8 @@ interface CardProps {
   preferTtpId?: string | null;
   /** Start Mol2Mol from these SMILES, one per line. */
   seeds?: string;
+  /** Molecules of the conversation to offer as seeds, besides its shortlist. */
+  molecules?: SeedMolecule[];
   cofold?: boolean;
   /** Called with the run request for the composer. */
   onAsk: (request: string) => void;
@@ -125,7 +238,7 @@ interface CardProps {
 }
 
 /** A small card to put a REINVENT run request in the composer; the user sends it. */
-export function RunCard({ ttp, preferTtpId, seeds, cofold, onAsk, onClose }: CardProps) {
+export function RunCard({ ttp, preferTtpId, seeds, molecules, cofold, onAsk, onClose }: CardProps) {
   const [run, setRun] = useState<RunSettings>(() => ({ ...loadRunSettings(), ...(seeds !== undefined ? { prior: "mol2mol" as const, seeds } : {}) }));
   const [models, setModels] = useState<PriorModel[]>([]);
   const [ttps, setTtps] = useState<TtpSummary[] | null>(null);
@@ -159,6 +272,7 @@ export function RunCard({ ttp, preferTtpId, seeds, cofold, onAsk, onClose }: Car
   const chosen = pick ?? preferTtpId ?? null;
   const target = ttp ?? ttps?.find((t) => t.id === chosen) ?? ttps?.[0] ?? null;
   const problems = runProblems(effective);
+  const shown = attempted ? (problems[0] ?? (target ? null : "Pick a TTP to run.")) : null;
   const update = (patch: Partial<RunSettings>) => {
     setRun({ ...run, ...patch });
     rememberRun(patch);
@@ -197,14 +311,10 @@ export function RunCard({ ttp, preferTtpId, seeds, cofold, onAsk, onClose }: Car
           </select>
         </Labelled>
       )}
-      <RunFields run={run} models={choices} cofold={cofold} mol2molOnly={seeds !== undefined} onChange={update} />
+      <RunFields run={run} models={choices} cofold={cofold} mol2molOnly={seeds !== undefined} molecules={molecules} onChange={update} />
       <div className="flex flex-wrap items-center gap-2">
-        <p className="text-faint min-w-0 flex-1 text-[11px]">
-          {attempted && (problems[0] ?? (target ? null : "Pick a TTP to run.")) ? (
-            <span style={{ color: "var(--color-accent)" }}>{problems[0] ?? "Pick a TTP to run."}</span>
-          ) : (
-            "The chat gets the request; you send it."
-          )}
+        <p className="min-w-0 flex-1 text-[11px]" style={{ color: "var(--color-accent)" }}>
+          {shown}
         </p>
         <button type="button" onClick={put} title="Put the run request in the message box" className={ACTION} style={{ borderColor: "var(--color-accent)", color: "var(--color-accent)" }}>
           Put in chat
@@ -215,7 +325,7 @@ export function RunCard({ ttp, preferTtpId, seeds, cofold, onAsk, onClose }: Car
 }
 
 const INPUT = "bg-sunken border-subtle focus:border-strong rounded-md border px-2 py-1 text-xs outline-none";
-const ACTION = "border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium touch:min-h-11";
+const ACTION = "border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium disabled:cursor-default disabled:opacity-50 touch:min-h-11";
 
 function Labelled({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (

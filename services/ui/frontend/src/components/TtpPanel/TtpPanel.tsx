@@ -43,7 +43,7 @@ import {
   type TtpSection,
   type TtpSummary,
 } from "../../lib/ttp";
-import { modelLabel } from "../../lib/ttpRun";
+import { modelLabel, type SeedMolecule } from "../../lib/ttpRun";
 import { onRunsChanged, openRun } from "../../lib/workbenchBus";
 import { RunCard } from "../TtpBuilder/RunFields";
 import { ObjectiveCard } from "./ObjectiveCard";
@@ -60,6 +60,8 @@ interface Props {
   onAsk: (prompt: string) => void;
   /** Show this stored TTP instead of the session's. */
   ttpId?: string;
+  /** The conversation's molecules, offered as Mol2Mol seeds. */
+  molecules?: SeedMolecule[];
 }
 
 /** Stored Target Product Profiles: browse, read, reuse, and edit weights and windows. */
@@ -73,7 +75,7 @@ type ListState = { state: "loading" } | { state: "error"; message: string } | { 
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
+function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
   const fromSession = useMemo(() => latestTtp(events), [events]);
   const [stored, setStored] = useState<TtpDraft | null>(() => loadDraft(sessionId));
   const [list, setList] = useState<ListState>({ state: "loading" });
@@ -209,6 +211,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
         <Suspense fallback={null}>
           <TtpBuilder
             initial={builder.initial}
+            molecules={molecules}
             onClose={() => setBuilder(null)}
             onCreated={(ttp, request) => {
               afterCreate(ttp.id);
@@ -248,6 +251,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId }: Props) {
         onServer={onServer}
         inSession={fromSession.id === base.id}
         runs={runs}
+        molecules={molecules}
         onAsk={onAsk}
         onUse={() => onAsk(chatPrompt(base))}
         onDuplicate={() => setBuilder({ initial: base })}
@@ -484,6 +488,7 @@ function TtpReadView({
   inSession,
   runs,
   saved,
+  molecules,
   onAsk,
   onUse,
   onDuplicate,
@@ -495,6 +500,7 @@ function TtpReadView({
   inSession: boolean;
   runs: JobSummary[];
   saved: number | null;
+  molecules?: SeedMolecule[];
   onAsk: (prompt: string) => void;
   onUse: () => void;
   onDuplicate: () => void;
@@ -541,7 +547,7 @@ function TtpReadView({
         </div>
         {running && (
           <div className="mt-2">
-            <RunCard key={ttp.id} ttp={ttp} cofold={hasCofolding(all)} onAsk={onAsk} onClose={() => setRunning(false)} />
+            <RunCard key={ttp.id} ttp={ttp} cofold={hasCofolding(all)} molecules={molecules} onAsk={onAsk} onClose={() => setRunning(false)} />
           </div>
         )}
       </div>

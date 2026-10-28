@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { structureTitle, type Artifacts } from "../../lib/artifacts";
@@ -33,7 +33,7 @@ import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { useRDKit } from "../../hooks/useRDKit";
 import { summarise } from "../../lib/format";
 import { extractTargetFacts, toolEvents } from "../../lib/ttp";
-import { buildCandidates } from "../../lib/candidates";
+import { candidatesOf } from "../../lib/candidates";
 import { CandidatesPanel } from "../CandidatesPanel/CandidatesPanel";
 import { JobsPanel } from "../JobsPanel/JobsPanel";
 import { RunResults } from "../RunResults/RunResults";
@@ -93,7 +93,7 @@ const JOB_VIEWS = [
  * molecules, the result tables and the log of tool calls. The chat says
  * what happened; the workbench is where the results are worked with.
  */
-export function Workbench(props: Props) {
+export const Workbench = memo(function Workbench(props: Props) {
   const { layout, tab, onTabChange, artifacts, onClose, sessionId, openSeq } = props;
   const isSheet = layout === "sheet";
 
@@ -111,7 +111,7 @@ export function Workbench(props: Props) {
     };
   }, [isSheet, onClose]);
 
-  const candidateCount = useMemo(() => buildCandidates(artifacts).length, [artifacts]);
+  const candidateCount = candidatesOf(artifacts).length;
   const starred = useShortlist(sessionId ?? "new").length;
   const counts: Record<WorkbenchTab, number> = {
     structure: artifacts.structures.length,
@@ -339,7 +339,7 @@ export function Workbench(props: Props) {
       </div>
     </aside>
   );
-}
+});
 
 function openMolecule({ onSelectSmiles, onTabChange }: Props, smiles: string) {
   onSelectSmiles(smiles);
@@ -370,6 +370,7 @@ function CandidatesTab(props: Props) {
 function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
   const events = useMemo(() => toolEvents(artifacts.steps), [artifacts.steps]);
   const facts = useMemo(() => extractTargetFacts(events), [events]);
+  const molecules = useMemo(() => candidatesOf(artifacts).map((c) => ({ smiles: c.smiles, label: c.name })), [artifacts]);
   if (tab === "target") {
     return (
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -377,7 +378,7 @@ function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
       </div>
     );
   }
-  if (tab === "ttp") return <TtpPanel sessionId={sessionId ?? "new"} events={events} onAsk={onAsk} />;
+  if (tab === "ttp") return <TtpPanel sessionId={sessionId ?? "new"} events={events} molecules={molecules} onAsk={onAsk} />;
   return <AssetsPanel events={events} onOpenStructure={(path) => sendToViewer({ path, source: "assets" })} onInsert={onAsk} />;
 }
 

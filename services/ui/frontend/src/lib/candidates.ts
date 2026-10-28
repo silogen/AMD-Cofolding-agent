@@ -33,12 +33,28 @@ const INDEX_COLUMNS = new Set(["#", "rank", "index", "step", "Step", "batch", "S
 
 const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
+type CandidateSources = Pick<Artifacts, "tables" | "molecules" | "structures">;
+let last: { sources: CandidateSources; candidates: Candidate[] } | null = null;
+
+/**
+ * buildCandidates, computed once for the lists it reads: the tab badge and
+ * the panels showing candidates all ask for the same artifacts.
+ */
+export function candidatesOf(artifacts: CandidateSources): Candidate[] {
+  if (last && last.sources.tables === artifacts.tables && last.sources.molecules === artifacts.molecules && last.sources.structures === artifacts.structures) {
+    return last.candidates;
+  }
+  const candidates = buildCandidates(artifacts);
+  last = { sources: { tables: artifacts.tables, molecules: artifacts.molecules, structures: artifacts.structures }, candidates };
+  return candidates;
+}
+
 /**
  * Candidates by SMILES, from every table with a SMILES column, every drawn
  * molecule and every structure whose ligand is known. Artifacts are newest
  * first, so the newest value of a column or metric wins.
  */
-export function buildCandidates(artifacts: Pick<Artifacts, "tables" | "molecules" | "structures">): Candidate[] {
+export function buildCandidates(artifacts: CandidateSources): Candidate[] {
   const byKey = new Map<string, Candidate>();
 
   const ensure = (smiles: string, tool: string): Candidate => {

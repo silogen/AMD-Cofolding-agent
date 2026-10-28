@@ -6,8 +6,8 @@ import { useRDKit } from "../../hooks/useRDKit";
 import type { Artifacts } from "../../lib/artifacts";
 import {
   admetPrompt,
-  buildCandidates,
   type Candidate,
+  candidatesOf,
   candidateNumbers,
   candidatesToCsv,
   candidatesToSdf,
@@ -57,6 +57,13 @@ interface Column {
 
 /** Component columns shown by default; the rest can be turned on in the Columns menu. */
 const TABLE_COMPONENTS = 4;
+/** Row heights in px: the drawing (h-12 or h-8), its cell padding and the border. */
+const ROW_HEIGHT = 57;
+const DENSE_ROW_HEIGHT = 37;
+/** Rows drawn above and below the visible ones, so a fast scroll does not show blanks. */
+const OVERSCAN = 6;
+/** Scroll positions are tracked in steps of this many px, so scrolling re-renders the table less often. */
+const SCROLL_STEP = 32;
 const GATE_RANK = { pass: 2, unknown: 1, fail: 0 } as const;
 
 const control = "bg-sunken border-subtle rounded-md border px-2 py-1 text-xs";
@@ -80,8 +87,8 @@ function download(name: string, text: string, type: string) {
  * are computed in the browser with RDKit.
  */
 export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStructure, onAsk }: Props) {
-  const { rdkit } = useRDKit();
-  const candidates = useMemo(() => buildCandidates(artifacts), [artifacts]);
+  const candidates = candidatesOf(artifacts);
+  const { rdkit } = useRDKit(candidates.length > 0);
   const ttp = useMemo(() => latestTtp(toolEvents(artifacts.steps)), [artifacts.steps]);
   const props = useMemo(() => {
     const out = new Map<string, MolProps>();
@@ -124,6 +131,16 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
   const [detailKey, setDetailKey] = useState<string | null | undefined>(undefined);
   const [axes, setAxes] = useState<{ x: string; y: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewport, setViewport] = useState(600);
+
+  useEffect(() => {
+    if (!scroller) return;
+    const observer = new ResizeObserver(([entry]) => setViewport(entry.contentRect.height));
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [scroller]);
 
   const visible = allColumns.filter((c) => shown[c.key] ?? c.defaultOn);
   const propsOf = (smiles: string) => props.get(smiles);
@@ -223,6 +240,10 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
   }
 
   const cellY = dense ? "py-0.5" : "py-1";
+  const rowHeight = dense ? DENSE_ROW_HEIGHT : ROW_HEIGHT;
+  const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN);
+  const lastRow = Math.min(filtered.length, Math.ceil((scrollTop + viewport + SCROLL_STEP) / rowHeight) + OVERSCAN);
+  const spanAll = 3 + visible.length;
   const header = (key: SortKey, label: string, align: "left" | "right" = "left") => {
     const active = sort.key === key;
     return (
@@ -425,7 +446,11 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
           Showing {filtered.length} of {candidates.length}
         </p>
 
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div
+          ref={setScroller}
+          onScroll={(e) => setScrollTop(Math.floor(e.currentTarget.scrollTop / SCROLL_STEP) * SCROLL_STEP)}
+          className="min-h-0 flex-1 overflow-auto"
+        >
           {view === "scatter" ? (
             <CandidateScatter
               candidates={filtered}
@@ -458,14 +483,19 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((c) => {
+                {firstRow > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={spanAll} className="p-0" style={{ height: firstRow * rowHeight }} />
+                  </tr>
+                )}
+                {filtered.slice(firstRow, lastRow).map((c) => {
                   const isDetail = c.smiles === detail?.smiles;
                   return (
                     <tr
                       key={c.smiles}
                       onClick={() => setDetailKey(c.smiles)}
                       className={`group hover:bg-sunken cursor-pointer ${selected.has(c.smiles) ? "bg-sunken" : ""}`}
-                      style={isDetail ? { boxShadow: "inset 3px 0 0 var(--color-accent)" } : undefined}
+                      style={{ height: rowHeight, boxShadow: isDetail ? "inset 3px 0 0 var(--color-accent)" : undefined }}
                     >
                       <td className={`border-subtle border-b px-2 ${cellY}`} onClick={(e) => e.stopPropagation()}>
                         <input
@@ -492,6 +522,11 @@ export function CandidatesPanel({ artifacts, theme, onOpenMolecule, onOpenStruct
                     </tr>
                   );
                 })}
+                {lastRow < filtered.length && (
+                  <tr aria-hidden="true">
+                    <td colSpan={spanAll} className="p-0" style={{ height: (filtered.length - lastRow) * rowHeight }} />
+                  </tr>
+                )}
               </tbody>
             </table>
           )}

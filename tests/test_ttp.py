@@ -219,6 +219,44 @@ class TestTargetConfig:
         t = TargetConfig(protein_sequence="acdefghiklmnpqrstvwy")
         assert t.protein_sequence == "ACDEFGHIKLMNPQRSTVWY"
 
+    def test_templates_default_empty(self):
+        assert TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY").templates == []
+
+    def test_template_parsed(self):
+        t = TargetConfig(
+            protein_sequence="ACDEFGHIKLMNPQRSTVWY",
+            templates=[{"path": " uploads/s-1/1M17_A.cif ", "chain_id": " A ", "force": True, "threshold": 2.0}],
+        )
+        tpl = t.templates[0]
+        assert (tpl.path, tpl.chain_id, tpl.force, tpl.threshold) == ("uploads/s-1/1M17_A.cif", "A", True, 2.0)
+
+    def test_template_blank_chain_is_none(self):
+        t = TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", templates=[{"path": "a.pdb", "chain_id": ""}])
+        assert t.templates[0].chain_id is None
+
+    def test_template_needs_structure_file(self):
+        with pytest.raises(ValidationError, match="must be a"):
+            TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", templates=[{"path": "msa/x.a3m"}])
+
+    def test_forced_template_needs_threshold(self):
+        with pytest.raises(ValidationError, match="threshold"):
+            TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", templates=[{"path": "a.cif", "force": True}])
+
+    def test_template_threshold_positive(self):
+        with pytest.raises(ValidationError, match="positive"):
+            TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", templates=[{"path": "a.cif", "threshold": 0}])
+
+    def test_template_stems_unique(self):
+        with pytest.raises(ValidationError, match="unique"):
+            TargetConfig(
+                protein_sequence="ACDEFGHIKLMNPQRSTVWY",
+                templates=[{"path": "x/1abc.cif"}, {"path": "y/1abc.pdb"}],
+            )
+
+    def test_template_unknown_field_rejected(self):
+        with pytest.raises(ValidationError):
+            TargetConfig(protein_sequence="ACDEFGHIKLMNPQRSTVWY", templates=[{"path": "a.cif", "chain": "A"}])
+
 
 # ---------------------------------------------------------------------------
 # PreScoringComponent tests
@@ -675,6 +713,51 @@ class TestTTPToScorerConfig:
         boltz_params = external_comps[0]["ExternalRESTScorer"]["endpoint"][0]["params"]
         assert boltz_params["msa_path"] == "/data/msa/jak2.a3m"
         assert boltz_params["use_msa_server"] is False
+
+    def test_no_templates_no_param(self):
+        ttp = TTP.model_validate(FULL_TTP)
+        config = ttp_to_scorer_config(ttp)
+        for comp in config["component"]:
+            if "ExternalRESTScorer" in comp:
+                assert "templates" not in comp["ExternalRESTScorer"]["endpoint"][0]["params"]
+
+    def test_templates_reach_boltz_only(self):
+        data = {
+            **FULL_TTP,
+            "target": {
+                "protein_sequence": FULL_TTP["target"]["protein_sequence"],
+                "templates": [
+                    {"path": "uploads/s-1/3KRR_A.cif", "chain_id": "A"},
+                    {"path": "/shared/structures/2xyz.pdb", "force": True, "threshold": 2.5},
+                ],
+            },
+        }
+        ttp = TTP.model_validate(data)
+        config = ttp_to_scorer_config(ttp)
+        external = [c["ExternalRESTScorer"]["endpoint"][0] for c in config["component"] if "ExternalRESTScorer" in c]
+        boltz = [e["params"] for e in external if e["params"]["service"] == "boltz"]
+        assert boltz and all(
+            p["templates"]
+            == [
+                {"path": "uploads/s-1/3KRR_A.cif", "chain_id": "A", "force": False},
+                {"path": "/shared/structures/2xyz.pdb", "force": True, "threshold": 2.5},
+            ]
+            for p in boltz
+        )
+        assert "protein_pdb_path" not in boltz[0]
+        posebusters = next(e["params"] for e in external if e["params"]["service"] == "posebusters")
+        assert "templates" not in posebusters
+
+    def test_templates_in_job_toml(self):
+        from reinvent4_mcp.jobs.toml_generator import _toml_value
+
+        ttp = TTP.model_validate(
+            {**FULL_TTP, "target": {"protein_sequence": FULL_TTP["target"]["protein_sequence"], "templates": [{"path": "t/a.cif"}]}}
+        )
+        config = ttp_to_scorer_config(ttp)
+        boltz = next(c for c in config["component"] if "ExternalRESTScorer" in c)
+        templates = boltz["ExternalRESTScorer"]["endpoint"][0]["params"]["templates"]
+        assert _toml_value(templates) == '[{path = "t/a.cif", force = false}]'
 
     def test_posebusters_depends_on_preserved(self):
         ttp = TTP.model_validate(FULL_TTP)

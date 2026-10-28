@@ -576,6 +576,11 @@ def _map_external_objective(
             # present, else auto-enable the MSA server so the cofold never
             # fails for lack of an alignment.
             params.update(_resolve_boltz_msa(ttp.target.protein_sequence))
+        if ttp.target.templates:
+            # None values would reach the job TOML as the string "None".
+            params["templates"] = [
+                t.model_dump(exclude_none=True) for t in ttp.target.templates
+            ]
 
     # protein_pdb_path is relevant for both structure prediction and
     # pose validation services

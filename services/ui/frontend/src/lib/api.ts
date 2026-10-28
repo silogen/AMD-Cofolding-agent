@@ -60,14 +60,78 @@ export interface ToolResponse<T> {
 }
 
 /**
+ * Tools that only read. Identical calls to them that are in flight at the
+ * same time share one request; every other tool always gets its own.
+ */
+const READ_ONLY = new Set([
+  "list_jobs",
+  "get_optimization_status",
+  "get_job_alerts",
+  "get_top_candidates",
+  "list_ttps",
+  "get_ttp",
+  "list_shared_assets",
+  "list_available_models",
+  "list_scoring_components",
+  "list_external_services",
+]);
+/**
+ * Polled by several panels at once (run bar, Jobs, Results, TTP), so an
+ * answer is reused for this long; each call costs about a second through a
+ * tunnel. Shorter than the fastest poll (10 s) so every poll still sees news.
+ */
+const SHARED_MS: Record<string, number> = { list_jobs: 8_000, get_optimization_status: 8_000, get_job_alerts: 8_000 };
+
+const inFlight = new Map<string, Promise<ToolResponse<unknown>>>();
+const recent = new Map<string, { at: number; response: ToolResponse<unknown> }>();
+/** Bumped by every call that may change something; answers read before it are not shared after it. */
+let generation = 0;
+
+/** Forget every shared answer, e.g. after a call that changes the jobs. */
+export function clearToolCache(): void {
+  generation += 1;
+  inFlight.clear();
+  recent.clear();
+}
+
+/**
  * Call one MCP tool directly, without the agent. Only the tools in the
  * gateway's DIRECT_TOOLS list are allowed; the others answer 403.
+ *
+ * Results of read-only tools may be shared between callers, so callers must
+ * not modify them.
  */
-export const callTool = <T = unknown>(name: string, args: Record<string, unknown> = {}) =>
-  request<ToolResponse<T>>(`/api/tools/${encodeURIComponent(name)}`, {
-    method: "POST",
-    body: JSON.stringify({ arguments: args }),
+export function callTool<T = unknown>(name: string, args: Record<string, unknown> = {}): Promise<ToolResponse<T>> {
+  const send = () =>
+    request<ToolResponse<T>>(`/api/tools/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ arguments: args }),
+    });
+  if (!READ_ONLY.has(name)) {
+    clearToolCache();
+    return send().finally(clearToolCache);
+  }
+  const key = `${name} ${JSON.stringify(args)}`;
+  const ttl = SHARED_MS[name] ?? 0;
+  const hit = recent.get(key);
+  if (hit && Date.now() - hit.at < ttl) return Promise.resolve(hit.response as ToolResponse<T>);
+  const pending = inFlight.get(key);
+  if (pending) return pending as Promise<ToolResponse<T>>;
+  const started = generation;
+  const call = send().finally(() => {
+    if (inFlight.get(key) === call) inFlight.delete(key);
   });
+  inFlight.set(key, call);
+  if (ttl > 0) {
+    call.then(
+      (response) => {
+        if (generation === started) recent.set(key, { at: Date.now(), response });
+      },
+      () => undefined,
+    );
+  }
+  return call;
+}
 
 export const jobFileUrl = (jobId: string, name: string) =>
   `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`;

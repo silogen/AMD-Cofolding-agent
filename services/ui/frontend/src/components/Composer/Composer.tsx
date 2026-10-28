@@ -1,17 +1,18 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { forwardRef, Fragment, lazy, Suspense, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, Fragment, lazy, memo, Suspense, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { Effort, ModelOption } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { useRDKit } from "../../hooks/useRDKit";
 import { availableCommands, firstPlaceholder, VIEW_PREFIX, type SlashCommand } from "../../lib/commands";
-import { canonical, withMol } from "../../lib/rdkit";
+import { canonical, loadRDKit, withMol } from "../../lib/rdkit";
 import { findSmiles, replaceToken } from "../../lib/smiles";
 import { onSketchRequest, openSketcher, type SketchRequest } from "../../lib/sketcherBus";
 import { ACCEPTED_FILES, fileKind, moleculesFromFile } from "../../lib/dropFiles";
 import { modelLabel, pickEffort, useModels } from "../../lib/models";
+import type { SeedMolecule } from "../../lib/ttpRun";
 import { uploadedStructure, uploadFile } from "../../lib/uploads";
 import { addUserStructure } from "../../lib/userStructures";
 import { sendToViewer } from "../../lib/viewerBus";
@@ -35,6 +36,8 @@ interface Props {
   model: string | null;
   /** The gateway's effort, used until the user picks one. */
   defaultEffort: string | null;
+  /** The conversation's molecules, offered as seeds in the TTP builder. */
+  molecules?: SeedMolecule[];
 }
 
 export interface ComposerHandle {
@@ -85,8 +88,8 @@ let attachmentId = 0;
  * works the send button becomes Stop: a turn can run for an hour, and
  * stopping must not need a page reload.
  */
-export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
-  { value, onChange, onSend, onStop, busy, connected, tools, theme, sessionId, model, defaultEffort },
+export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer(
+  { value, onChange, onSend, onStop, busy, connected, tools, theme, sessionId, model, defaultEffort, molecules },
   ref,
 ) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -103,7 +106,6 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   const [chosenEffort, setChosenEffort] = useState<Effort | null>(storedEffort);
   const [modelMenu, setModelMenu] = useState(false);
   const [dropArea, setDropArea] = useState<DOMRect | null>(null);
-  const { rdkit } = useRDKit();
   const models = useModels();
 
   const served = models.state;
@@ -124,6 +126,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   const slash = /^\/\S*$/.test(value) && !dismissed;
   const matches = slash ? commands.filter((command) => command.cmd.startsWith(value.toLowerCase())) : [];
   const smiles = useMemo(() => findSmiles(value), [value]);
+  const { rdkit } = useRDKit(smiles.length > 0);
   const validity = useMemo(
     () => new Map(smiles.map((entry) => [entry, rdkit ? withMol(rdkit, entry, () => true) === true : null])),
     [smiles, rdkit],
@@ -279,13 +282,17 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
 
   function applySketch(drawn: string) {
     const target = sketch?.replace;
-    const result = (rdkit && canonical(rdkit, drawn)) || drawn;
     setSketch(null);
-    if (target && valueRef.current.includes(target)) {
-      const next = replaceToken(valueRef.current, target, result);
-      onChange(next);
-      focusEnd(next);
-    } else insert(result);
+    void loadRDKit()
+      .then((module) => canonical(module, drawn), () => null)
+      .then((found) => {
+        const result = found || drawn;
+        if (target && valueRef.current.includes(target)) {
+          const next = replaceToken(valueRef.current, target, result);
+          onChange(next);
+          focusEnd(next);
+        } else insert(result);
+      });
   }
 
   function choose(command: SlashCommand) {
@@ -583,6 +590,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
         createPortal(
           <Suspense fallback={null}>
             <TtpBuilder
+              molecules={molecules}
               onClose={() => setTtpOpen(false)}
               onCreated={(_, request) => {
                 setTtpOpen(false);
@@ -594,7 +602,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
         )}
     </div>
   );
-});
+}));
 
 function ToolButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (

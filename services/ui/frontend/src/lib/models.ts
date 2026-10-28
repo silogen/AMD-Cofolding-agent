@@ -21,6 +21,8 @@ import { ApiError, request } from "./api";
 
 /** How often to ask whether the new model is up, in ms. */
 const POLL_MS = 4000;
+/** A load takes three to six minutes; past this the page stops asking. */
+const GIVE_UP_MS = 10 * 60_000;
 
 export const loadModels = () => request<ModelsState>("/api/models");
 
@@ -93,7 +95,14 @@ export function useModels(): ModelsView {
   useEffect(() => {
     if (!pending) return;
     let alive = true;
+    const since = Date.now();
     const timer = window.setInterval(() => {
+      if (Date.now() - since > GIVE_UP_MS) {
+        setPending(null);
+        setNote("The model is taking longer than expected to load. Reload the page to check on it.");
+        return;
+      }
+      if (document.hidden) return;
       loadModels().then(
         (next) => {
           if (!alive) return;

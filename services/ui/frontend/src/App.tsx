@@ -13,7 +13,8 @@ import { RunBar } from "./components/RunBar/RunBar";
 import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
 import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
 import type { Effort, SessionSummary, StructurePanel } from "./types/api";
-import { collectArtifacts, runOf, sameFile, structureTitle } from "./lib/artifacts";
+import { collectArtifacts, keepUnchanged, runOf, sameFile, structureTitle } from "./lib/artifacts";
+import { candidatesOf } from "./lib/candidates";
 import { availableCommands, VIEW_PREFIX } from "./lib/commands";
 import { onOpenRequest, sendToViewer } from "./lib/viewerBus";
 import { onWorkbenchRequest } from "./lib/workbenchBus";
@@ -31,6 +32,7 @@ function sessionFromHash(): string | null {
 }
 
 const wide = () => window.matchMedia("(min-width: 1024px)").matches;
+const NO_TOOLS: string[] = [];
 
 /** How the header names the target: "BRD4", else the TTP id, else the sequence length. */
 function targetLabel(facts: TargetFacts): string | null {
@@ -85,12 +87,16 @@ export default function App() {
 
   const userStructures = useUserStructures(session?.id ?? "new");
   useEffect(() => setShortlistSession(session?.id ?? "new"), [session?.id]);
-  const artifacts = useMemo(() => withUserStructures(collectArtifacts(transcript.turns), userStructures), [transcript.turns, userStructures]);
+  const collected = useMemo(() => withUserStructures(collectArtifacts(transcript.turns), userStructures), [transcript.turns, userStructures]);
+  const [artifacts, setArtifacts] = useState(collected);
+  const kept = keepUnchanged(artifacts, collected);
+  if (kept !== artifacts) setArtifacts(kept);
   const [picked, setPicked] = useState<StructurePanel | null>(null);
   const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
   const [hints, setHints] = useState<{ id: number; message: string }[]>([]);
   const activeStructure = picked ?? artifacts.structures[0]?.item ?? null;
   const target = useMemo(() => targetLabel(extractTargetFacts(toolEvents(artifacts.steps))), [artifacts.steps]);
+  const molecules = useMemo(() => candidatesOf(artifacts).map((c) => ({ smiles: c.smiles, label: c.name })), [artifacts]);
 
   const hint = useCallback((message: string) => setHints((list) => [...list.slice(-2), { id: Date.now(), message }]), []);
   const dismissHint = useCallback((id: number) => setHints((list) => list.filter((entry) => entry.id !== id)), []);
@@ -166,6 +172,10 @@ export default function App() {
     },
     [showWorkbench],
   );
+
+  const showProperties = useCallback(() => showWorkbench("properties"), [showWorkbench]);
+  const closeWorkbench = useCallback(() => setWorkbenchOpen(false), []);
+  const closeSheet = useCallback(() => setSheetOpen(false), []);
 
   const ask = useCallback((text: string) => {
     setSheetOpen(false);
@@ -348,7 +358,7 @@ export default function App() {
               theme={theme}
               openStructurePath={activeStructure?.path ?? null}
               onOpenMolecule={openMolecule}
-              onShowProperties={() => showWorkbench("properties")}
+              onShowProperties={showProperties}
               onPickPrompt={ask}
               hasStructure={artifacts.structures.length > 0}
             />
@@ -372,17 +382,18 @@ export default function App() {
             onStop={chat.cancel}
             busy={busy}
             connected={connected}
-            tools={agent?.tools ?? []}
+            tools={agent?.tools ?? NO_TOOLS}
             theme={theme}
             sessionId={session?.id ?? null}
             model={agent?.model ?? null}
             defaultEffort={agent?.reasoningEffort ?? null}
+            molecules={molecules}
           />
         </main>
 
         {workbenchOpen && (
           <div className="hidden lg:flex">
-            <Workbench layout="sidebar" {...workbenchProps} onClose={() => setWorkbenchOpen(false)} />
+            <Workbench layout="sidebar" {...workbenchProps} onClose={closeWorkbench} />
           </div>
         )}
 
@@ -400,7 +411,7 @@ export default function App() {
 
       {sheetOpen && (
         <div className="lg:hidden">
-          <Workbench layout="sheet" {...workbenchProps} onClose={() => setSheetOpen(false)} />
+          <Workbench layout="sheet" {...workbenchProps} onClose={closeSheet} />
         </div>
       )}
 

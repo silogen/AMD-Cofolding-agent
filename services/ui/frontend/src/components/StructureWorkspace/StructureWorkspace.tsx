@@ -18,7 +18,6 @@ import {
   type Picked,
   type Residue,
   type ViewStyleName,
-  pickedName,
 } from "../../lib/molstar";
 import { VIEWER_HELP, type ViewerAction } from "../../lib/viewerCommands";
 import { onViewerRequest } from "../../lib/viewerBus";
@@ -30,6 +29,7 @@ import { buildNumbering, displayNumber, rememberNumbering, residueLabel, resolve
 import { fetchPdbEntry, isPdbId } from "../../lib/rcsb";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { CopyButton } from "../CopyButton/CopyButton";
+import { pickKind, pickQuestion, pickTitle, structureRef, type PickedResidue } from "./pickQuestion";
 
 interface Props {
   structures: Sourced<StructurePanel>[];
@@ -512,7 +512,17 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   const pickedHere = picked && picked.path === active.path ? picked : null;
   const pickedContacts = pickedHere && profile ? profile.contacts.filter((c) => c.resnum === pickedHere.resnum) : [];
   const pickedShown = pickedHere?.resname && pickedHere.resnum !== null ? nameOf(pickedHere.resname, pickedHere.chain, pickedHere.resnum) : null;
-  const pickedTitle = pickedHere ? (pickedName(pickedHere) === "the ligand" ? "the ligand" : (pickedShown?.label ?? pickedHere.label)) : "";
+  const pickedInPolymer =
+    pickedHere?.resname && fileResidues?.path === active.path
+      ? fileResidues.list.some(
+          (r) => r.resnum === pickedHere.resnum && (!pickedHere.chain || r.chain === pickedHere.chain) && r.resname.toUpperCase() === pickedHere.resname?.toUpperCase(),
+        )
+      : null;
+  const pickedResidue: PickedResidue | null =
+    pickedHere?.resname && pickedShown
+      ? { kind: pickKind(pickedHere.resname, pickedInPolymer), resname: pickedHere.resname, label: pickedShown.label, chain: pickedHere.chain, file: pickedShown.file }
+      : null;
+  const pickedTitle = pickedResidue ? pickTitle(pickedResidue) : (pickedHere?.label ?? "");
   const selectedHere = selected && selected.path === active.path && profile ? profile.contacts[selected.index] : null;
 
   return (
@@ -688,9 +698,9 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
               primary
               onClick={() =>
                 onAsk(
-                  pickedTitle === "the ligand"
-                    ? `In ${title}, how is the ligand held in the pocket? Name its key contacts from the interaction profile.`
-                    : `In ${title}, what role does ${pickedTitle}${pickedHere.chain ? ` (chain ${pickedHere.chain})` : ""} play in binding the ligand? Use the interaction profile.`,
+                  pickedResidue
+                    ? pickQuestion(title, active.path, pickedResidue)
+                    : `In ${structureRef(title, active.path)}, what role does ${pickedTitle}${pickedHere.chain ? ` (chain ${pickedHere.chain})` : ""} play in binding the ligand? Use the interaction profile.`,
                 )
               }
             >
@@ -713,7 +723,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
               <ChipButton
                 primary
                 onClick={() => {
-                  onAsk(`About the structure ${title}: ${message.ask}`);
+                  onAsk(`About the structure ${structureRef(title, active.path)}: ${message.ask}`);
                   setMessage(null);
                 }}
               >

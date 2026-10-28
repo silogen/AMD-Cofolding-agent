@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { Artifacts } from "../../lib/artifacts";
 import { callTool, jobFileUrl } from "../../lib/api";
 import { isActive, jobTitle, parseAlerts, parseJobs, parseStatus, toolError, type JobState, type JobStatus, type JobSummary } from "../../lib/jobs";
@@ -32,7 +32,11 @@ interface Props {
 
 /** get_optimization_status reads the whole results CSV, so not more often than this. */
 const POLL_MS = 20_000;
-/** list_jobs for runs of other conversations, also while the page is hidden. */
+/**
+ * list_jobs while a run is going on, for runs of other conversations. Not
+ * while the page is hidden: the list is read again as soon as it is shown,
+ * and RunWatch then reports whatever ended meanwhile.
+ */
 const WATCH_MS = 60_000;
 /** How long a finished run stays in the bar. */
 const DONE_MS = 8_000;
@@ -104,7 +108,7 @@ async function readLive(jobId: string, withLog: boolean): Promise<Live | null> {
  * A click opens the run in the workbench; Stop asks first, then calls
  * stop_optimization. A finished run stays a few seconds with its outcome.
  */
-export function RunBar({ sessionId, steps, onNotice }: Props) {
+export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props) {
   const conversation = useMemo(() => conversationJobIds(steps), [steps]);
   const conversationKey = conversation.join(",");
   const [jobs, setJobs] = useState<JobSummary[]>([]);
@@ -145,9 +149,21 @@ export function RunBar({ sessionId, steps, onNotice }: Props) {
 
   useEffect(() => onRunsChanged(() => setListTick((t) => t + 1)), []);
 
+  const anyRunning = jobs.some((job) => isActive(job.state));
   useEffect(() => {
-    const timer = window.setInterval(() => setListTick((t) => t + 1), WATCH_MS);
+    if (!anyRunning) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) setListTick((t) => t + 1);
+    }, WATCH_MS);
     return () => window.clearInterval(timer);
+  }, [anyRunning]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden) setListTick((t) => t + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
 
   useEffect(() => {
@@ -324,7 +340,7 @@ export function RunBar({ sessionId, steps, onNotice }: Props) {
   }
 
   return null;
-}
+});
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (

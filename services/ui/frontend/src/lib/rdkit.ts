@@ -8,6 +8,12 @@ import scriptUrl from "@rdkit/rdkit/dist/RDKit_minimal.js?url";
 import wasmUrl from "@rdkit/rdkit/dist/RDKit_minimal.wasm?url";
 
 let loading: Promise<RDKitModule> | null = null;
+let loaded: RDKitModule | null = null;
+
+/** The module if it has already loaded, without starting a download. */
+export function loadedRDKit(): RDKitModule | null {
+  return loaded;
+}
 
 /**
  * The RDKit module, loaded once for the whole app.
@@ -23,6 +29,7 @@ export function loadRDKit(): Promise<RDKitModule> {
         .initRDKitModule({ locateFile: () => wasmUrl })
         .then((module) => {
           module.prefer_coordgen(true);
+          loaded = module;
           resolve(module);
         }, reject);
     if (typeof window.initRDKitModule === "function") {
@@ -42,6 +49,33 @@ export function loadRDKit(): Promise<RDKitModule> {
   });
   return loading;
 }
+
+/** A map that forgets its least recently used entry beyond *size* entries. */
+class Lru<V> {
+  private readonly entries = new Map<string, V>();
+  private readonly size: number;
+
+  constructor(size: number) {
+    this.size = size;
+  }
+
+  get(key: string, make: () => V): V {
+    if (this.entries.has(key)) {
+      const value = this.entries.get(key) as V;
+      this.entries.delete(key);
+      this.entries.set(key, value);
+      return value;
+    }
+    const value = make();
+    this.entries.set(key, value);
+    if (this.entries.size > this.size) this.entries.delete(this.entries.keys().next().value as string);
+    return value;
+  }
+}
+
+/** Drawings are 5 to 20 kB of SVG each, enough for the molecules on screen in every panel. */
+const drawings = new Lru<string | null>(200);
+const computed = new Lru<Descriptors | null>(2000);
 
 /** Run *read* on a parsed molecule and free it afterwards. Null for invalid SMILES. */
 export function withMol<T>(rdkit: RDKitModule, smiles: string, read: (mol: JSMol) => T): T | null {
@@ -73,6 +107,11 @@ export interface DepictOptions {
  * surface show through instead.
  */
 export function depict(rdkit: RDKitModule, smiles: string, options: DepictOptions): string | null {
+  const key = `${smiles} ${options.width}x${options.height} ${options.dark ? "d" : "l"} ${options.atoms?.join(",") ?? ""}`;
+  return drawings.get(key, () => draw(rdkit, smiles, options));
+}
+
+function draw(rdkit: RDKitModule, smiles: string, options: DepictOptions): string | null {
   return withMol(rdkit, smiles, (mol) => {
     const details: Record<string, unknown> = {
       width: options.width,
@@ -118,7 +157,12 @@ export interface Descriptors {
   heavyAtoms: number;
 }
 
+/** The descriptors of *smiles*, remembered per SMILES; callers must not modify the result. */
 export function descriptors(rdkit: RDKitModule, smiles: string): Descriptors | null {
+  return computed.get(smiles, () => compute(rdkit, smiles));
+}
+
+function compute(rdkit: RDKitModule, smiles: string): Descriptors | null {
   return withMol(rdkit, smiles, (mol) => {
     const all = JSON.parse(mol.get_descriptors()) as Record<string, number>;
     return {

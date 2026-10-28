@@ -70,6 +70,11 @@ COFACTORS: frozenset[str] = frozenset({
 
 MIN_LIGAND_HEAVY_ATOMS = 6
 MAX_LIGAND_HEAVY_ATOMS = 200  # small molecule guardrail
+# A modified residue inside a chain (PTR, SEP, KCX ...) is part of the
+# receptor; only one this large (Trp has 14) carries a fused ligand, e.g.
+# a covalent inhibitor deposited as one residue with its cysteine (CY0).
+MIN_ADDUCT_HEAVY_ATOMS = 20
+PEPTIDE_BOND_MAX = 1.75
 
 PROTEIN_BACKBONE = frozenset({"N", "CA", "C", "O", "OXT", "H", "HA", "HN"})
 # nucleic backbone: phosphate + sugar
@@ -85,6 +90,9 @@ class LigandSelection:
     resname: str
     resnum: int
     n_heavy: int
+    # Peptide-bonded to its neighbours in the chain: a modified residue that
+    # carries the ligand rather than a separate HETATM group.
+    in_polymer: bool = False
 
 
 def _resname(res: Any) -> str:
@@ -209,8 +217,28 @@ class LoadedStructure:
             out_of_range = heavy < MIN_LIGAND_HEAVY_ATOMS or heavy > MAX_LIGAND_HEAVY_ATOMS
             if out_of_range and auto:
                 continue
-            out.append(LigandSelection(chain=ch, resname=rn, resnum=int(res.resid), n_heavy=heavy))
+            in_polymer = rn not in STANDARD_AA and self._peptide_linked(res)
+            if in_polymer and auto and heavy < MIN_ADDUCT_HEAVY_ATOMS:
+                continue
+            out.append(LigandSelection(chain=ch, resname=rn, resnum=int(res.resid), n_heavy=heavy,
+                                       in_polymer=in_polymer))
         return self._rank_by_contacts(out)
+
+    def _peptide_linked(self, res: Any) -> bool:
+        """True when *res* has a backbone peptide-bonded to another residue."""
+        atoms = res.atoms
+        own_n = atoms.select_atoms("name N")
+        own_c = atoms.select_atoms("name C")
+        if not own_n.n_atoms or not own_c.n_atoms or not atoms.select_atoms("name CA").n_atoms:
+            return False
+        try:
+            partners = self.u.select_atoms(
+                f"(name C and around {PEPTIDE_BOND_MAX} group n) or (name N and around {PEPTIDE_BOND_MAX} group c)",
+                n=own_n, c=own_c,
+            )
+        except Exception:
+            return False
+        return bool((partners - atoms).n_atoms)
 
     def _rank_by_contacts(self, sels: list[LigandSelection]) -> list[LigandSelection]:
         """Sort ligand candidates best-first.
@@ -227,8 +255,10 @@ class LoadedStructure:
         scored: list[tuple[int, int, int, LigandSelection]] = []
         for s in sels:
             ref = f"resname {s.resname} and resid {s.resnum}"
+            # The chain neighbours of a fused residue touch it through the peptide bonds.
+            neighbours = f" and not resid {s.resnum - 1} {s.resnum + 1}" if s.in_polymer else ""
             try:
-                n_contacts = int(self.u.select_atoms(f"(protein or nucleic) and around 4.5 ({ref})").n_atoms)
+                n_contacts = int(self.u.select_atoms(f"(protein or nucleic){neighbours} and around 4.5 ({ref})").n_atoms)
             except Exception:
                 n_contacts = 0
             try:

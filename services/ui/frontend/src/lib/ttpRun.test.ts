@@ -5,15 +5,18 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RUN,
   RUN_KEY,
+  addSeeds,
   loadRunSettings,
   modelLabel,
   mol2molChoices,
   parseMol2MolModels,
   rememberRun,
+  removeSeed,
   runCost,
   runProblems,
   runRequest,
   saveRunSettings,
+  seedChoices,
   seedList,
   ttpRequest,
   withOfferedModel,
@@ -25,28 +28,44 @@ const memory = () => {
 };
 
 describe("run settings", () => {
-  it("remembers the last settings and drops bad values", () => {
+  it("remembers the last settings, but never the prior, and drops bad values", () => {
     const store = memory();
     expect(loadRunSettings(store)).toEqual(DEFAULT_RUN);
+    expect(DEFAULT_RUN.prior).toBeNull();
     saveRunSettings({ enabled: true, maxSteps: 100, batchSize: 32, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" }, store);
-    expect(loadRunSettings(store)).toEqual({ enabled: true, maxSteps: 100, batchSize: 32, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" });
+    expect(loadRunSettings(store)).toEqual({ enabled: true, maxSteps: 100, batchSize: 32, prior: null, model: ".m2m_high", seeds: "CCO" });
     store.setItem(RUN_KEY, JSON.stringify({ maxSteps: -3, batchSize: 1.5, prior: "x", model: "/etc/passwd" }));
     expect(loadRunSettings(store)).toEqual(DEFAULT_RUN);
     store.setItem(RUN_KEY, "{oops");
     expect(loadRunSettings(store)).toEqual(DEFAULT_RUN);
   });
 
-  it("checks steps, batch size and seeds", () => {
-    expect(runProblems(DEFAULT_RUN)).toEqual([]);
-    expect(runProblems({ ...DEFAULT_RUN, maxSteps: 0 })[0]).toMatch(/Steps/);
-    expect(runProblems({ ...DEFAULT_RUN, batchSize: 10_000 })[0]).toMatch(/Batch/);
-    expect(runProblems({ ...DEFAULT_RUN, prior: "mol2mol" })[0]).toMatch(/seed/);
+  it("checks the prior, steps, batch size and seeds", () => {
+    expect(runProblems(DEFAULT_RUN)).toEqual([expect.stringMatching(/from scratch or analogues/)]);
+    expect(runProblems({ ...DEFAULT_RUN, prior: "reinvent" })).toEqual([]);
+    expect(runProblems({ ...DEFAULT_RUN, prior: "reinvent", maxSteps: 0 })[0]).toMatch(/Steps/);
+    expect(runProblems({ ...DEFAULT_RUN, prior: "reinvent", batchSize: 10_000 })[0]).toMatch(/Batch/);
+    expect(runProblems({ ...DEFAULT_RUN, prior: "mol2mol" })).toEqual(["Mol2Mol needs at least one seed SMILES."]);
+    expect(runProblems({ ...DEFAULT_RUN, prior: "mol2mol", seeds: "CCO" })).toEqual([]);
+  });
+
+  it("adds and removes seeds without duplicates", () => {
+    expect(addSeeds("CCO\nCCN", ["CCN", " c1ccccc1 ", "c1ccccc1", ""])).toBe("CCO\nCCN\nc1ccccc1");
+    expect(addSeeds("", ["CCO"])).toBe("CCO");
+    expect(removeSeed("CCO, CCN c1ccccc1", "CCN")).toBe("CCO\nc1ccccc1");
+  });
+
+  it("offers each molecule of the conversation once", () => {
+    expect(seedChoices([{ smiles: "CCO", label: "ethanol" }], undefined, [{ smiles: " CCO " }, { smiles: "CCN" }, { smiles: " " }])).toEqual([
+      { smiles: "CCO", label: "ethanol" },
+      { smiles: "CCN" },
+    ]);
   });
 
   it("writes the chat request, with the run only when asked", () => {
     const ttp = { id: "sol", name: "Solubility" };
     expect(ttpRequest(ttp, DEFAULT_RUN)).toBe('Use the TTP "Solubility" (sol)');
-    expect(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true })).toBe('Run REINVENT on the TTP "Solubility" (sol): Reinvent (de novo) (.reinvent), 300 steps, batch size 16.');
+    expect(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true, prior: "reinvent" })).toBe('Run REINVENT on the TTP "Solubility" (sol): Reinvent (de novo) (.reinvent), 300 steps, batch size 16.');
     expect(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true, prior: "mol2mol", seeds: "CCO\n c1ccccc1 ,CCN" })).toBe(
       'Run REINVENT on the TTP "Solubility" (sol): Mol2Mol medium similarity (.m2m_medium) from CCO c1ccccc1 CCN, 300 steps, batch size 16.',
     );
@@ -55,7 +74,7 @@ describe("run settings", () => {
 
   it("asks for a run on a stored TTP whatever the builder switch says", () => {
     const ttp = { id: "sol", name: "Solubility" };
-    expect(runRequest(ttp, DEFAULT_RUN)).toBe(ttpRequest(ttp, { ...DEFAULT_RUN, enabled: true }));
+    expect(runRequest(ttp, { ...DEFAULT_RUN, prior: "reinvent" })).toBe(ttpRequest(ttp, { ...DEFAULT_RUN, prior: "reinvent", enabled: true }));
     expect(runRequest(ttp, { ...DEFAULT_RUN, prior: "mol2mol", model: ".m2m_high", seeds: "CCO" })).toBe(
       'Run REINVENT on the TTP "Solubility" (sol): Mol2Mol high similarity (.m2m_high) from CCO, 300 steps, batch size 16.',
     );

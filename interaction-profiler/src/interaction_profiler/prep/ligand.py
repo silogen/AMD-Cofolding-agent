@@ -332,8 +332,15 @@ def prepare_ligand_from_structure(
     ag: Any,
     template_smiles: str | None = None,
     ph: float = 7.4,
+    neutral_atoms: frozenset[str] | tuple = (),
 ) -> LigandPrep:
-    """Build a chemistry-correct, hydrogenated ligand Mol from structure coords."""
+    """Build a chemistry-correct, hydrogenated ligand Mol from structure coords.
+
+    Without a template, bonds are perceived from geometry, using the
+    hydrogens of *ag* when it has them. ``neutral_atoms`` names atoms whose
+    perceived formal charge is dropped: the backbone of a residue cut out
+    of a chain, whose open peptide bonds read as charges.
+    """
     from rdkit import Chem
     from rdkit.Chem import AllChem
 
@@ -388,7 +395,10 @@ def prepare_ligand_from_structure(
                 prep.warnings.append(f"template bond assignment failed: {last_exc}")
 
     # Fallback: perceive bonds from geometry, trying a range of net charges.
-    mol = _perceive_bonds(lig, prep)
+    hydrogenated = raw if any(a.GetAtomicNum() == 1 for a in raw.GetAtoms()) else None
+    mol = _perceive_bonds(lig, prep, hydrogenated=hydrogenated)
+    if mol is not None and neutral_atoms:
+        mol = _neutralise(mol, neutral_atoms)
     if mol is not None:
         with contextlib.suppress(Exception):
             mol = Chem.AddHs(mol, addCoords=True)
@@ -402,7 +412,40 @@ def prepare_ligand_from_structure(
     return prep
 
 
-def _perceive_bonds(mol: Any, prep: LigandPrep) -> Any | None:
+_CHARGES = (0, -1, 1, -2, 2, -3, 3)
+
+
+def _neutralise(mol: Any, names: frozenset[str] | tuple) -> Any:
+    """Drop the formal charge of the atoms called *names*, filling valences with H."""
+    from rdkit import Chem
+
+    wanted = {n.upper() for n in names}
+    out = Chem.RWMol(mol)
+    changed = False
+    for atom in out.GetAtoms():
+        info = atom.GetPDBResidueInfo()
+        if info is None or info.GetName().strip().upper() not in wanted or not atom.GetFormalCharge():
+            continue
+        atom.SetFormalCharge(0)
+        atom.SetNoImplicit(False)
+        atom.SetNumExplicitHs(0)
+        changed = True
+    if not changed:
+        return mol
+    try:
+        Chem.SanitizeMol(out)
+        return out.GetMol()
+    except Exception:
+        return mol
+
+
+def _perceive_bonds(mol: Any, prep: LigandPrep, hydrogenated: Any | None = None) -> Any | None:
+    """Bond orders from geometry, on the heavy-atom *mol*.
+
+    Perception needs every hydrogen (a heavy atom's open valences are what
+    say where the double bonds go), so *hydrogenated*, the same atoms with
+    their hydrogens, is tried first and its hydrogens then removed.
+    """
     from rdkit import Chem
 
     try:
@@ -415,7 +458,21 @@ def _perceive_bonds(mol: Any, prep: LigandPrep) -> Any | None:
         except Exception:
             return None
 
-    for charge in (0, -1, 1, -2, 2, -3, 3):
+    if hydrogenated is not None:
+        for charge in _CHARGES:
+            m = Chem.Mol(hydrogenated)
+            try:
+                rdDetermineBonds.DetermineBonds(m, charge=charge)
+                Chem.SanitizeMol(m)
+                heavy = Chem.RemoveHs(m)
+            except Exception:
+                continue
+            if heavy.GetNumAtoms() != mol.GetNumAtoms():
+                break
+            prep.bond_assignment = f"perceived(charge={charge})"
+            return heavy
+
+    for charge in _CHARGES:
         m = Chem.Mol(mol)
         try:
             rdDetermineBonds.DetermineBonds(m, charge=charge)

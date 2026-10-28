@@ -22,6 +22,8 @@ From: {{ BASE_IMAGE }}
     # Build context is the dd_agentic/ root (apptainer build is invoked there).
     boltz2 /app/boltz
     services/boltz2/app.py /app/wrapper/app.py
+    services/boltz2/boltz_worker.py /app/wrapper/boltz_worker.py
+    services/boltz2/worker_pool.py /app/wrapper/worker_pool.py
     services/boltz2/requirements.txt /app/wrapper/requirements.txt
 
 %post

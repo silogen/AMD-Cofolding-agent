@@ -22,6 +22,10 @@
 #   --data-dir <path>       Host data dir to bind (default: ./data).
 #   --reinvent-gpu <id>     GPU index for the agent (default: $REINVENT_GPU or 0).
 #   --boltz-gpu <id>        GPU index for boltz    (default: $BOLTZ_GPU or 1).
+#   --boltz-gpus <ids>      Comma-separated GPUs for boltz, e.g. 5,6,7; overrides
+#                           --boltz-gpu (default: $BOLTZ_GPUS, else the one GPU).
+#                           Boltz runs $BOLTZ_WORKERS_PER_GPU (default 2) resident
+#                           workers on each.
 #   --skip-agent            Start + health-gate services only, then wait (Ctrl-C).
 #   --web                   Run the dd-web gateway for the browser UI instead of
 #                           the terminal agent ($DD_WEB_HOST:$DD_WEB_PORT,
@@ -44,6 +48,7 @@ VENDOR=""
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data}"
 REINVENT_GPU="${REINVENT_GPU:-0}"
 BOLTZ_GPU="${BOLTZ_GPU:-1}"
+BOLTZ_GPUS="${BOLTZ_GPUS:-}"
 SKIP_AGENT=0
 WEB=0
 DRY_RUN=0
@@ -56,11 +61,12 @@ while [ $# -gt 0 ]; do
         --data-dir)         DATA_DIR="$2"; shift 2 ;;
         --reinvent-gpu)     REINVENT_GPU="$2"; shift 2 ;;
         --boltz-gpu)        BOLTZ_GPU="$2"; shift 2 ;;
+        --boltz-gpus)       BOLTZ_GPUS="$2"; shift 2 ;;
         --skip-agent)       SKIP_AGENT=1; shift ;;
         --web)              WEB=1; shift ;;
         --dry-run)          DRY_RUN=1; shift ;;
         --)                 shift; AGENT_ARGS=("$@"); break ;;
-        -h|--help)          sed -n '5,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)          sed -n '5,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)                  echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -71,6 +77,7 @@ case "${VENDOR}" in
     *)      echo "error: --vendor must be amd or nvidia" >&2; exit 1 ;;
 esac
 GPU_FLAG="${APPTAINER_GPU_FLAG-${GPU_FLAG}}"
+BOLTZ_GPUS="${BOLTZ_GPUS:-${BOLTZ_GPU}}"
 
 run() { echo "+ $*"; [ "${DRY_RUN}" -eq 0 ] && "$@"; return 0; }
 
@@ -163,7 +170,7 @@ wait_health() {
 
 echo "Vendor    : ${VENDOR} (${GPU_FLAG})"
 echo "Data dir  : ${DATA_DIR}"
-echo "GPUs      : agent=${REINVENT_GPU}  boltz=${BOLTZ_GPU}"
+echo "GPUs      : agent=${REINVENT_GPU}  boltz=${BOLTZ_GPUS}"
 echo ""
 
 # --- Start service instances -----------------------------------------
@@ -179,11 +186,24 @@ for row in "${INSTANCES[@]}"; do
     opts=(--env "PORT=${port}")
     [ "${share}" = "shared" ] && opts+=(--bind "${SHARED_BIND}")
     # boltz needs a writable /cache (read-only container root otherwise).
-    [ "${name}" = "boltz" ] && opts+=(--bind "${BOLTZ_CACHE_BIND}")
+    # The image bakes only app.py; the worker-pool modules come from this
+    # checkout, so the whole wrapper dir is bound over the baked copy.
+    if [ "${name}" = "boltz" ]; then
+        opts+=(--bind "${BOLTZ_CACHE_BIND}")
+        opts+=(--bind "${ROOT_DIR}/services/boltz2:/app/wrapper")
+        if [ -n "${BOLTZ_WORKERS_PER_GPU:-}" ]; then
+            opts+=(--env "BOLTZ_WORKERS_PER_GPU=${BOLTZ_WORKERS_PER_GPU}")
+        fi
+    fi
+    # The image installs the profiler package at build time; bind the checkout
+    # over it so profiler fixes deploy without a rebuild.
+    if [ "${name}" = "interaction-profiler" ]; then
+        opts+=(--bind "${ROOT_DIR}/interaction-profiler/src/interaction_profiler:/opt/conda/lib/python3.11/site-packages/interaction_profiler")
+    fi
     if [ "${kind}" = "gpu" ]; then
         opts+=(${GPU_FLAG})
         # shellcheck disable=SC2046
-        opts+=($(gpu_env_flag "${BOLTZ_GPU}"))
+        opts+=($(gpu_env_flag "${BOLTZ_GPUS}"))
     fi
 
     # Reusing a healthy instance lets the gateway be restarted with new settings

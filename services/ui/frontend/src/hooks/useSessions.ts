@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { SessionSummary } from "../types/api";
-import { deleteSession, listSessions, renameSession } from "../lib/api";
+import { ApiError, deleteSession, listSessions, renameSession } from "../lib/api";
 
 /** How often the list is refreshed, so turns started in other tabs show up. */
 const POLL_MS = 15000;
@@ -32,8 +32,17 @@ export function useSessions(): SessionsState {
 
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(refresh, POLL_MS);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, POLL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [refresh]);
 
   const rename = useCallback(
@@ -45,7 +54,10 @@ export function useSessions(): SessionsState {
   );
 
   const remove = useCallback(async (id: string) => {
-    await deleteSession(id);
+    // A purge from the data view, or another tab, may have deleted it already.
+    await deleteSession(id).catch((reason: unknown) => {
+      if (!(reason instanceof ApiError && reason.status === 404)) throw reason;
+    });
     setSessions((previous) => previous.filter((s) => s.id !== id));
   }, []);
 

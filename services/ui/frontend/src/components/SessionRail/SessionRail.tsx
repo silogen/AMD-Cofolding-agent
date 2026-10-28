@@ -6,6 +6,7 @@ import type { SessionSummary } from "../../types/api";
 import type { AgentInfo } from "../../hooks/useSession";
 import { download, sessionEvents } from "../../lib/api";
 import { downloadReport, printReport, sessionToMarkdown, slug } from "../../lib/exportSession";
+import { SessionDataDialog } from "../SessionData/SessionDataDialog";
 
 interface Props {
   sessions: SessionSummary[];
@@ -57,6 +58,7 @@ function timeLabel(iso: string): string {
  */
 export function SessionRail({ sessions, activeId, error, agent, onSelect, onNew, onRename, onDelete, onClose }: Props) {
   const [query, setQuery] = useState("");
+  const [dataOf, setDataOf] = useState<SessionSummary | null>(null);
 
   const groups = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -130,6 +132,7 @@ export function SessionRail({ sessions, activeId, error, agent, onSelect, onNew,
                   onSelect={() => onSelect(session.id)}
                   onRename={(title) => onRename(session.id, title)}
                   onDelete={() => onDelete(session.id)}
+                  onData={() => setDataOf(session)}
                 />
               ))}
             </ul>
@@ -138,6 +141,15 @@ export function SessionRail({ sessions, activeId, error, agent, onSelect, onNew,
       </div>
 
       {!agent && <footer className="border-subtle text-faint shrink-0 border-t px-4 py-3 text-[10px]">Starting the agent…</footer>}
+
+      {dataOf && (
+        <SessionDataDialog
+          key={dataOf.id}
+          session={sessions.find((s) => s.id === dataOf.id) ?? dataOf}
+          onClose={() => setDataOf(null)}
+          onDelete={() => onDelete(dataOf.id)}
+        />
+      )}
     </nav>
   );
 }
@@ -160,12 +172,14 @@ function SessionItem({
   onSelect,
   onRename,
   onDelete,
+  onData,
 }: {
   session: SessionSummary;
   active: boolean;
   onSelect: () => void;
   onRename: (title: string) => Promise<void>;
   onDelete: () => Promise<void>;
+  onData: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
@@ -302,6 +316,14 @@ function SessionItem({
           </MenuItem>
           <MenuItem onClick={() => exportAs("md")}>Export as Markdown</MenuItem>
           <MenuItem onClick={() => exportAs("json")}>Export as JSON</MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenu(false);
+              onData();
+            }}
+          >
+            Data and cleanup…
+          </MenuItem>
           <MenuItem onClick={remove} danger disabled={session.busy}>
             {session.busy ? "Delete (stop it first)" : "Delete"}
           </MenuItem>

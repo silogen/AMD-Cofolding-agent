@@ -187,7 +187,10 @@ export function displayNumber(numbering: Numbering | null, chain: string | null 
   return toUniprot(numbering, chain, resnum) ?? resnum;
 }
 
-/** "LEU94", with the file number when it differs: { label: "LEU94", file: 51 }. */
+/**
+ * "LEU94", with the file number when it differs: { label: "LEU94", file: 51 }.
+ * A name ending in a digit is kept apart from the number: "CY0 797", not "CY0797".
+ */
 export function residueLabel(
   numbering: Numbering | null,
   resname: string,
@@ -195,7 +198,8 @@ export function residueLabel(
   resnum: number,
 ): { label: string; file: number | null } {
   const shown = displayNumber(numbering, chain, resnum);
-  return { label: `${resname}${shown}`, file: shown === resnum ? null : resnum };
+  const label = /\d$/.test(resname) ? `${resname} ${shown}` : `${resname}${shown}`;
+  return { label, file: shown === resnum ? null : resnum };
 }
 
 /**

@@ -93,6 +93,28 @@ describe("buildNumbering", () => {
     const n = buildNumbering(list, BRD4);
     expect(displayNumber(n, "B", 1)).toBe(1);
   });
+
+  it("maps around a modified residue in the chain", () => {
+    const list = residues(BRD4.slice(43, 168));
+    list[50] = { ...list[50], resname: "CY0" };
+    const n = buildNumbering(list, BRD4);
+    expect(displayNumber(n, "A", 50)).toBe(93);
+    expect(displayNumber(n, "A", 52)).toBe(95);
+    expect(residueLabel(n, "CY0", "A", 51)).toEqual({ label: "CY0 51", file: null });
+  });
+});
+
+describe("residueLabel", () => {
+  it("keeps a name ending in a digit apart from the number", () => {
+    expect(residueLabel(null, "CY0", "A", 797)).toEqual({ label: "CY0 797", file: null });
+    expect(residueLabel(null, "MI1", "A", 1)).toEqual({ label: "MI1 1", file: null });
+    expect(residueLabel(null, "PTR", "A", 1034)).toEqual({ label: "PTR1034", file: null });
+  });
+
+  it("shows the UniProt number with a spaced name", () => {
+    const n = buildNumbering(residues(BRD4.slice(43, 168)), BRD4);
+    expect(residueLabel(n, "LIG1", "A", 51)).toEqual({ label: "LIG1 94", file: 51 });
+  });
 });
 
 describe("resolveResidue", () => {

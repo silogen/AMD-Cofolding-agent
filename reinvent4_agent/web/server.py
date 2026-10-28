@@ -20,6 +20,8 @@ Endpoints
 ``PATCH  /api/sessions/{id}``                rename one.
 ``DELETE /api/sessions/{id}``                delete one.
 ``GET    /api/sessions/{id}/events``         every event of one, for export.
+``GET    /api/sessions/{id}/data``           what one produced or used, with sizes.
+``POST   /api/sessions/{id}/purge``          delete one with the data picked from that list.
 ``POST   /api/tools/{name}``                 call one MCP tool without the LLM.
 ``GET    /api/jobs/{job_id}/files/{name}``   a results, log or config file of a job.
 ``POST   /api/uploads?session=&name=``       store a file the user brought (raw body).
@@ -52,6 +54,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from reinvent4_agent.web import artifacts as shared_files
 from reinvent4_agent.web.artifacts import extract_panels, parse_tool_result, resolve_artifact
 from reinvent4_agent.web import models as chat_models
+from reinvent4_agent.web import session_data
 from reinvent4_agent.web.events import WebSocketEventHandler
 from reinvent4_agent.web.sessions import SessionManager, SessionStore, valid_session_id
 
@@ -518,6 +521,57 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     async def session_events(session_id: str) -> dict[str, Any]:
         live = _session_or_404(session_id)
         return {"session": live.summary(), "events": live.events}
+
+    # -- what a conversation produced, and removing it with the conversation --
+
+    def _data_roots() -> session_data.Roots:
+        return session_data.Roots(shared=shared_files.SHARED_ROOT, jobs=jobs_dir)
+
+    @app.get("/api/sessions/{session_id}/data")
+    async def session_data_view(session_id: str) -> dict[str, Any]:
+        live = _session_or_404(session_id)
+        events = list(live.events)
+        roots = _data_roots()
+        store_root = sessions.store.root
+
+        def build() -> dict[str, Any]:
+            others = session_data.stored_references(store_root, roots.shared, session_id)
+            record = session_data.directory_bytes(store_root / session_id)
+            return session_data.inventory(session_id, events, roots, others, record)
+
+        body = await asyncio.to_thread(build)
+        body["busy"] = live.busy
+        return body
+
+    @app.post("/api/sessions/{session_id}/purge")
+    async def purge_session(session_id: str, request: Request) -> dict[str, Any]:
+        """Delete a conversation and the data picked from its data view.
+
+        The conversation goes first, under the same rule as ``DELETE``: a
+        running turn refuses it and then nothing at all is removed.
+        """
+        body = await _json_body(request)
+        items = body.get("items", [])
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            raise HTTPException(status_code=422, detail="items must be a list of item ids")
+        live = _session_or_404(session_id)
+        events = list(live.events)
+        roots = _data_roots()
+        store_root = sessions.store.root
+        record = session_data.directory_bytes(store_root / session_id)
+        if not sessions.delete(session_id):
+            raise HTTPException(status_code=409, detail="Stop the running turn before deleting this conversation")
+
+        def run() -> dict[str, Any]:
+            others = session_data.stored_references(store_root, roots.shared, session_id)
+            return session_data.purge(session_id, events, roots, others, items)
+
+        try:
+            summary = await asyncio.to_thread(run)
+        except Exception as exc:
+            logger.exception("Could not delete the data of session %s", session_id)
+            summary = {"removed": [], "kept": [], "freedBytes": 0, "error": str(exc)}
+        return {"deleted": session_id, "conversationBytes": record, **summary}
 
     # -- direct tool calls and job files --------------------------------------
 

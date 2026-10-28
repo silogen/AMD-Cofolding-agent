@@ -6,7 +6,7 @@ import type { Theme } from "../../hooks/useTheme";
 import { useRDKit } from "../../hooks/useRDKit";
 import { download } from "../../lib/api";
 import type { Artifacts } from "../../lib/artifacts";
-import { buildCandidates } from "../../lib/candidates";
+import { candidatesOf } from "../../lib/candidates";
 import { fileName, toCsv } from "../../lib/csv";
 import { descriptors, withMol } from "../../lib/rdkit";
 import {
@@ -45,10 +45,11 @@ const SHOWN_SCORES = 3;
 /** The starred molecules of the conversation, with the best scores known for each. */
 export function ShortlistPanel({ artifacts, theme, sessionId, onOpenMolecule, onAsk }: Props) {
   const entries = useShortlist(sessionId ?? "new");
-  const { rdkit } = useRDKit();
+  const { rdkit } = useRDKit(entries.length > 0);
   const [seeding, setSeeding] = useState(false);
   const [note, setNote] = useState<string | null>(null);
-  const candidates = useMemo(() => new Map(buildCandidates(artifacts).map((c) => [c.smiles, c])), [artifacts]);
+  const list = candidatesOf(artifacts);
+  const candidates = useMemo(() => new Map(list.map((c) => [c.smiles, c])), [list]);
   const sessionTtpId = useMemo(() => latestTtp(toolEvents(artifacts.steps)).id, [artifacts.steps]);
 
   const known = useMemo<KnownValues>(() => {

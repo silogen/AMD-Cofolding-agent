@@ -43,7 +43,7 @@ from interaction_profiler.prep import (
     prepare_ligand_from_structure,
     prepare_receptor,
 )
-from interaction_profiler.prep.ligand import formula_of_smiles, validate_smiles
+from interaction_profiler.prep.ligand import _heavy_atom_names, formula_of_smiles, validate_smiles
 from interaction_profiler.schemas import (
     BatchProvenance,
     BatchResult,
@@ -80,25 +80,47 @@ def _com(ag: Any) -> list[float] | None:
         return None
 
 
-def _build_pocket(prepared_path: str, sel: LigandSelection, radius: float):
-    """Return ``(pocket_atomgroup, metal_sites, water_sites)``.
+def _find_ligand(u: Any, sel: LigandSelection, near: list[float] | None) -> Any:
+    """The ligand *sel* in another file of the same complex.
+
+    Writers disagree on chain ids: OpenMM writes an mmCIF ligand under its
+    ``label_asym_id`` (B for MI1 in 3EYG) where MDAnalysis read the
+    ``auth_asym_id`` (A). Without the chain, the copy nearest *near* wins.
+    """
+    import numpy as np
+
+    ag = u.select_atoms(_ligand_selection_str(sel))
+    if ag.n_atoms:
+        return ag
+    ag = u.select_atoms(f"resname {sel.resname} and resid {sel.resnum}")
+    if len(ag.residues) > 1 and near is not None:
+        target = np.asarray(near, dtype=float)
+        ag = min(ag.residues, key=lambda r: float(np.linalg.norm(r.atoms.positions.mean(axis=0) - target))).atoms
+    return ag
+
+
+def _build_pocket(prepared_path: str, sel: LigandSelection, radius: float, near: list[float] | None = None):
+    """Return ``(pocket_atomgroup, metal_sites, water_sites, ligand_atomgroup)``.
 
     The pocket is the protein/nucleic residues within ``radius`` of the
     ligand (kept as an MDAnalysis AtomGroup, with explicit Hs from the
     prepared structure). Metals and waters are returned as explicit
-    coordinate sites.
+    coordinate sites. The ligand is returned as found in the prepared file,
+    with the hydrogens PDBFixer gave it, or None when it is not there.
     """
     import MDAnalysis as mda
 
     u = mda.Universe(prepared_path)
-    lig_str = _ligand_selection_str(sel)
-    pocket = u.select_atoms(f"(protein or nucleic) and byres (around {radius} ({lig_str}))")
+    lig = _find_ligand(u, sel, near)
+    if not lig.n_atoms:
+        return None, [], [], None
+    pocket = u.select_atoms(f"((protein or nucleic) and byres (around {radius} group lig)) and not group lig", lig=lig)
     pocket_ag = pocket if pocket.n_atoms else None
 
     metals: list[MetalSite] = []
     metal_names = " ".join(sorted(METALS))
     with contextlib.suppress(Exception):
-        mag = u.select_atoms(f"(resname {metal_names}) and (around {radius} ({lig_str}))")
+        mag = u.select_atoms(f"(resname {metal_names}) and (around {radius} group lig)", lig=lig)
         for a in mag.atoms:
             metals.append(MetalSite(xyz=a.position.astype("float64"), meta=_atom_meta_mda(a)))
 
@@ -107,12 +129,24 @@ def _build_pocket(prepared_path: str, sel: LigandSelection, radius: float):
     with contextlib.suppress(Exception):
         wag = u.select_atoms(
             f"(resname {water_names}) and (name O or name OW or name OH2 or element O) "
-            f"and byres (around {radius} ({lig_str}))"
+            f"and byres (around {radius} group lig)",
+            lig=lig,
         )
         for a in wag.atoms:
             waters.append(WaterSite(xyz=a.position.astype("float64"), meta=_atom_meta_mda(a)))
 
-    return pocket_ag, metals, waters
+    return pocket_ag, metals, waters, lig
+
+
+_BACKBONE = frozenset({"N", "CA", "C", "O", "OXT"})
+
+
+def _is_chain_contact(inter: Any, sel: LigandSelection) -> bool:
+    """A contact of a fused residue that is the chain itself, not its ligand."""
+    if (inter.ligand_atom_name or "").strip().upper() in _BACKBONE:
+        return True
+    neighbour = inter.receptor_chain == sel.chain and inter.receptor_resnum in (sel.resnum - 1, sel.resnum + 1)
+    return neighbour and (inter.receptor_atom_name or "").strip().upper() in _BACKBONE
 
 
 def _atom_meta_mda(a: Any) -> dict:
@@ -344,12 +378,25 @@ def _profile_selection(
 ) -> MoleculeResult:
     ph = md.ph
     lig_ag = _select_ligand_ag(struct.u, sel)
-    lig_prep = prepare_ligand_from_structure(lig_ag, template_smiles=inp.smiles, ph=ph)
+    pocket_ag, metals, waters, prepared_lig = _build_pocket(prepared_path, sel, radius, near=_com(lig_ag))
+    # Deposited files carry no ligand hydrogens and bond orders cannot be
+    # perceived from heavy atoms alone; PDBFixer's hydrogens make it possible.
+    source_ag = lig_ag
+    if not inp.smiles and prepared_lig is not None and _heavy_atom_names(prepared_lig) == _heavy_atom_names(lig_ag):
+        source_ag = prepared_lig
+    lig_prep = prepare_ligand_from_structure(
+        source_ag, template_smiles=inp.smiles, ph=ph,
+        neutral_atoms=_BACKBONE if sel.in_polymer else (),
+    )
     if lig_prep.mol is None:
         raise ValueError("ligand preparation failed")
     if not inp.smiles:
+        how = (
+            "were perceived from geometry" if lig_prep.bond_assignment.startswith("perceived")
+            else "could not be perceived (every bond read as single)"
+        )
         lig_prep.warnings.append(
-            "no SMILES template supplied: ligand bond orders were perceived from geometry "
+            f"no SMILES template supplied: ligand bond orders {how} "
             f"(bond_assignment={lig_prep.bond_assignment}); pass 'smiles' for reliable chemistry"
         )
 
@@ -357,8 +404,15 @@ def _profile_selection(
     md.ligand_smiles = lig_prep.smiles_prepared or inp.smiles
     md.ligand_com = _com(lig_ag)
 
-    pocket_ag, metals, waters = _build_pocket(prepared_path, sel, radius)
     covalent_links = parse_covalent_links(inp.structure, sel.resname)
+    if sel.in_polymer:
+        covalent_links = {link for link in covalent_links
+                          if not (link[2] == sel.chain and link[1] in (sel.resnum - 1, sel.resnum + 1))}
+        lig_prep.warnings.append(
+            f"{sel.resname} {sel.resnum} (chain {sel.chain}) is a modified residue of the chain carrying a "
+            "covalently bound ligand: the ligand and its attachment residue are one residue, so the covalent "
+            f"bond is inside {sel.resname} and contacts of its backbone with the chain are not reported"
+        )
 
     interactions = []
     if pocket_ag is not None:
@@ -366,8 +420,15 @@ def _profile_selection(
             lig_prep.mol, lig_prep.atom_names, pocket_ag,
             metals=metals, waters=waters, covalent_links=covalent_links, use_gpu=use_gpu,
         )
+        if sel.in_polymer:
+            interactions = [i for i in interactions if not _is_chain_contact(i, sel)]
+    elif prepared_lig is None:
+        lig_prep.warnings.append(
+            f"pocket could not be built: {sel.resname} {sel.resnum} was not found in the prepared receptor; "
+            "no interactions computed"
+        )
     else:
-        lig_prep.warnings.append("pocket could not be built; no interactions computed")
+        lig_prep.warnings.append(f"pocket could not be built: no receptor atoms within {radius} A; no interactions computed")
 
     n_detected = len(interactions)
     cap = _effective_cap(max_interactions, comp.n_heavy_atoms)

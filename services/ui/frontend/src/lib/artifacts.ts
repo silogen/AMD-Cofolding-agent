@@ -129,6 +129,30 @@ export function collectArtifacts(turns: Turn[]): Artifacts {
   };
 }
 
+/**
+ * *next*, keeping each list of *previous* that holds the same results, and
+ * *previous* itself when nothing changed. Most events (thinking, text) add
+ * no result, so the panels memoised on these lists skip their work.
+ */
+export function keepUnchanged(previous: Artifacts, next: Artifacts): Artifacts {
+  const kept: Artifacts = {
+    structures: sameResults(previous.structures, next.structures),
+    molecules: sameResults(previous.molecules, next.molecules),
+    tables: sameResults(previous.tables, next.tables),
+    properties: sameResults(previous.properties, next.properties),
+    interactions: sameResults(previous.interactions, next.interactions),
+    steps: previous.steps.length === next.steps.length && previous.steps.every((step, i) => step === next.steps[i]) ? previous.steps : next.steps,
+  };
+  const keys = Object.keys(kept) as (keyof Artifacts)[];
+  return keys.every((key) => kept[key] === previous[key]) ? previous : kept;
+}
+
+/** Structures made up from a contact profile are new objects on every pass, so equal keys count as the same result. */
+function sameResults<T extends Panel>(previous: Sourced<T>[], next: Sourced<T>[]): Sourced<T>[] {
+  const same = (a: Sourced<T>, b: Sourced<T>) => a.tool === b.tool && a.at === b.at && (a.item === b.item || panelKey(a.item) === panelKey(b.item));
+  return previous.length === next.length && previous.every((entry, i) => same(entry, next[i])) ? previous : next;
+}
+
 /** The run a job file belongs to, from its path: "out_6b5e3f1a686f" or "job_d0cbeb98" give the id's first 8 characters. */
 export function runOf(path: string): string | null {
   const match = /(?:^|\/)(?:out|job|batch)_([0-9a-f]{6,})/i.exec(path.replace(/\\/g, "/"));

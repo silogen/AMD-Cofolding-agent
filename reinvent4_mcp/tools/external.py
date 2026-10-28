@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -81,13 +82,17 @@ def list_shared_assets() -> dict[str, Any]:
     (.a3m/.fasta/...), and Boltz ``cofold_outputs`` (anything under a
     ``predictions/`` directory). Every returned path is expressed relative to
     ``/shared`` -- exactly the form ``profile_interactions`` and TTP
-    ``msa_path`` accept. Returns an empty (non-error) result when nothing is
-    found.
+    ``msa_path`` accept. ``uploads`` repeats the structures users brought in
+    (under ``uploads/``), newest first. The listing is a snapshot taken at
+    ``listed_at``: files uploaded later are not in an earlier listing.
+    Returns an empty (non-error) result when nothing is found.
     """
     root = _shared_root()
     result: dict[str, Any] = {
         "shared_dir": str(root),
+        "listed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "structures": [],
+        "uploads": [],
         "msas": [],
         "msa_details": [],
         "cofold_outputs": [],
@@ -96,11 +101,12 @@ def list_shared_assets() -> dict[str, Any]:
         result["note"] = f"Shared directory {root} does not exist or is empty."
         return result
 
+    uploads: list[tuple[float, str]] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         try:
-            rel = str(path.relative_to(root))
+            rel = path.relative_to(root).as_posix()
         except ValueError:
             continue
         ext = path.suffix.lower()
@@ -110,6 +116,11 @@ def list_shared_assets() -> dict[str, Any]:
             result["structures"].append(rel)
             if in_predictions:
                 result["cofold_outputs"].append(rel)
+            if rel.startswith("uploads/"):
+                try:
+                    uploads.append((path.stat().st_mtime, rel))
+                except OSError:
+                    uploads.append((0.0, rel))
         elif ext in _MSA_EXTS:
             result["msas"].append(rel)
             # Report the query-sequence length so the agent pairs the MSA with
@@ -120,8 +131,10 @@ def list_shared_assets() -> dict[str, Any]:
                 "query_length": _a3m_query_length(path),
             })
 
+    result["uploads"] = [rel for _, rel in sorted(uploads, key=lambda u: u[0], reverse=True)]
     result["counts"] = {
         "structures": len(result["structures"]),
+        "uploads": len(result["uploads"]),
         "msas": len(result["msas"]),
         "cofold_outputs": len(result["cofold_outputs"]),
     }

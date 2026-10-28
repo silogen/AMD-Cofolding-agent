@@ -99,11 +99,20 @@ export interface Objective {
   comment?: string | null;
 }
 
+/** A structure Boltz-2 cofolds against (its YAML `templates:`); a forced template needs a threshold in Å. */
+export interface TemplateConfig {
+  path: string;
+  chain_id?: string | null;
+  force?: boolean;
+  threshold?: number | null;
+}
+
 export interface TtpTarget {
   protein_sequence: string;
   pdb_id?: string | null;
   msa_path?: string | null;
   protein_pdb_path?: string | null;
+  templates?: TemplateConfig[] | null;
 }
 
 export interface Constraint {
@@ -613,6 +622,7 @@ export function slugify(name: string): string {
 }
 
 export const TTP_ID = /^[a-z0-9][a-z0-9_-]*$/;
+const TEMPLATE_FILE = /\.(cif|mmcif|pdb|ent)$/i;
 const AMINO_ACIDS = /^[ACDEFGHIKLMNPQRSTVWY]+$/;
 
 /** A pasted sequence or FASTA record as bare residues. */
@@ -743,8 +753,8 @@ export type PresetId = "cofolding" | "admet" | "druglike";
 
 export const PRESETS: { id: PresetId; label: string; hint: string }[] = [
   { id: "cofolding", label: "Cofolding", hint: "Boltz-2 affinity and PoseBusters pose checks on the target, plus drug-likeness. Needs a protein sequence." },
-  { id: "admet", label: "ADMET", hint: "Predicted logD, solubility, permeability and efflux, plus QED. No target needed." },
-  { id: "druglike", label: "Drug-likeness", hint: "Fast RDKit descriptors only: QED, weight, cLogP, TPSA, synthetic accessibility." },
+  { id: "admet", label: "ADMET", hint: "LogD, solubility, permeability, efflux" },
+  { id: "druglike", label: "Drug-likeness", hint: "QED, MW, cLogP, TPSA, synthetic accessibility" },
 ];
 
 export function presetObjectives(preset: PresetId, services: Record<string, ServiceInfo>): Objective[] {
@@ -769,6 +779,44 @@ export function presetObjectives(preset: PresetId, services: Record<string, Serv
     case "druglike":
       return [native("QED", 1), native("MolecularWeight", 0.6), native("SlogP", 0.6), native("TPSA", 0.4), native("SAScore", 0.6)];
   }
+}
+
+/** What an objective scores, whatever it is named: "native:QED", "admet:logd", "boltz:", ... */
+export function objectiveKey(o: Pick<Objective, "type" | "component" | "service" | "service_params">): string {
+  if (o.type === "native") return `native:${o.component ?? ""}`;
+  const p = o.service_params ?? {};
+  const selector = [p.target, p.endpoint, p.interaction_type].filter((v) => typeof v === "string" && v).join(":");
+  return `${o.service ?? ""}:${selector}`;
+}
+
+/** Whether every objective of a preset is in the list. */
+export function presetOn(list: Objective[], preset: PresetId, services: Record<string, ServiceInfo>): boolean {
+  const keys = new Set(list.map(objectiveKey));
+  return presetObjectives(preset, services).every((o) => keys.has(objectiveKey(o)));
+}
+
+/**
+ * The list with a preset's objectives added (those not there yet) or removed
+ * (except the ones another active preset also holds); the rest stays as it was.
+ */
+export function togglePreset(list: Objective[], preset: PresetId, services: Record<string, ServiceInfo>, on: boolean): Objective[] {
+  const items = presetObjectives(preset, services);
+  if (on) {
+    const keys = new Set(list.map(objectiveKey));
+    const taken = list.map((o) => o.name);
+    const added: Objective[] = [];
+    for (const o of items) {
+      if (keys.has(objectiveKey(o))) continue;
+      const name = uniqueName(o.name, taken);
+      taken.push(name);
+      added.push({ ...o, name });
+    }
+    return added.length ? [...list, ...added] : list;
+  }
+  const others = PRESETS.filter((p) => p.id !== preset && p.id !== "cofolding" && presetOn(list, p.id, services));
+  const kept = new Set(others.flatMap((p) => presetObjectives(p.id, services).map(objectiveKey)));
+  const drop = new Set(items.map(objectiveKey).filter((k) => !kept.has(k)));
+  return list.filter((o) => !drop.has(objectiveKey(o)));
 }
 
 /** Windows for scores that are already 0-1, used once a curve is chosen for them. */
@@ -844,10 +892,10 @@ const PREFERRED_NATIVE = ["QED", "MolecularWeight", "SlogP", "TPSA", "HBondDonor
 export function objectiveCatalogue(services: Record<string, ServiceInfo>, components: string[]): CatalogueEntry[] {
   const entries: CatalogueEntry[] = [];
   const has = (name: string) => name in services || Object.keys(services).length === 0;
-  if (has("boltz")) entries.push({ key: "boltz", group: "Structure", label: "Boltz-2 binding affinity", make: () => serviceObjective(services, "boltz") });
-  if (has("posebusters")) entries.push({ key: "posebusters", group: "Structure", label: "PoseBusters pose quality (after Boltz)", make: () => serviceObjective(services, "posebusters") });
+  if (has("boltz")) entries.push({ key: "boltz", group: "Cofolding", label: "Binding affinity", make: () => serviceObjective(services, "boltz") });
+  if (has("posebusters")) entries.push({ key: "posebusters", group: "Cofolding", label: "Pose quality", make: () => serviceObjective(services, "posebusters") });
   if (has("interaction_profiler")) {
-    entries.push({ key: "ip:hbond", group: "Structure", label: "H-bond contacts (after Boltz)", make: () => serviceObjective(services, "interaction_profiler", "hbond") });
+    entries.push({ key: "ip:hbond", group: "Cofolding", label: "H-bond contacts", make: () => serviceObjective(services, "interaction_profiler", "hbond") });
   }
   const endpoints = services.admet?.endpoints.length ? services.admet.endpoints : has("admet") ? Object.keys(ADMET_TRANSFORMS) : [];
   for (const endpoint of endpoints) {
@@ -866,7 +914,7 @@ export function objectiveCatalogue(services: Record<string, ServiceInfo>, compon
   const available = components.length ? new Set(components) : new Set(PREFERRED_NATIVE);
   const native = [...PREFERRED_NATIVE.filter((c) => available.has(c) || c === "TanimotoSimilarity"), ...[...available].filter((c) => !PREFERRED_NATIVE.includes(c))];
   for (const component of native) {
-    entries.push({ key: `native:${component}`, group: "RDKit descriptors", label: COMPONENT_NAMES[component] ? `${COMPONENT_NAMES[component]} (${component})` : component, make: () => nativeObjective(component) });
+    entries.push({ key: `native:${component}`, group: "Drug-likeness", label: COMPONENT_NAMES[component] ?? component, make: () => nativeObjective(component) });
   }
   return entries;
 }
@@ -891,6 +939,16 @@ export interface TtpForm {
   description: string;
   sequence: string;
   pdbId: string;
+  /** A precomputed MSA, relative to the shared volume; Boltz folds its query sequence. */
+  msaPath?: string;
+  /**
+   * Carried over when a stored TTP is duplicated, never set from a picked
+   * structure: PoseBusters checks poses against this protein instead of the
+   * Boltz complex, so it must be in the frame of the predicted poses.
+   */
+  proteinPdbPath?: string | null;
+  /** Template structures, relative to the shared volume. */
+  templates?: TemplateConfig[];
   aggregation: "geometric_mean" | "arithmetic_mean";
   objectives: Objective[];
   /** Carried over when a stored TTP is duplicated; the builder has no editor for them. */
@@ -907,6 +965,9 @@ export function formFromTtp(ttp: Ttp, existingIds: string[] = []): TtpForm {
     description: ttp.scoring.comment ?? "",
     sequence: ttp.target?.protein_sequence ?? "",
     pdbId: ttp.target?.pdb_id ?? "",
+    msaPath: ttp.target?.msa_path ?? "",
+    proteinPdbPath: ttp.target?.protein_pdb_path ?? null,
+    templates: (ttp.target?.templates ?? []).map((t) => ({ ...t })),
     aggregation: ttp.scoring.aggregation ?? "geometric_mean",
     objectives: [...objectivesOf(ttp, "pre_scoring").map((o) => ({ ...o, type: "native" as const })), ...ttp.scoring.objectives].map((o) => ({ ...o })),
     constraints: ttp.constraints ?? null,
@@ -944,6 +1005,13 @@ export function formProblems(form: TtpForm, existingIds: string[] = []): string[
     }
   }
   if (form.objectives.some((o) => o.service === "boltz") && !sequence) problems.push("Boltz scoring needs the target's protein sequence.");
+  else if (form.msaPath?.trim() && !sequence) problems.push("An MSA needs the protein sequence it was built for.");
+  for (const t of form.templates ?? []) {
+    const name = t.path.split("/").pop() ?? t.path;
+    if (!TEMPLATE_FILE.test(t.path.trim())) problems.push(`The template ${name} is not a .cif or .pdb file.`);
+    if (t.threshold != null && !(t.threshold > 0)) problems.push(`The template ${name} needs a threshold above 0 Å.`);
+    else if (t.force && t.threshold == null) problems.push(`Forcing the template ${name} needs a threshold in Å.`);
+  }
   return problems;
 }
 
@@ -969,7 +1037,21 @@ export function buildTtp(form: TtpForm): Record<string, unknown> {
     name: form.name.trim(),
     scoring: { ...(form.description.trim() ? { comment: form.description.trim() } : {}), aggregation: form.aggregation, objectives },
   };
-  if (sequence) ttp.target = { protein_sequence: sequence, ...(form.pdbId.trim() ? { pdb_id: form.pdbId.trim().toUpperCase() } : {}) };
+  if (sequence) {
+    const target: Record<string, unknown> = { protein_sequence: sequence };
+    if (form.pdbId.trim()) target.pdb_id = form.pdbId.trim().toUpperCase();
+    if (form.msaPath?.trim()) target.msa_path = form.msaPath.trim();
+    if (form.proteinPdbPath?.trim()) target.protein_pdb_path = form.proteinPdbPath.trim();
+    if (form.templates?.length) {
+      target.templates = form.templates.map((t) => ({
+        path: t.path.trim(),
+        ...(t.chain_id ? { chain_id: t.chain_id } : {}),
+        ...(t.force ? { force: true } : {}),
+        ...(t.threshold != null ? { threshold: t.threshold } : {}),
+      }));
+    }
+    ttp.target = target;
+  }
   if (form.constraints?.length) ttp.constraints = form.constraints;
   return ttp;
 }
@@ -1070,7 +1152,7 @@ export const isSameVersion = (d: VersionDiff) => !d.added.length && !d.removed.l
 export function targetSummary(ttp: Ttp): string | null {
   const target = ttp.target;
   if (!target?.protein_sequence) return null;
-  return [`${target.protein_sequence.length.toLocaleString("en")} aa`, target.pdb_id && `PDB ${target.pdb_id}`, target.msa_path && "MSA"].filter(Boolean).join(" · ");
+  return [`${target.protein_sequence.length.toLocaleString("en")} aa`, target.pdb_id && `PDB ${target.pdb_id}`, target.msa_path && "MSA", target.templates?.length && "template"].filter(Boolean).join(" · ");
 }
 
 /** The id and name create_ttp answered with, or its error. */

@@ -684,6 +684,108 @@ def test_a_pdb_id_and_session_are_validated(shared, rcsb, body):
     assert rcsb == []
 
 
+# -- a conversation's data and deleting it ---------------------------------
+
+DATA_SID = "s-20260101-000000-aaaaaa"
+
+
+def _result(seq, name, arguments, result):
+    return [
+        {"type": "tool_call", "id": f"c{seq}", "name": name, "arguments": arguments, "seq": seq, "ts": "2026-01-01T10:00:00+00:00"},
+        {"type": "tool_result", "id": f"c{seq}", "name": name, "result": json.dumps(result), "isError": False, "panels": [], "seq": seq + 1, "ts": "2026-01-01T10:00:00+00:00"},
+    ]
+
+
+@pytest.fixture
+def stored(shared, monkeypatch, tmp_path):
+    """A saved conversation with an upload, a finished job and a running one, all under tmp_path."""
+    jobs = tmp_path / "jobs"
+    monkeypatch.setenv("REINVENT4_JOBS_DIR", str(jobs))
+    upload = shared / "uploads" / DATA_SID / "pocket.pdb"
+    upload.parent.mkdir(parents=True)
+    upload.write_bytes(PDB)
+    for job_id, state in (("abc12345", "completed"), ("def67890", "running")):
+        (jobs / f"job_{job_id}").mkdir(parents=True)
+        (jobs / f"job_{job_id}" / "job_metadata.json").write_text(json.dumps({"job_id": job_id, "state": state}))
+        (jobs / f"job_{job_id}" / "results_1.csv").write_text("SMILES,total_score\nCCO,0.5\n")
+    events = [
+        {"type": "user_message", "content": f"Structure: /shared/uploads/{DATA_SID}/pocket.pdb", "seq": 1, "ts": "2026-01-01T09:00:00+00:00"},
+        *_result(2, "run_optimization", {"ttp_id": "brd4"}, {"job_id": "abc12345", "state": "running"}),
+        *_result(4, "run_optimization", {"ttp_id": "brd4"}, {"job_id": "def67890", "state": "running"}),
+    ]
+    directory = tmp_path / "sessions" / DATA_SID
+    directory.mkdir(parents=True)
+    stamp = "2026-01-01T09:00:00+00:00"
+    (directory / "meta.json").write_text(json.dumps({"id": DATA_SID, "title": "BRD4", "created": stamp, "updated": stamp, "turns": 1}))
+    (directory / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+    return {"shared": shared, "jobs": jobs, "upload": upload}
+
+
+def test_the_data_of_a_conversation_is_listed(stored):
+    with TestClient(server.create_app()) as client:
+        body = client.get(f"/api/sessions/{DATA_SID}/data").json()
+    items = {item["id"]: item for group in body["groups"] for item in group["items"]}
+    assert items[f"upload:uploads/{DATA_SID}/pocket.pdb"]["deletable"]
+    assert items["job:abc12345"]["deletable"]
+    assert items["job:def67890"]["reason"] == "Still running: stop the run first"
+    assert items["ttp:brd4"]["deletable"] is False
+    assert body["busy"] is False
+    assert body["totals"]["conversationBytes"] > 0
+
+
+def test_purging_removes_the_selection_but_never_a_running_job(stored):
+    picked = [f"upload:uploads/{DATA_SID}/pocket.pdb", "job:abc12345", "job:def67890"]
+    with TestClient(server.create_app()) as client:
+        response = client.post(f"/api/sessions/{DATA_SID}/purge", json={"items": picked})
+        assert response.status_code == 200
+        body = response.json()
+        assert client.get(f"/api/sessions/{DATA_SID}/events").status_code == 404
+    assert sorted(entry["id"] for entry in body["removed"]) == sorted(picked[:2])
+    assert {entry["id"]: entry["reason"] for entry in body["kept"]}["job:def67890"] == "Still running: stop the run first"
+    assert body["freedBytes"] > len(PDB)
+    assert not stored["upload"].exists()
+    assert not (stored["jobs"] / "job_abc12345").exists()
+    assert (stored["jobs"] / "job_def67890" / "results_1.csv").exists()
+
+
+def test_purging_with_nothing_picked_deletes_only_the_conversation(stored):
+    with TestClient(server.create_app()) as client:
+        body = client.post(f"/api/sessions/{DATA_SID}/purge", json={"items": []}).json()
+    assert body["removed"] == [] and body["freedBytes"] == 0
+    assert stored["upload"].exists()
+    assert (stored["jobs"] / "job_abc12345").exists()
+
+
+def test_purging_a_conversation_with_a_running_turn_is_refused_and_removes_nothing(agents, shared):
+    with TestClient(server.create_app()) as client, client.websocket_connect("/api/chat") as ws:
+        session_id = receive_until(ws, "session")["id"]
+        upload = shared / "uploads" / session_id / "pocket.pdb"
+        upload.parent.mkdir(parents=True)
+        upload.write_bytes(PDB)
+        ws.send_json({"type": "user_message", "content": "Design a ligand"})
+        receive_until(ws, "status")
+        response = client.post(f"/api/sessions/{session_id}/purge", json={"items": [f"upload:uploads/{session_id}/pocket.pdb"]})
+        assert response.status_code == 409
+        assert upload.exists()
+        assert client.get(f"/api/sessions/{session_id}/events").status_code == 200
+        ws.send_json({"type": "cancel"})
+        receive_until(ws, "cancelled")
+
+
+@pytest.mark.parametrize("body", [{"items": "job:abc12345"}, {"items": [1]}, ["job:abc12345"]])
+def test_a_purge_needs_a_list_of_item_ids(stored, body):
+    with TestClient(server.create_app()) as client:
+        assert client.post(f"/api/sessions/{DATA_SID}/purge", json=body).status_code == 422
+    assert stored["upload"].exists()
+
+
+def test_the_data_of_an_unknown_conversation_is_not_found(agents):
+    with TestClient(server.create_app()) as client:
+        assert client.get("/api/sessions/s-20990101-000000-abcdef/data").status_code == 404
+        assert client.get("/api/sessions/..%2Fetc/data").status_code == 404
+        assert client.post("/api/sessions/s-20990101-000000-abcdef/purge", json={"items": []}).status_code == 404
+
+
 def test_rcsb_failures_are_reported(shared, rcsb):
     with TestClient(server.create_app()) as client:
         assert client.post("/api/uploads/rcsb", json={"id": "0XXX", "session": "new"}).status_code == 404

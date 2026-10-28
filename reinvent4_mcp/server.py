@@ -1023,20 +1023,32 @@ def fetch_target_info(
             ),
         ),
     ],
+    pdb_ids: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "PDB entries whose crystallised construct to report; by "
+                "default the top-ranked entries."
+            ),
+        ),
+    ] = None,
 ) -> str:
-    """Look up a protein target on UniProt (canonical sequence, PDBs, function).
+    """Look up a protein target on UniProt (sequence, PDB constructs, function).
 
     Use this whenever a target is named but no sequence is provided, instead of
     recalling a sequence from memory. Returns the primary accession, protein/
-    gene names, organism, the canonical amino-acid sequence (drop straight into
-    a TTP ``target.protein_sequence``), a short function summary, and candidate
-    PDB IDs. On network failure it returns an error and does NOT fabricate a
-    sequence.
+    gene names, organism, the FULL-LENGTH canonical sequence
+    (``sequence_kind: "full_length"``), a short function summary, PDB entries
+    ranked best first with the UniProt range each covers, and ``constructs``:
+    the crystallised sequence of the top entries. Cofold a construct (or a
+    domain range) by default, not the full-length sequence, which is many times
+    slower; use full length only when the user asks for it. On network failure
+    it returns an error and does NOT fabricate a sequence.
     """
 
     from reinvent4_mcp.tools.uniprot import fetch_target_info as _impl
 
-    return json.dumps(_impl(query), indent=2, default=_json_default)
+    return json.dumps(_impl(query, pdb_ids), indent=2, default=_json_default)
 
 
 # ---------------------------------------------------------------------------

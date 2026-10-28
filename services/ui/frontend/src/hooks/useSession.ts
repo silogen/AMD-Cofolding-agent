@@ -175,6 +175,22 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
 
   const connectRef = useRef<() => void>(() => {});
 
+  /** Reconnect after *closed* dropped, now or once the page is shown again: a hidden tab does not keep retrying. */
+  const retryWhenVisible = useCallback((closed: WebSocket) => {
+    retryRef.current = null;
+    if (!document.hidden) {
+      connectRef.current();
+      return;
+    }
+    const onVisible = () => {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", onVisible);
+      // Another conversation, or a manual reconnect, has replaced it meanwhile.
+      if (socketRef.current === closed && !closedByUs.current) connectRef.current();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+  }, []);
+
   const connect = useCallback(() => {
     if (retryRef.current !== null) {
       window.clearTimeout(retryRef.current);
@@ -214,9 +230,9 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
       setConnection("closed");
       const delay = RETRY_DELAYS[Math.min(attemptRef.current, RETRY_DELAYS.length - 1)];
       attemptRef.current += 1;
-      retryRef.current = window.setTimeout(() => connectRef.current(), delay);
+      retryRef.current = window.setTimeout(() => retryWhenVisible(socket), delay);
     };
-  }, [handleEvent]);
+  }, [handleEvent, retryWhenVisible]);
 
   useEffect(() => {
     connectRef.current = connect;

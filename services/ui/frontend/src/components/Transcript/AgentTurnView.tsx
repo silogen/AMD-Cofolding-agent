@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
+import { memo, useEffect, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentTurn, Panel, StructurePanel, TurnBlock } from "../../types/api";
@@ -39,15 +39,14 @@ interface Props {
   linkResidues: boolean;
 }
 
-/** Re-render every second while *running*, for live timers. */
-function useNow(running: boolean): number {
+/** The time since *since*, counting up every second; only this text re-renders. */
+function Elapsed({ since }: { since: number }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!running) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [running]);
-  return now;
+  }, []);
+  return <>{duration(Math.max(0, now - since))}</>;
 }
 
 /**
@@ -55,13 +54,12 @@ function useNow(running: boolean): number {
  *
  * A turn can run for an hour of tool calls, so its shape is: what the agent
  * is doing now, the steps it took (each with its duration and output), what
- * those steps produced, and finally its answer.
+ * those steps produced, and finally its answer. Memoised: a finished turn
+ * keeps its object, so only the running one re-renders on each event.
  */
-export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, onShowProperties, linkResidues }: Props) {
+export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, onShowProperties, linkResidues }: Props) {
   const running = !turn.done;
-  const now = useNow(running);
   const steps = toolSteps(turn);
-  const elapsed = (turn.endedAt ?? now) - turn.at;
   const panels = steps.flatMap((step) =>
     (step.result?.panels ?? []).filter((panel) => isResultPanel(step.name, panel)),
   );
@@ -87,9 +85,9 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
         </h3>
       )}
 
-      {running && <LiveStatus steps={steps} thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null} now={now} />}
+      {running && <LiveStatus steps={steps} thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null} />}
 
-      {running && steps.length > 0 && <StepLog steps={steps} running={running} now={now} />}
+      {running && steps.length > 0 && <StepLog steps={steps} running={running} />}
 
       {panels.length > 0 && (
         <TurnResults
@@ -137,15 +135,14 @@ export function AgentTurnView({ turn, theme, openStructurePath, onOpenMolecule, 
           failed={failedSteps}
           meta={{
             at: clock(turn.at),
-            took: duration(elapsed),
+            took: turn.endedAt !== undefined ? duration(turn.endedAt - turn.at) : "",
             tokens: turn.tokens ? `${turn.tokens.input.toLocaleString()} in · ${turn.tokens.output.toLocaleString()} out` : null,
           }}
-          now={now}
         />
       )}
     </article>
   );
-}
+});
 
 function uniqueStructures(panels: Panel[]): StructurePanel[] {
   const seen = new Set<string>();
@@ -190,13 +187,11 @@ function TurnTrace({
   thoughts,
   failed,
   meta,
-  now,
 }: {
   steps: ToolStep[];
   thoughts: string[];
   failed: number;
   meta: TurnMeta;
-  now: number;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -216,7 +211,7 @@ function TurnTrace({
       {open && (
         <div className="mt-2 flex flex-col gap-2">
           <TurnMetaList meta={meta} />
-          {steps.length > 0 && <StepList steps={steps} now={now} />}
+          {steps.length > 0 && <StepList steps={steps} />}
           {thoughts.map((content, index) => (
             <p key={index} className="text-muted border-subtle border-l-2 py-0.5 pl-3 text-xs whitespace-pre-wrap">
               {content}
@@ -244,18 +239,18 @@ function TurnMetaList({ meta }: { meta: TurnMeta }) {
   );
 }
 
-function StepList({ steps, now }: { steps: ToolStep[]; now: number }) {
+function StepList({ steps }: { steps: ToolStep[] }) {
   return (
     <ol className="bg-sunken border-subtle overflow-hidden rounded-lg border">
       {steps.map((step, index) => (
-        <StepRow key={step.id} step={step} index={index + 1} now={now} />
+        <StepRow key={step.id} step={step} index={index + 1} />
       ))}
     </ol>
   );
 }
 
 /** The tool calls of the turn, one line each, expandable to the full output. */
-function StepLog({ steps, running, now }: { steps: ToolStep[]; running: boolean; now: number }) {
+function StepLog({ steps, running }: { steps: ToolStep[]; running: boolean }) {
   // Open while the agent works, so progress is visible; a finished turn
   // with many steps folds away behind its answer.
   const [open, setOpen] = useState<boolean | null>(null);
@@ -280,7 +275,7 @@ function StepLog({ steps, running, now }: { steps: ToolStep[]; running: boolean;
       {shown && (
         <ol className="border-subtle border-t">
           {steps.map((step, index) => (
-            <StepRow key={step.id} step={step} index={index + 1} now={now} />
+            <StepRow key={step.id} step={step} index={index + 1} />
           ))}
         </ol>
       )}
@@ -288,11 +283,11 @@ function StepLog({ steps, running, now }: { steps: ToolStep[]; running: boolean;
   );
 }
 
-function StepRow({ step, index, now }: { step: ToolStep; index: number; now: number }) {
+const StepRow = memo(function StepRow({ step, index }: { step: ToolStep; index: number }) {
   const [open, setOpen] = useState(false);
   const result = step.result;
   const failed = result?.isError ?? false;
-  const took = result ? (result.elapsedMs ?? Date.parse(result.ts) - step.at) : now - step.at;
+  const took = result ? (result.elapsedMs ?? Date.parse(result.ts) - step.at) : null;
   const args = summarise(step.arguments);
 
   return (
@@ -312,7 +307,7 @@ function StepRow({ step, index, now }: { step: ToolStep; index: number; now: num
           {args}
         </span>
         <span className={`shrink-0 font-mono text-[10px] ${result ? "text-faint" : "text-muted"}`}>
-          {Number.isFinite(took) ? duration(Math.max(0, took)) : ""}
+          {took === null ? <Elapsed since={step.at} /> : Number.isFinite(took) ? duration(Math.max(0, took)) : ""}
         </span>
       </button>
       {open && (
@@ -340,7 +335,7 @@ function StepRow({ step, index, now }: { step: ToolStep; index: number; now: num
       )}
     </li>
   );
-}
+});
 
 function StepIcon({ state }: { state: "running" | "ok" | "failed" }) {
   if (state === "running") {
@@ -364,9 +359,15 @@ function StepIcon({ state }: { state: "running" | "ok" | "failed" }) {
 }
 
 /** What the agent is doing right now. */
-function LiveStatus({ steps, thinking, now }: { steps: ToolStep[]; thinking: string | null; now: number }) {
+function LiveStatus({ steps, thinking }: { steps: ToolStep[]; thinking: string | null }) {
   const runningStep = steps.find((step) => !step.result);
-  const label = runningStep ? `Running ${runningStep.name} · ${duration(now - runningStep.at)}` : "Thinking";
+  const label = runningStep ? (
+    <>
+      Running {runningStep.name} · <Elapsed since={runningStep.at} />
+    </>
+  ) : (
+    "Thinking"
+  );
   const preview = thinking?.trim().split("\n").filter(Boolean).slice(-2).join(" ");
 
   return (
@@ -453,7 +454,8 @@ const PLAIN_PLUGINS = [remarkGfm, remarkCallouts];
 const LINKED_PLUGINS = [remarkGfm, remarkCallouts, remarkResidueLinks];
 const COMPONENTS = { a: AnswerLink, blockquote: AnswerQuote };
 
-function AnswerBlock({ content, linkResidues }: { content: string; linkResidues: boolean }) {
+/** Memoised: the running turn re-renders on every event, and parsing Markdown is the costly part. */
+const AnswerBlock = memo(function AnswerBlock({ content, linkResidues }: { content: string; linkResidues: boolean }) {
   return (
     <div className="group relative">
       <div className="markdown">
@@ -466,7 +468,7 @@ function AnswerBlock({ content, linkResidues }: { content: string; linkResidues:
       </div>
     </div>
   );
-}
+});
 
 /**
  * A failure. Backend errors are multi-line reports, so the first line is

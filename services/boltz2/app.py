@@ -14,16 +14,25 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, AsyncIterator, Iterator, Optional
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from rdkit import Chem
 from rdkit.rdBase import DisableLog
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import worker_pool
+except ImportError:  # image built with only app.py baked in
+    worker_pool = None
 
 DisableLog("rdApp.error")
 
@@ -50,12 +59,75 @@ STANDARD_AA = set("ACDEFGHIKLMNPQRSTVWY")
 BOLTZ_MAX_CONCURRENCY = int(os.getenv("BOLTZ_MAX_CONCURRENCY", "1"))
 _predict_sem = asyncio.Semaphore(BOLTZ_MAX_CONCURRENCY)
 
-app = FastAPI(title="Boltz2 Scoring Wrapper")
+# Persistent worker processes per visible GPU, each holding the structure and
+# affinity models. 0 disables the pool (every request spawns `boltz predict`).
+BOLTZ_WORKERS_PER_GPU = int(os.getenv("BOLTZ_WORKERS_PER_GPU", "2"))
+_pool: Any = None
+
+
+def _visible_gpu_devices() -> list[int]:
+    """In-container device indices (0..n-1) the worker pool may use."""
+    for var in ("ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return list(range(len([v for v in value.split(",") if v.strip()])))
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
+            capture_output=True, text=True, timeout=300,
+        )
+        return list(range(int(probe.stdout.strip().splitlines()[-1])))
+    except Exception:
+        logger.warning("Could not count visible GPUs", exc_info=True)
+        return []
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    global _pool
+    if worker_pool is None:
+        logger.warning("worker_pool module missing; using boltz predict subprocesses")
+    elif BOLTZ_WORKERS_PER_GPU > 0:
+        devices = await asyncio.to_thread(_visible_gpu_devices)
+        if devices:
+            _pool = worker_pool.WorkerPool(
+                devices=devices,
+                workers_per_gpu=BOLTZ_WORKERS_PER_GPU,
+                backend_factory=partial(worker_pool.ProcessBackend, cache_dir=str(CACHE_DIR)),
+                job_timeout=PREDICT_TIMEOUT_SECONDS,
+            )
+            await _pool.start()
+            logger.info(
+                "Starting %d Boltz worker(s): %d per GPU on devices %s",
+                len(_pool.workers), BOLTZ_WORKERS_PER_GPU, devices,
+            )
+        else:
+            logger.warning("No GPU visible; using boltz predict subprocesses")
+    try:
+        yield
+    finally:
+        if _pool is not None:
+            await _pool.shutdown()
+
+
+app = FastAPI(title="Boltz2 Scoring Wrapper", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+
+class TemplateSpec(BaseModel):
+    """A structure the cofold is conditioned on (Boltz-2 ``templates:``)."""
+
+    # .cif/.mmcif or .pdb/.ent; relative paths resolve under the shared dir.
+    path: str
+    # Chain of the template file to use; None lets Boltz pick the best match.
+    chain_id: Optional[str] = None
+    # Enforce the template with a potential (requires threshold, in Angstrom).
+    force: bool = False
+    threshold: Optional[float] = None
+
 
 class ScoreParams(BaseModel):
     protein_sequence: str
@@ -76,6 +148,7 @@ class ScoreParams(BaseModel):
     affinity_mode: str = "pred_value"
     output_format: str = "pdb"
     affinity_mw_correction: bool = False
+    templates: list[TemplateSpec] = Field(default_factory=list)
 
 
 class ScoreRequest(BaseModel):
@@ -128,6 +201,66 @@ def _validate_protein(req: ScoreRequest) -> list[str]:
             f"Boltz affinity is protein-only (no DNA/RNA)"
         )
     return errors
+
+
+TEMPLATE_FORMATS = {".cif": "cif", ".mmcif": "cif", ".pdb": "pdb", ".ent": "pdb"}
+# Chain id the protein gets in the Boltz YAML (see _build_molecule_yaml).
+PROTEIN_CHAIN_ID = "A"
+
+
+def _resolve_templates(
+    templates: list[TemplateSpec],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate templates and build their Boltz-2 YAML entries.
+
+    Returns ``(entries, errors)``; any error rejects the whole request.
+    """
+    entries: list[dict[str, Any]] = []
+    errors: list[str] = []
+    stems: set[str] = set()
+    for i, tpl in enumerate(templates):
+        p = Path(tpl.path)
+        if not p.is_absolute():
+            p = SHARED_DIR / tpl.path
+        fmt = TEMPLATE_FORMATS.get(p.suffix.lower())
+        if fmt is None:
+            errors.append(
+                f"templates[{i}]: {tpl.path!r} must be a .cif/.mmcif or .pdb file"
+            )
+            continue
+        if not p.is_file():
+            errors.append(
+                f"templates[{i}]: {tpl.path!r} not found on the shared volume (looked at {p})"
+            )
+            continue
+        # Boltz names each template after its file stem.
+        if p.stem in stems:
+            errors.append(
+                f"templates[{i}]: another template is also named {p.stem!r}; "
+                "template file names must be unique"
+            )
+            continue
+        stems.add(p.stem)
+        if tpl.force and tpl.threshold is None:
+            errors.append(
+                f"templates[{i}]: threshold (Angstrom) is required when force is true"
+            )
+            continue
+        if tpl.threshold is not None and tpl.threshold <= 0:
+            errors.append(f"templates[{i}]: threshold must be positive")
+            continue
+
+        entry: dict[str, Any] = {fmt: str(p)}
+        if tpl.chain_id:
+            # Boltz's chain_id is the chain of *our* input; template_id is the
+            # chain inside the template file.
+            entry["chain_id"] = PROTEIN_CHAIN_ID
+            entry["template_id"] = tpl.chain_id
+        if tpl.force:
+            entry["force"] = True
+            entry["threshold"] = tpl.threshold
+        entries.append(entry)
+    return entries, errors
 
 
 def _partition_smiles(smiles: list[str]) -> tuple[list[int], list[str]]:
@@ -316,29 +449,31 @@ def _build_molecule_yaml(
     protein_sequence: str,
     msa_path: Optional[str],
     msa_free: bool = False,
+    templates: Optional[list[dict[str, Any]]] = None,
 ) -> dict:
     """Build the Boltz input YAML dict for a single protein–ligand pair.
 
     ``msa_free`` sets ``msa: empty`` so Boltz runs single-sequence (no MSA);
     used as a last-resort fallback when no MSA file exists and the MSA server
-    is unreachable.
+    is unreachable. ``templates`` are entries from ``_resolve_templates``.
     """
-    protein_entry: dict[str, Any] = {"id": "A", "sequence": protein_sequence}
+    protein_entry: dict[str, Any] = {"id": PROTEIN_CHAIN_ID, "sequence": protein_sequence}
     if msa_free:
         protein_entry["msa"] = "empty"
     elif msa_path:
         protein_entry["msa"] = msa_path
 
-    return {
+    doc: dict[str, Any] = {
         "version": 1,
         "sequences": [
             {"protein": protein_entry},
             {"ligand": {"id": "B", "smiles": smiles}},
         ],
-        "properties": [
-            {"affinity": {"binder": "B"}},
-        ],
     }
+    if templates:
+        doc["templates"] = [dict(t) for t in templates]
+    doc["properties"] = [{"affinity": {"binder": "B"}}]
+    return doc
 
 
 def _write_batch_yamls(
@@ -347,12 +482,15 @@ def _write_batch_yamls(
     protein_sequence: str,
     msa_path: Optional[str],
     msa_free: bool = False,
+    templates: Optional[list[dict[str, Any]]] = None,
 ) -> list[Path]:
     """Write one YAML per SMILES into *batch_dir*; return paths."""
     batch_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for idx, smi in enumerate(smiles_list):
-        mol_yaml = _build_molecule_yaml(smi, protein_sequence, msa_path, msa_free)
+        mol_yaml = _build_molecule_yaml(
+            smi, protein_sequence, msa_path, msa_free, templates,
+        )
         p = batch_dir / f"mol_{idx}.yaml"
         with open(p, "w") as fh:
             yaml.dump(mol_yaml, fh, default_flow_style=False, sort_keys=False)
@@ -579,8 +717,12 @@ def _assemble_response(
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    # "loading" is still HTTP 200: requests queue until a worker is ready, and
+    # run.sh's startup gate only checks for a successful response.
+    if _pool is None:
+        return {"status": "ok"}
+    return _pool.health()
 
 
 @app.post("/score", response_model=ScoreResponse)
@@ -601,6 +743,10 @@ async def score(request: ScoreRequest, http_request: Request) -> ScoreResponse:
     if protein_errors:
         raise HTTPException(status_code=422, detail=protein_errors)
 
+    _, template_errors = _resolve_templates(params.templates)
+    if template_errors:
+        raise HTTPException(status_code=422, detail=template_errors)
+
     valid_indices, skip_reasons = _partition_smiles(request.smiles)
     n_total = len(request.smiles)
 
@@ -616,6 +762,15 @@ async def score(request: ScoreRequest, http_request: Request) -> ScoreResponse:
         "Batch: %d/%d SMILES valid, %d skipped",
         len(valid_smiles), n_total, n_total - len(valid_smiles),
     )
+
+    if _pool is not None and _pool.usable:
+        try:
+            return await _score_with_pool(
+                params, valid_smiles, valid_indices, skip_reasons, n_total,
+                http_request,
+            )
+        except worker_pool.PoolUnavailable as exc:
+            logger.warning("Worker pool unavailable (%s); falling back to boltz predict", exc)
 
     # --- Blocking GPU work runs off the event loop, serialized via the
     # semaphore so /health stays responsive and predictions are FIFO. ---
@@ -651,6 +806,169 @@ async def score(request: ScoreRequest, http_request: Request) -> ScoreResponse:
         return task.result()
 
 
+@dataclass
+class _PreparedBatch:
+    yaml_paths: list[Path]
+    use_msa_server: bool
+    note: Optional[str]
+
+
+def _prepare_batch(
+    params: ScoreParams,
+    valid_smiles: list[str],
+    n_total: int,
+    batch_dir: Path,
+    batch_id: str,
+) -> _PreparedBatch | ScoreResponse:
+    """Resolve the MSA once and write the per-molecule YAMLs.
+
+    Returns a ScoreResponse instead when the request must be aborted with an
+    explicit per-molecule reason.
+    """
+    # Resolve the MSA source once per request: explicit a3m > shared cache
+    # (populated from a single MSA-server query) > live server fallback.
+    effective_msa_path, use_server_flag, msa_error = _resolve_msa(params)
+
+    # No usable MSA and generation failed. Two options:
+    #   * If msa_free_fallback is enabled, degrade to single-sequence
+    #     (msa: empty) so a structure is still produced (reduced
+    #     confidence) rather than losing the run entirely.
+    #   * Otherwise abort with an explicit, actionable reason instead of a
+    #     doomed run that surfaces as an opaque NaN.
+    msa_free = False
+    msa_note: Optional[str] = None
+    if msa_error and not effective_msa_path:
+        if params.msa_free_fallback:
+            msa_free = True
+            use_server_flag = False
+            msa_note = (
+                f"MSA-free (single-sequence) mode used: the MSA server was "
+                f"unavailable ({msa_error}). Structure and affinity "
+                "confidence are reduced; provide a local .a3m "
+                "(target.msa_path) for a full-quality cofold."
+            )
+            logger.warning("Batch %s: %s", batch_id, msa_note)
+        else:
+            reason = (
+                f"Cofold aborted: {msa_error}. No precomputed MSA was "
+                "available for this target. Provide a local .a3m (set "
+                "target.msa_path, e.g. a file on the shared volume) or use "
+                "a target that already has an MSA."
+            )
+            logger.error("Batch %s: %s", batch_id, reason)
+            return ScoreResponse(
+                scores=[None] * n_total,
+                metadata={
+                    "skip_reason": [reason] * n_total,
+                    "msa_error": [msa_error] * n_total,
+                },
+                artifacts={"structures": [None] * n_total},
+            )
+
+    if msa_free:
+        logger.info(
+            "MSA source for batch %s: NONE (single-sequence / msa: empty)",
+            batch_id,
+        )
+    elif effective_msa_path:
+        logger.info(
+            "MSA source for batch %s: reading from file %s",
+            batch_id, effective_msa_path,
+        )
+    elif use_server_flag:
+        logger.info(
+            "MSA source for batch %s: live MSA server %s (boltz --use_msa_server)",
+            batch_id, params.msa_server_url,
+        )
+    else:
+        logger.info("MSA source for batch %s: none configured", batch_id)
+
+    # Reconcile the target sequence with the MSA's query sequence. Boltz
+    # requires the folded sequence to match the MSA the alignment was built
+    # for; a mismatch (e.g. full-length target + domain-only MSA) otherwise
+    # produces an opaque NaN. On mismatch either derive the sequence from
+    # the MSA (default) or abort with an explicit reason.
+    protein_sequence = params.protein_sequence
+    seq_note: Optional[str] = None
+    if effective_msa_path and not msa_free:
+        msa_seq = _read_a3m_query_sequence(effective_msa_path)
+        target_seq = protein_sequence.upper().strip()
+        if msa_seq and msa_seq != target_seq:
+            if params.derive_sequence_from_msa:
+                seq_note = (
+                    f"protein_sequence ({len(target_seq)} aa) did not match "
+                    f"the MSA query ({len(msa_seq)} aa); used the MSA's query "
+                    "sequence so the alignment and folded structure are "
+                    "consistent."
+                )
+                logger.warning("Batch %s: %s", batch_id, seq_note)
+                protein_sequence = msa_seq
+            else:
+                reason = (
+                    f"MSA/sequence mismatch: the MSA is for a "
+                    f"{len(msa_seq)}-aa sequence but protein_sequence is "
+                    f"{len(target_seq)} aa. Provide the matching (domain) "
+                    "sequence, or enable derive_sequence_from_msa."
+                )
+                logger.error("Batch %s: %s", batch_id, reason)
+                return ScoreResponse(
+                    scores=[None] * n_total,
+                    metadata={"skip_reason": [reason] * n_total},
+                    artifacts={"structures": [None] * n_total},
+                )
+
+    templates, _ = _resolve_templates(params.templates)
+    yaml_paths = _write_batch_yamls(
+        batch_dir,
+        valid_smiles,
+        protein_sequence,
+        effective_msa_path,
+        msa_free=msa_free,
+        templates=templates,
+    )
+    # Flag reduced-confidence MSA-free runs and sequence-alignment fixes so
+    # the reason is visible downstream (scorer surfaces it; agent can warn
+    # the user). These two notes are mutually exclusive (msa_note only when
+    # running MSA-free; seq_note only when an MSA file is used).
+    return _PreparedBatch(
+        yaml_paths=yaml_paths,
+        use_msa_server=use_server_flag,
+        note=msa_note or seq_note,
+    )
+
+
+def _expand_to_full(
+    valid_response: ScoreResponse,
+    valid_indices: list[int],
+    skip_reasons: list[str],
+    n_total: int,
+    note: Optional[str],
+) -> ScoreResponse:
+    """Map a response over the valid molecules back onto the full request."""
+    scores: list[Optional[float]] = [None] * n_total
+    for batch_idx, orig_idx in enumerate(valid_indices):
+        scores[orig_idx] = valid_response.scores[batch_idx]
+
+    metadata: dict[str, Any] = {"skip_reason": skip_reasons}
+    for key, values in valid_response.metadata.items():
+        full: list[Any] = [None] * n_total
+        for batch_idx, orig_idx in enumerate(valid_indices):
+            full[orig_idx] = values[batch_idx]
+        metadata[key] = full
+
+    if note:
+        metadata["msa_note"] = [note] * n_total
+
+    artifacts: dict[str, Any] = {}
+    if "structures" in valid_response.artifacts:
+        structs: list[Optional[str]] = [None] * n_total
+        for batch_idx, orig_idx in enumerate(valid_indices):
+            structs[orig_idx] = valid_response.artifacts["structures"][batch_idx]
+        artifacts["structures"] = structs
+
+    return ScoreResponse(scores=scores, metadata=metadata, artifacts=artifacts)
+
+
 def _run_prediction(
     params: ScoreParams,
     valid_smiles: list[str],
@@ -665,107 +983,11 @@ def _run_prediction(
     out_dir = SHARED_DIR / "predictions" / f"out_{batch_id}"
 
     try:
-        # Resolve the MSA source once per request: explicit a3m > shared cache
-        # (populated from a single MSA-server query) > live server fallback.
-        effective_msa_path, use_server_flag, msa_error = _resolve_msa(params)
+        prepared = _prepare_batch(params, valid_smiles, n_total, batch_dir, batch_id)
+        if isinstance(prepared, ScoreResponse):
+            return prepared
 
-        # No usable MSA and generation failed. Two options:
-        #   * If msa_free_fallback is enabled, degrade to single-sequence
-        #     (msa: empty) so a structure is still produced (reduced
-        #     confidence) rather than losing the run entirely.
-        #   * Otherwise abort with an explicit, actionable reason instead of a
-        #     doomed run that surfaces as an opaque NaN.
-        msa_free = False
-        msa_note: Optional[str] = None
-        if msa_error and not effective_msa_path:
-            if params.msa_free_fallback:
-                msa_free = True
-                use_server_flag = False
-                msa_note = (
-                    f"MSA-free (single-sequence) mode used: the MSA server was "
-                    f"unavailable ({msa_error}). Structure and affinity "
-                    "confidence are reduced; provide a local .a3m "
-                    "(target.msa_path) for a full-quality cofold."
-                )
-                logger.warning("Batch %s: %s", batch_id, msa_note)
-            else:
-                reason = (
-                    f"Cofold aborted: {msa_error}. No precomputed MSA was "
-                    "available for this target. Provide a local .a3m (set "
-                    "target.msa_path, e.g. a file on the shared volume) or use "
-                    "a target that already has an MSA."
-                )
-                logger.error("Batch %s: %s", batch_id, reason)
-                return ScoreResponse(
-                    scores=[None] * n_total,
-                    metadata={
-                        "skip_reason": [reason] * n_total,
-                        "msa_error": [msa_error] * n_total,
-                    },
-                    artifacts={"structures": [None] * n_total},
-                )
-
-        if msa_free:
-            logger.info(
-                "MSA source for batch %s: NONE (single-sequence / msa: empty)",
-                batch_id,
-            )
-        elif effective_msa_path:
-            logger.info(
-                "MSA source for batch %s: reading from file %s",
-                batch_id, effective_msa_path,
-            )
-        elif use_server_flag:
-            logger.info(
-                "MSA source for batch %s: live MSA server %s (boltz --use_msa_server)",
-                batch_id, params.msa_server_url,
-            )
-        else:
-            logger.info("MSA source for batch %s: none configured", batch_id)
-
-        # Reconcile the target sequence with the MSA's query sequence. Boltz
-        # requires the folded sequence to match the MSA the alignment was built
-        # for; a mismatch (e.g. full-length target + domain-only MSA) otherwise
-        # produces an opaque NaN. On mismatch either derive the sequence from
-        # the MSA (default) or abort with an explicit reason.
-        protein_sequence = params.protein_sequence
-        seq_note: Optional[str] = None
-        if effective_msa_path and not msa_free:
-            msa_seq = _read_a3m_query_sequence(effective_msa_path)
-            target_seq = protein_sequence.upper().strip()
-            if msa_seq and msa_seq != target_seq:
-                if params.derive_sequence_from_msa:
-                    seq_note = (
-                        f"protein_sequence ({len(target_seq)} aa) did not match "
-                        f"the MSA query ({len(msa_seq)} aa); used the MSA's query "
-                        "sequence so the alignment and folded structure are "
-                        "consistent."
-                    )
-                    logger.warning("Batch %s: %s", batch_id, seq_note)
-                    protein_sequence = msa_seq
-                else:
-                    reason = (
-                        f"MSA/sequence mismatch: the MSA is for a "
-                        f"{len(msa_seq)}-aa sequence but protein_sequence is "
-                        f"{len(target_seq)} aa. Provide the matching (domain) "
-                        "sequence, or enable derive_sequence_from_msa."
-                    )
-                    logger.error("Batch %s: %s", batch_id, reason)
-                    return ScoreResponse(
-                        scores=[None] * n_total,
-                        metadata={"skip_reason": [reason] * n_total},
-                        artifacts={"structures": [None] * n_total},
-                    )
-
-        _write_batch_yamls(
-            batch_dir,
-            valid_smiles,
-            protein_sequence,
-            effective_msa_path,
-            msa_free=msa_free,
-        )
-
-        cmd = _build_predict_cmd(batch_dir, out_dir, params, use_server_flag)
+        cmd = _build_predict_cmd(batch_dir, out_dir, params, prepared.use_msa_server)
         result = _run_predict(cmd, handle)
 
         if result.returncode != 0:
@@ -795,34 +1017,9 @@ def _run_prediction(
             params.affinity_mode,
             params.output_format,
         )
-
-        scores: list[Optional[float]] = [None] * n_total
-        for batch_idx, orig_idx in enumerate(valid_indices):
-            scores[orig_idx] = valid_response.scores[batch_idx]
-
-        metadata: dict[str, Any] = {"skip_reason": skip_reasons}
-        for key, values in valid_response.metadata.items():
-            full: list[Any] = [None] * n_total
-            for batch_idx, orig_idx in enumerate(valid_indices):
-                full[orig_idx] = values[batch_idx]
-            metadata[key] = full
-
-        # Flag reduced-confidence MSA-free runs and sequence-alignment fixes so
-        # the reason is visible downstream (scorer surfaces it; agent can warn
-        # the user). These two notes are mutually exclusive (msa_note only when
-        # running MSA-free; seq_note only when an MSA file is used).
-        note = msa_note or seq_note
-        if note:
-            metadata["msa_note"] = [note] * n_total
-
-        artifacts: dict[str, Any] = {}
-        if "structures" in valid_response.artifacts:
-            structs: list[Optional[str]] = [None] * n_total
-            for batch_idx, orig_idx in enumerate(valid_indices):
-                structs[orig_idx] = valid_response.artifacts["structures"][batch_idx]
-            artifacts["structures"] = structs
-
-        return ScoreResponse(scores=scores, metadata=metadata, artifacts=artifacts)
+        return _expand_to_full(
+            valid_response, valid_indices, skip_reasons, n_total, prepared.note,
+        )
 
     except HTTPException:
         raise
@@ -847,4 +1044,131 @@ def _run_prediction(
         )
     finally:
         if batch_dir.exists():
+            shutil.rmtree(batch_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Worker-pool path
+# ---------------------------------------------------------------------------
+
+def _worker_params(params: ScoreParams) -> dict[str, Any]:
+    return {
+        "recycling_steps": params.recycling_steps,
+        "diffusion_samples": params.diffusion_samples,
+        "sampling_steps": params.sampling_steps,
+        "sampling_steps_affinity": params.sampling_steps_affinity,
+        "diffusion_samples_affinity": params.diffusion_samples_affinity,
+        "output_format": params.output_format,
+        "affinity_mw_correction": params.affinity_mw_correction,
+    }
+
+
+def _worker_failure_reason(result: Any) -> str:
+    """Per-molecule skip_reason for a worker result; empty on success."""
+    if isinstance(result, BaseException):
+        return f"Boltz prediction failed: {result}"
+    status = result.get("status")
+    if status == "ok":
+        return ""
+    if status == "oom":
+        alone = " even with the GPU to itself" if result.get("retried") else ""
+        return (
+            f"GPU out of memory on GCD {result.get('device')}{alone} while "
+            "cofolding this molecule; the complex is likely too large for one "
+            "GCD. Use a shorter construct (e.g. the binding domain)."
+        )
+    return f"Boltz prediction failed: {result.get('error') or 'unknown error'}"
+
+
+async def _score_with_pool(
+    params: ScoreParams,
+    valid_smiles: list[str],
+    valid_indices: list[int],
+    skip_reasons: list[str],
+    n_total: int,
+    http_request: Request,
+) -> ScoreResponse:
+    """Score through the resident workers; same output layout as `boltz predict`."""
+    batch_id = uuid.uuid4().hex[:12]
+    batch_dir = SHARED_DIR / "batches" / f"batch_{batch_id}"
+    out_dir = SHARED_DIR / "predictions" / f"out_{batch_id}"
+    results_dir = out_dir / f"boltz_results_{batch_dir.name}"
+    remove_batch_dir = True
+
+    try:
+        prepared = await asyncio.to_thread(
+            _prepare_batch, params, valid_smiles, n_total, batch_dir, batch_id,
+        )
+        if isinstance(prepared, ScoreResponse):
+            return prepared
+
+        payloads = [
+            {
+                "yaml_path": str(path),
+                "out_dir": str(results_dir),
+                "use_msa_server": prepared.use_msa_server,
+                "msa_server_url": params.msa_server_url,
+                "params": _worker_params(params),
+            }
+            for path in prepared.yaml_paths
+        ]
+        futures = _pool.submit(batch_id, payloads)
+        logger.info(
+            "Batch %s: %d molecule(s) queued on the worker pool (queue length %d)",
+            batch_id, len(payloads), _pool.queue_length(),
+        )
+        waiter = asyncio.gather(*futures, return_exceptions=True)
+        while True:
+            done, _ = await asyncio.wait({waiter}, timeout=2.0)
+            if done:
+                break
+            if await http_request.is_disconnected():
+                dropped = _pool.cancel(batch_id)
+                logger.warning(
+                    "Client disconnected — dropped %d queued molecule(s) of batch %s; "
+                    "running ones finish", dropped, batch_id,
+                )
+                # Running molecules still read their inputs from batch_dir.
+                remove_batch_dir = False
+                waiter.add_done_callback(
+                    lambda _f: shutil.rmtree(batch_dir, ignore_errors=True)
+                )
+                raise HTTPException(status_code=499, detail="Client disconnected")
+
+        results = waiter.result()
+        for result in results:
+            if isinstance(result, worker_pool.PoolUnavailable):
+                raise result
+
+        reasons = list(skip_reasons)
+        for orig_idx, result in zip(valid_indices, results):
+            reason = _worker_failure_reason(result)
+            if reason:
+                reasons[orig_idx] = reason
+                logger.warning("Batch %s smiles[%d]: %s", batch_id, orig_idx, reason)
+            if isinstance(result, dict):
+                logger.info(
+                    "Batch %s smiles[%d]: %s on %s in %s",
+                    batch_id, orig_idx, result.get("status"), result.get("worker"),
+                    result.get("timings"),
+                )
+
+        valid_response = _assemble_response(
+            results_dir / "predictions",
+            len(valid_smiles),
+            params.affinity_mode,
+            params.output_format,
+        )
+        return _expand_to_full(valid_response, valid_indices, reasons, n_total, prepared.note)
+
+    except (HTTPException, worker_pool.PoolUnavailable):
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error during scoring")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": str(exc)},
+        )
+    finally:
+        if remove_batch_dir and batch_dir.exists():
             shutil.rmtree(batch_dir, ignore_errors=True)

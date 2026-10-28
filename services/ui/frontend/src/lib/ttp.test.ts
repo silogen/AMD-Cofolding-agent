@@ -32,6 +32,9 @@ import {
   nativeObjective,
   normaliseSequence,
   objectiveCatalogue,
+  objectiveKey,
+  presetOn,
+  togglePreset,
   parseComponents,
   parseServices,
   presetObjectives,
@@ -60,6 +63,7 @@ import {
   versionDiff,
   isSameVersion,
   type ToolEvent,
+  type Objective,
   type Ttp,
   type TtpForm,
 } from "./ttp";
@@ -392,6 +396,37 @@ describe("objectives", () => {
     expect(keys).not.toContain("ip:hbond");
   });
 
+  it("labels the catalogue by metric, without where the score comes from", () => {
+    const labels = objectiveCatalogue(services, ["QED", "MolecularWeight"]).map((e) => `${e.group}/${e.label}`);
+    expect(labels).toContain("Drug-likeness/Molecular weight");
+    expect(labels).toContain("Cofolding/Binding affinity");
+    expect(labels.join(" ")).not.toMatch(/RDKit|PoseBusters|Boltz|\(MolecularWeight\)/);
+  });
+
+  it("combines presets: ADMET adds to drug-likeness instead of replacing it", () => {
+    const druglike = presetObjectives("druglike", services);
+    const both = togglePreset(druglike, "admet", services, true);
+    expect(both.slice(0, druglike.length)).toEqual(druglike);
+    expect(both.map((o) => o.name)).toEqual(["QED", "Molecular weight", "cLogP", "TPSA", "Synthetic accessibility", "LogD", "Aqueous solubility", "Caco-2 permeability", "MDCK efflux"]);
+    expect(presetOn(both, "druglike", services)).toBe(true);
+    expect(presetOn(both, "admet", services)).toBe(true);
+    expect(togglePreset(both, "admet", services, true)).toBe(both);
+    expect(togglePreset(both, "admet", services, false)).toEqual(druglike);
+    const admetOnly = togglePreset(both, "druglike", services, false);
+    expect(admetOnly.map((o) => o.name)).toEqual(["QED", "LogD", "Aqueous solubility", "Caco-2 permeability", "MDCK efflux"]);
+    expect(presetOn(admetOnly, "druglike", services)).toBe(false);
+  });
+
+  it("keeps hand-added and cofolding objectives when presets change", () => {
+    const list = [...withCofolding([], services, true), serviceObjective(services, "admet", "logp")];
+    const on = togglePreset(list, "admet", services, true);
+    expect(on.slice(0, 3)).toEqual(list);
+    expect(togglePreset(on, "admet", services, false)).toEqual(list);
+    expect(objectiveKey(serviceObjective(services, "admet", "logd"))).toBe("admet:logd");
+    const renamed: Objective = { ...nativeObjective("QED"), name: "Renamed" };
+    expect(objectiveKey(renamed)).toBe("native:QED");
+  });
+
   it("names and renames without breaking links", () => {
     expect(uniqueName("QED", ["QED", "QED 2"])).toBe("QED 3");
     expect(uniqueName("MW", ["QED"])).toBe("MW");
@@ -457,6 +492,33 @@ describe("formProblems and buildTtp", () => {
     expect(createdTtp(JSON.stringify({ status: "created", id: "x", name: "X", version: 1 }))).toEqual({ id: "x", name: "X" });
     expect(createdTtp({ error: "Invalid TTP: boom" })).toEqual({ error: "Invalid TTP: boom" });
     expect(createdTtp("Tool failed")).toEqual({ error: "Tool failed" });
+  });
+
+  it("writes the MSA and a carried-over structure path into the target", () => {
+    expect(buildTtp(form({ msaPath: " msas/brd4.a3m " })).target).toEqual({ protein_sequence: SEQ, msa_path: "msas/brd4.a3m" });
+    expect(buildTtp(form({ proteinPdbPath: "/shared/p.pdb" })).target).toEqual({ protein_sequence: SEQ, protein_pdb_path: "/shared/p.pdb" });
+    expect(buildTtp(form({ msaPath: "", proteinPdbPath: null })).target).toEqual({ protein_sequence: SEQ });
+    expect(formProblems(form({ sequence: "", objectives: [nativeObjective("QED")], msaPath: "msas/brd4.a3m" }))).toEqual(["An MSA needs the protein sequence it was built for."]);
+  });
+
+  it("writes templates into the target, leaving out empty fields", () => {
+    const templates = [
+      { path: " uploads/s-1/1M17_A.cif ", chain_id: "A", force: false, threshold: null },
+      { path: "structures/egfr.pdb", chain_id: null, force: true, threshold: 2 },
+    ];
+    expect(buildTtp(form({ pdbId: "1m17", templates })).target).toEqual({
+      protein_sequence: SEQ,
+      pdb_id: "1M17",
+      templates: [{ path: "uploads/s-1/1M17_A.cif", chain_id: "A" }, { path: "structures/egfr.pdb", force: true, threshold: 2 }],
+    });
+    expect(buildTtp(form({ templates: [] })).target).toEqual({ protein_sequence: SEQ });
+    expect(formProblems(form({ templates }))).toEqual([]);
+  });
+
+  it("explains templates the server would reject", () => {
+    expect(formProblems(form({ templates: [{ path: "a.cif", force: true }] }))).toEqual(["Forcing the template a.cif needs a threshold in Å."]);
+    expect(formProblems(form({ templates: [{ path: "a.cif", force: true, threshold: Number("") || NaN }] }))).toEqual(["The template a.cif needs a threshold above 0 Å."]);
+    expect(formProblems(form({ templates: [{ path: "msas/a.a3m" }] }))).toEqual(["The template a.a3m is not a .cif or .pdb file."]);
   });
 
   it("keeps constraints when given", () => {
@@ -563,6 +625,11 @@ describe("browsing stored TTPs", () => {
     expect(copy.objectives.map((o) => o.name)).toEqual(["QED", "MW", "Affinity"]);
     expect(copy.constraints).toEqual(ttp.constraints);
     expect(formProblems(copy)).toEqual([]);
+    const withFiles = formFromTtp({ ...ttp, target: { protein_sequence: SEQ, msa_path: "msas/a.a3m", protein_pdb_path: "/shared/p.pdb" } });
+    expect(buildTtp(withFiles).target).toEqual({ protein_sequence: SEQ, msa_path: "msas/a.a3m", protein_pdb_path: "/shared/p.pdb" });
+    const templated = formFromTtp({ ...ttp, target: { protein_sequence: SEQ, templates: [{ path: "uploads/s/1M17_A.cif", chain_id: "A", force: true, threshold: 1.5 }] } });
+    expect(buildTtp(templated).target).toEqual({ protein_sequence: SEQ, templates: [{ path: "uploads/s/1M17_A.cif", chain_id: "A", force: true, threshold: 1.5 }] });
+    expect(targetSummary({ ...ttp, target: { protein_sequence: SEQ, templates: [{ path: "a.cif" }] } })).toMatch(/· template$/);
   });
 
   it("diffs two versions", () => {
