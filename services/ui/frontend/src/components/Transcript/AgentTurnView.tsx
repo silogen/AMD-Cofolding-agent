@@ -1,14 +1,14 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { memo, useEffect, useMemo, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnchorHTMLAttributes, type HTMLAttributes } from "react";
 import Markdown, { type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentTurn, Panel, StructurePanel, TurnBlock } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
-import { toolSteps } from "../../lib/transcript";
+import { stepError, stepState, toolSteps, turnTrace, type StepState, type TraceEntry } from "../../lib/transcript";
 import { clock, duration, summarise } from "../../lib/format";
-import { isResultPanel, panelKey } from "../../lib/artifacts";
+import { isResultPanel, mergeTurnPanels } from "../../lib/artifacts";
 import { remarkResidueLinks, residueFromHref, structureFromHref, turnStructures } from "../../lib/residueLinks";
 import { sendToViewer } from "../../lib/viewerBus";
 import { openWorkbench } from "../../lib/workbenchBus";
@@ -64,7 +64,11 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
     (step.result?.panels ?? []).filter((panel) => isResultPanel(step.name, panel)),
   );
   const lastThinking = [...turn.blocks].reverse().find((block) => block.kind === "thinking");
-  const failedSteps = steps.filter((step) => step.result?.isError).length;
+  const failedSteps = steps.filter((step) => stepState(step) === "failed").length;
+  const trace = turnTrace(turn);
+  // One state for the live dropdown and the finished fold, so an open trace stays open when the turn ends.
+  const [traceOpen, setTraceOpen] = useState(false);
+  const toggleTrace = () => setTraceOpen((value) => !value);
   const tools = steps.map((step) => step.name);
   const texts = turn.blocks.flatMap((block) => (block.kind === "text" ? [block.content] : []));
   const onlyAlerts = turn.blocks.length > 0 && turn.blocks.every((block) => block.kind === "alert");
@@ -75,7 +79,7 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
   const firstText = turn.blocks.find((block) => block.kind === "text");
   const links = turn.done ? artifactLinks(panels, tools) : [];
   const failedGate = uniqueStructures(panels).filter((panel) => gate(panel.metrics).status === "fail");
-  const thoughts = turn.blocks.flatMap((block) => (block.kind === "thinking" ? [block] : []));
+  const thoughts = turn.blocks.some((block) => block.kind === "thinking");
   // One string, so the memoised answers keep their props while the turn runs.
   const structures = linkResidues ? turnStructures(steps, panels).join("\n") : "";
 
@@ -87,9 +91,18 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
         </h3>
       )}
 
-      {running && <LiveStatus steps={steps} thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null} />}
+      {running && (
+        <LiveStatus
+          steps={steps}
+          thinking={lastThinking?.kind === "thinking" ? lastThinking.content : null}
+          failed={failedSteps}
+          trace={trace}
+          open={traceOpen}
+          onToggle={toggleTrace}
+        />
+      )}
 
-      {running && steps.length > 0 && <StepLog steps={steps} running={running} />}
+      {running && !traceOpen && steps.length > 0 && <StepLog steps={steps} running={running} />}
 
       {panels.length > 0 && (
         <TurnResults
@@ -131,11 +144,13 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
 
       {links.length > 0 && <ArtifactLinks links={links} />}
 
-      {!running && (steps.length > 0 || thoughts.length > 0) && (
+      {!running && (steps.length > 0 || thoughts) && (
         <TurnTrace
-          steps={steps}
-          thoughts={thoughts.map((block) => block.content)}
+          steps={steps.length}
+          trace={trace}
           failed={failedSteps}
+          open={traceOpen}
+          onToggle={toggleTrace}
           meta={{
             at: clock(turn.at),
             took: turn.endedAt !== undefined ? duration(turn.endedAt - turn.at) : "",
@@ -148,12 +163,7 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
 });
 
 function uniqueStructures(panels: Panel[]): StructurePanel[] {
-  const seen = new Set<string>();
-  return panels.filter((panel): panel is StructurePanel => {
-    if (panel.kind !== "structure" || seen.has(panel.path)) return false;
-    seen.add(panel.path);
-    return true;
-  });
+  return mergeTurnPanels(panels).filter((panel): panel is StructurePanel => panel.kind === "structure");
 }
 
 /** Poses whose affinity should not be quoted. */
@@ -187,42 +197,123 @@ function ArtifactLinks({ links }: { links: ArtifactLink[] }) {
 /** A finished turn's steps, timing and reasoning, folded into one line under the answer. */
 function TurnTrace({
   steps,
-  thoughts,
+  trace,
   failed,
   meta,
+  open,
+  onToggle,
 }: {
-  steps: ToolStep[];
-  thoughts: string[];
+  steps: number;
+  trace: TraceEntry[];
   failed: number;
   meta: TurnMeta;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   return (
     <div className="text-[11px]">
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={onToggle}
         aria-expanded={open}
         className="text-faint hover:text-muted flex max-w-full cursor-pointer items-center gap-x-1.5 text-left touch:min-h-11"
       >
         <span aria-hidden="true" className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>
           ›
         </span>
-        <span className="font-medium">{steps.length > 0 ? `${steps.length} step${steps.length === 1 ? "" : "s"}` : "Details"}</span>
+        <span className="font-medium">{steps > 0 ? `${steps} step${steps === 1 ? "" : "s"}` : "Details"}</span>
         {failed > 0 && <span style={{ color: "var(--color-accent)" }}>· {failed} failed</span>}
       </button>
       {open && (
         <div className="mt-2 flex flex-col gap-2">
           <TurnMetaList meta={meta} />
-          {steps.length > 0 && <StepList steps={steps} />}
-          {thoughts.map((content, index) => (
-            <p key={index} className="text-muted border-subtle border-l-2 py-0.5 pl-3 text-xs whitespace-pre-wrap">
-              {content}
-            </p>
-          ))}
+          <TraceList entries={trace} follow={false} />
         </div>
       )}
     </div>
+  );
+}
+
+type TraceGroup = Exclude<TraceEntry, { kind: "tool" }> | { kind: "steps"; id: string; steps: { step: ToolStep; index: number }[] };
+
+/** Consecutive tool calls share one box; reasoning and errors sit between them, in order. */
+function groupTrace(entries: TraceEntry[]): TraceGroup[] {
+  const groups: TraceGroup[] = [];
+  let index = 0;
+  for (const entry of entries) {
+    if (entry.kind !== "tool") {
+      groups.push(entry);
+      continue;
+    }
+    index += 1;
+    const last = groups[groups.length - 1];
+    if (last?.kind === "steps") last.steps.push({ step: entry, index });
+    else groups.push({ kind: "steps", id: `s-${entry.id}`, steps: [{ step: entry, index }] });
+  }
+  return groups;
+}
+
+/** How close to the bottom, in pixels, still counts as reading the end. */
+const STICK_PX = 16;
+
+/**
+ * The reasoning and tool calls of a turn, in order, in a box of its own
+ * height. *follow*: keep the newest entry in view while the reader is at
+ * the bottom; scrolling up to read stops that until they come back down.
+ */
+export function TraceList({ entries, follow }: { entries: TraceEntry[]; follow: boolean }) {
+  const box = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
+
+  useLayoutEffect(() => {
+    const element = box.current;
+    if (element && follow && atBottom.current) element.scrollTop = element.scrollHeight;
+  }, [entries, follow]);
+
+  if (entries.length === 0) return <p className="text-faint text-[11px] italic">Nothing yet.</p>;
+
+  return (
+    <div
+      ref={box}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight <= STICK_PX;
+      }}
+      className="flex max-h-72 flex-col gap-2 overflow-y-auto overscroll-contain pr-1"
+    >
+      {groupTrace(entries).map((group) => {
+        switch (group.kind) {
+          case "thinking":
+            return <TraceThought key={group.id} content={group.content} />;
+          case "error":
+            return <TraceError key={group.id} message={group.message} />;
+          case "steps":
+            return (
+              <ol key={group.id} className="bg-sunken border-subtle shrink-0 overflow-hidden rounded-lg border">
+                {group.steps.map(({ step, index }) => (
+                  <StepRow key={step.id} step={step} index={index} />
+                ))}
+              </ol>
+            );
+        }
+      })}
+    </div>
+  );
+}
+
+const TraceThought = memo(function TraceThought({ content }: { content: string }) {
+  return <p className="text-muted border-subtle shrink-0 border-l-2 py-0.5 pl-3 text-[11px] whitespace-pre-wrap">{content.trim()}</p>;
+});
+
+function TraceError({ message }: { message: string }) {
+  const line = message.split("\n").find((part) => part.trim())?.trim() ?? message;
+  return (
+    <p className="flex shrink-0 items-start gap-1.5 pl-3 text-[11px]" style={{ color: "var(--color-accent)" }}>
+      <span aria-hidden="true" className="font-semibold">
+        !
+      </span>
+      <span className="min-w-0">{line}</span>
+    </p>
   );
 }
 
@@ -239,16 +330,6 @@ function TurnMetaList({ meta }: { meta: TurnMeta }) {
         </p>
       )}
     </div>
-  );
-}
-
-function StepList({ steps }: { steps: ToolStep[] }) {
-  return (
-    <ol className="bg-sunken border-subtle overflow-hidden rounded-lg border">
-      {steps.map((step, index) => (
-        <StepRow key={step.id} step={step} index={index + 1} />
-      ))}
-    </ol>
   );
 }
 
@@ -289,12 +370,17 @@ function StepLog({ steps, running }: { steps: ToolStep[]; running: boolean }) {
 const StepRow = memo(function StepRow({ step, index }: { step: ToolStep; index: number }) {
   const [open, setOpen] = useState(false);
   const result = step.result;
-  const failed = result?.isError ?? false;
+  const state = stepState(step);
+  const failed = state === "failed";
+  const error = failed ? stepError(step) : null;
   const took = result ? (result.elapsedMs ?? Date.parse(result.ts) - step.at) : null;
   const args = summarise(step.arguments);
 
   return (
-    <li className="border-subtle border-b last:border-b-0">
+    <li
+      className="border-subtle border-b last:border-b-0"
+      style={failed ? { boxShadow: "inset 2px 0 0 var(--color-accent)" } : undefined}
+    >
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -302,7 +388,7 @@ const StepRow = memo(function StepRow({ step, index }: { step: ToolStep; index: 
         className="hover:bg-inset flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs"
       >
         <span className="text-faint w-5 shrink-0 text-right font-mono text-[10px]">{index}</span>
-        <StepIcon state={!result ? "running" : failed ? "failed" : "ok"} />
+        <StepIcon state={state} />
         <span className="shrink-0 font-mono font-semibold" style={{ color: failed ? "var(--color-accent)" : undefined }}>
           {step.name}
         </span>
@@ -313,6 +399,11 @@ const StepRow = memo(function StepRow({ step, index }: { step: ToolStep; index: 
           {took === null ? <Elapsed since={step.at} /> : Number.isFinite(took) ? duration(Math.max(0, took)) : ""}
         </span>
       </button>
+      {error && !open && (
+        <p className="-mt-1 truncate pr-3 pb-1.5 pl-10 text-[11px]" style={{ color: "var(--color-accent)" }} title={error}>
+          {error}
+        </p>
+      )}
       {open && (
         <div className="space-y-2 px-3 pb-3">
           <details className="text-[11px]">
@@ -340,7 +431,7 @@ const StepRow = memo(function StepRow({ step, index }: { step: ToolStep; index: 
   );
 });
 
-function StepIcon({ state }: { state: "running" | "ok" | "failed" }) {
+function StepIcon({ state }: { state: StepState }) {
   if (state === "running") {
     return (
       <span
@@ -361,8 +452,25 @@ function StepIcon({ state }: { state: "running" | "ok" | "failed" }) {
   );
 }
 
-/** What the agent is doing right now. */
-function LiveStatus({ steps, thinking }: { steps: ToolStep[]; thinking: string | null }) {
+/**
+ * What the agent is doing right now. The line opens onto the whole trace so
+ * far, which follows along as events arrive.
+ */
+function LiveStatus({
+  steps,
+  thinking,
+  failed,
+  trace,
+  open,
+  onToggle,
+}: {
+  steps: ToolStep[];
+  thinking: string | null;
+  failed: number;
+  trace: TraceEntry[];
+  open: boolean;
+  onToggle: () => void;
+}) {
   const runningStep = steps.find((step) => !step.result);
   const label = runningStep ? (
     <>
@@ -374,17 +482,36 @@ function LiveStatus({ steps, thinking }: { steps: ToolStep[]; thinking: string |
   const preview = thinking?.trim().split("\n").filter(Boolean).slice(-2).join(" ");
 
   return (
-    <div className="flex flex-col gap-1" role="status">
-      <p className={`text-muted flex items-center gap-2 text-xs ${runningStep ? "" : "italic"}`}>
+    <div className="flex flex-col gap-1.5">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        title={open ? "Hide the reasoning and steps" : "Show the reasoning and steps so far"}
+        className="text-muted hover:text-body flex max-w-full cursor-pointer items-center gap-2 text-left text-xs touch:min-h-11"
+      >
         <span
           aria-hidden="true"
-          className={`${runningStep ? "size-1.5" : "size-[7px]"} animate-pulse rounded-full`}
+          className={`${runningStep ? "size-1.5" : "size-[7px]"} shrink-0 animate-pulse rounded-full`}
           style={{ background: runningStep ? "var(--color-molecule)" : "var(--color-structure)" }}
         />
-        {label}…
-      </p>
-      {preview && !runningStep && (
-        <p className="text-faint border-subtle line-clamp-2 border-l-2 pl-3 text-[11px] italic">{preview}</p>
+        <span role="status" className={`min-w-0 truncate ${runningStep ? "" : "italic"}`}>
+          {label}…
+        </span>
+        {failed > 0 && (
+          <span className="shrink-0 text-[11px]" style={{ color: "var(--color-accent)" }}>
+            · {failed} failed
+          </span>
+        )}
+        <span aria-hidden="true" className={`text-faint inline-block shrink-0 transition-transform ${open ? "rotate-90" : ""}`}>
+          ›
+        </span>
+      </button>
+      {open ? (
+        <TraceList entries={trace} follow />
+      ) : (
+        preview &&
+        !runningStep && <p className="text-faint border-subtle line-clamp-2 border-l-2 pl-3 text-[11px] italic">{preview}</p>
       )}
     </div>
   );
@@ -404,16 +531,9 @@ function TurnResults({
   onOpenMolecule: (smiles: string) => void;
   onShowProperties: () => void;
 }) {
-  const seen = new Set<string>();
-  const unique = panels.filter((panel) => {
-    const key = panelKey(panel);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
   return (
     <PanelGrid
-      panels={unique}
+      panels={panels}
       theme={theme}
       openStructurePath={openStructurePath}
       onOpenMolecule={onOpenMolecule}

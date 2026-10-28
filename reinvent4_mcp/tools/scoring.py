@@ -59,32 +59,27 @@ def _structures_logged_since(offset: int) -> list[str]:
 
 
 def _normalize_endpoint_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Normalize component params to REINVENT4's per-endpoint list format.
+    """Normalize component params to REINVENT4's per-endpoint format.
 
-    REINVENT4 expects each param value to be a list with one element per
-    endpoint.  Since MCP always creates single-endpoint components, this
-    function fixes common agent formatting mistakes:
+    Each endpoint's ``params`` holds plain values; REINVENT4's
+    ``collect_params`` gathers them across endpoints into the lists its
+    component parameters expect, so a list here becomes a list of lists.
+    Since MCP always creates single-endpoint components, this function
+    fixes common agent formatting mistakes:
 
-    - Plain scalar  ``3``        -> ``[3]``
-    - Plain bool    ``True``     -> ``[True]``
-    - Double-nested ``[[3]]``    -> ``[3]``
-    - Double-nested ``[[True]]`` -> ``[True]``
-    - Already OK    ``[3]``      -> ``[3]``  (unchanged)
-    - List param    ``[["CCO"]]``-> ``[["CCO"]]``  (unchanged)
+    - Plain scalar  ``3``         -> ``3``  (unchanged)
+    - Wrapped       ``[3]``       -> ``3``
+    - Double-nested ``[[True]]``  -> ``True``
+    - List param    ``["CCO"]``   -> ``["CCO"]``  (unchanged)
+    - Nested list   ``[["CCO"]]`` -> ``["CCO"]``
     """
     result: dict[str, Any] = {}
     for key, value in params.items():
-        if not isinstance(value, list):
-            result[key] = [value]
-        elif (
-            len(value) == 1
-            and isinstance(value[0], list)
-            and len(value[0]) == 1
-            and isinstance(value[0][0], (int, float, bool))
-        ):
-            result[key] = [value[0][0]]
-        else:
-            result[key] = value
+        while isinstance(value, list) and len(value) == 1 and isinstance(value[0], list):
+            value = value[0]
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], (int, float, bool)):
+            value = value[0]
+        result[key] = value
     return result
 
 

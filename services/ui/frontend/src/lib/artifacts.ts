@@ -94,7 +94,8 @@ export function collectArtifacts(turns: Turn[]): Artifacts {
             latest(molecules, panel.smiles, { item: panel, ...sourced });
             break;
           case "interactions":
-            latest(interactions, panelKey(panel), { item: panel, ...sourced });
+            // A complex profiled again replaces its earlier profile.
+            latest(interactions, panel.structurePath ?? panel.smiles ?? "", { item: panel, ...sourced });
             break;
           case "properties":
             properties.push({ item: panel, ...sourced });
@@ -176,6 +177,97 @@ export function sameFile(a: string, b: string): boolean {
   const [short, long] = [parts(a), parts(b)].sort((x, y) => x.length - y.length);
   const tail = long.slice(-short.length);
   return short.length >= 2 && short.every((part, i) => part === tail[i]) && (runOf(a) === runOf(b) || short.length === long.length);
+}
+
+/** Which of a ligand's poses a file holds: "model_0" for mol_3_model_0.pdb, whatever batch index the run gave the ligand. */
+const poseOf = (path: string) => (path.split("/").pop() ?? path).replace(/\.(cif|mmcif|pdb)$/i, "").replace(/^mol_\d+_/, "");
+
+interface StructureGroup {
+  panel: StructurePanel;
+  paths: string[];
+}
+
+const holds = (group: StructureGroup, path: string) => group.paths.some((known) => sameFile(known, path));
+const sameLigand = (group: StructureGroup, smiles: string | null | undefined, path: string) =>
+  !!smiles && group.panel.smiles === smiles && poseOf(group.panel.path) === poseOf(path);
+
+/**
+ * *older* updated by *newer*. One file mentioned again keeps what was known
+ * of it; another run of the same ligand replaces it, unless that is only a
+ * mention (a contact profile names the file it read but scores nothing).
+ */
+function updated(older: StructurePanel, newer: StructurePanel): StructurePanel {
+  const smiles = newer.smiles ?? older.smiles;
+  const label = newer.label || older.label;
+  const named = { ...(smiles && { smiles }), ...(label && { label }) };
+  if (!sameFile(older.path, newer.path)) return !newer.metrics && older.metrics ? older : { ...newer, ...named };
+  const metrics = older.metrics || newer.metrics ? { ...older.metrics, ...newer.metrics } : undefined;
+  const base = newer.metrics ? { ...older, ...newer } : { ...newer, ...older };
+  return { ...base, ...named, ...(metrics && { metrics }) };
+}
+
+/**
+ * The results of one turn, one card per result with its newest data, in the
+ * order they first came. A ligand scored again (another run, the same pose)
+ * is one structure; a complex profiled again is one contact profile, also
+ * when it was the other run of that ligand that was profiled.
+ */
+export function mergeTurnPanels(panels: Panel[]): Panel[] {
+  const groups: StructureGroup[] = [];
+  const groupOf = new Map<Panel, StructureGroup>();
+  for (const panel of panels) {
+    if (panel.kind !== "structure") continue;
+    let group = groups.find((known) => holds(known, panel.path) || sameLigand(known, panel.smiles, panel.path));
+    if (group) {
+      group.panel = updated(group.panel, panel);
+      if (!holds(group, panel.path)) group.paths.push(panel.path);
+    } else {
+      group = { panel, paths: [panel.path] };
+      groups.push(group);
+    }
+    groupOf.set(panel, group);
+  }
+
+  const out: Panel[] = [];
+  const placed = new Set<StructureGroup>();
+  const profiles: { slot: number; group: StructureGroup | undefined; paths: string[]; ligand: string }[] = [];
+  const slots = new Map<string, number>();
+  for (const panel of panels) {
+    if (panel.kind === "structure") {
+      const group = groupOf.get(panel) as StructureGroup;
+      if (placed.has(group)) continue;
+      placed.add(group);
+      out.push(group.panel);
+    } else if (panel.kind === "interactions") {
+      const path = panel.structurePath;
+      const group = path ? groups.find((known) => holds(known, path) || sameLigand(known, panel.smiles, path)) : undefined;
+      const ligand = `${panel.smiles ?? ""}:${panel.name ?? ""}`;
+      const known = profiles.find(
+        (profile) =>
+          (group && profile.group === group) ||
+          (path ? profile.paths.some((seen) => sameFile(seen, path)) : profile.paths.length === 0 && profile.ligand === ligand),
+      );
+      if (!known) {
+        profiles.push({ slot: out.length, group, paths: path ? [path] : [], ligand });
+        out.push(panel);
+        continue;
+      }
+      const older = out[known.slot] as InteractionsPanel;
+      // A failed re-profile does not hide the contacts already measured.
+      if (!panel.error || older.error) out[known.slot] = panel;
+      if (path) known.paths.push(path);
+    } else {
+      const key = panelKey(panel);
+      const slot = slots.get(key);
+      if (slot === undefined) {
+        slots.set(key, out.length);
+        out.push(panel);
+      } else {
+        out[slot] = panel;
+      }
+    }
+  }
+  return out;
 }
 
 /** The contact profile of a structure: measured on that file, or failing that on the same ligand in the same run. */

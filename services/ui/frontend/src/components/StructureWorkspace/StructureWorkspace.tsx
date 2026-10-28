@@ -33,7 +33,8 @@ import { canonical, descriptors } from "../../lib/rdkit";
 import { useRDKit } from "../../hooks/useRDKit";
 import { fetchPdbEntry, isPdbId } from "../../lib/rcsb";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { MoleculeFacts } from "../MoleculeFacts/MoleculeFacts";
+import { DetailsColumns } from "./DetailsColumns";
+import { cofoldBars, predictionBars, propertyBars } from "./detailFacts";
 import { pickKind, pickQuestion, pickTitle, structureRef, type PickedResidue } from "./pickQuestion";
 
 interface Props {
@@ -52,7 +53,7 @@ interface Props {
   onAsk: (text: string) => void;
 }
 
-type DrawerTab = "contacts" | "details" | "files";
+type DrawerTab = "contacts" | "details";
 interface Message {
   id: number;
   text: string;
@@ -465,7 +466,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
         break;
       }
       case "panel":
-        openDetails(action.tab === "quality" ? "details" : action.tab);
+        openDetails(action.tab === "contacts" ? "contacts" : "details");
         break;
       case "structure": {
         if (structures.length < 2) {
@@ -651,7 +652,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           <OverlayButton label="Fit" title="The whole complex" onClick={() => execute({ kind: "fit" })} />
           <OverlayButton label="Ligand" title="Focus the ligand and its contacts" onClick={() => execute({ kind: "ligand" })} />
           <OverlayButton label="Pocket" title="Residues within 5 Å of the ligand" onClick={() => execute({ kind: "pocket", radius: 5 })} />
-          <OverlayButton label="Details" title="Contacts, details and files" pressed={detailsOpen} onClick={() => setDetailsOpen((open) => !open)} />
+          <OverlayButton label="Details" title="Contacts and details" pressed={detailsOpen} onClick={() => setDetailsOpen((open) => !open)} />
           <div className="relative">
             <OverlayButton label="Style ▾" title="Representation, colours and background" pressed={menuOpen} onClick={() => setMenuOpen((open) => !open)} />
             {menuOpen && (
@@ -754,7 +755,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
           )}
           {detailsOpen && (
             <nav role="tablist" className="ml-auto flex gap-0.5">
-              {(["contacts", "details", "files"] as const).map((tab) => (
+              {(["contacts", "details"] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -796,14 +797,13 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
               />
             )}
             {drawerTab === "details" && (
-              <DetailsTab panel={active} smiles={active.smiles ?? profile?.smiles ?? null} properties={properties ?? []} theme={theme} />
-            )}
-            {drawerTab === "files" && (
-              <FilesTab
+              <DetailsTab
                 panel={active}
                 title={title}
                 residues={fileResidues?.path === active.path ? fileResidues.list : null}
                 smiles={active.smiles ?? profile?.smiles ?? null}
+                properties={properties ?? []}
+                theme={theme}
               />
             )}
           </div>
@@ -1189,20 +1189,33 @@ function ContactsTab({
           <div className="bg-sunken rounded-lg p-1">
             <MolDepiction smiles={smiles} theme={theme} width={200} height={160} atoms={highlight} className="h-28 w-full" />
           </div>
-          <p className="text-faint mt-1 text-center text-[10px]">
-            {selected ? `${selected.ligandAtom ?? "ligand atom"} → ${selectedName}` : "Pick a contact to see the ligand atom"}
-          </p>
+          {selected && <p className="text-faint mt-1 text-center text-[10px]">{`${selected.ligandAtom ?? "ligand atom"} → ${selectedName}`}</p>}
         </div>
       )}
     </div>
   );
 }
 
-/** Pose quality and affinity, the ligand's predictions and properties, and the ligand in 2D: values with units. */
-function DetailsTab({ panel, smiles, properties, theme }: { panel: StructurePanel; smiles: string | null; properties: Sourced<PropertiesPanel>[]; theme: Theme }) {
+/** The structure's files, then pose quality, affinity and the ligand's predictions next to its properties, and the ligand in 2D. */
+function DetailsTab({
+  panel,
+  title,
+  residues,
+  smiles,
+  properties,
+  theme,
+}: {
+  panel: StructurePanel;
+  title: string;
+  residues: FileResidue[] | null;
+  smiles: string | null;
+  properties: Sourced<PropertiesPanel>[];
+  theme: Theme;
+}) {
   const { rdkit } = useRDKit(Boolean(smiles));
   const boltz = useBoltzFiles(panel);
   const cofold = panel.metrics ?? boltz.metrics;
+  const files = structureFiles(panel, title, residues, smiles, boltz);
   let predictions: FactGroup[] = [];
   let ligand: Fact[] = [];
   if (smiles) {
@@ -1221,14 +1234,13 @@ function DetailsTab({ panel, smiles, properties, theme }: { panel: StructurePane
     ligand = propertyFacts({}, rdkit ? descriptors(rdkit, smiles) : null);
   }
 
-  if (!cofold && !predictions.length && !ligand.length && !smiles) return <p className="text-muted py-4 text-center text-xs">No details for this file.</p>;
   return (
-    <div className="flex gap-3">
+    <div className="@container flex gap-3">
       <div className="min-w-0 flex-1">
-        <MoleculeFacts cofold={cofold} properties={ligand} predictions={predictions} />
+        <DetailsColumns files={files} cofold={cofold ? cofoldBars(cofold) : []} predictions={predictionBars(predictions)} properties={propertyBars(ligand)} />
       </div>
       {smiles && (
-        <div className="bg-sunken hidden w-36 shrink-0 self-start rounded-lg p-1 sm:block">
+        <div className="bg-sunken hidden w-36 shrink-0 self-start rounded-lg p-1 @3xl:block">
           <MolDepiction smiles={smiles} theme={theme} width={200} height={160} className="h-28 w-full" />
         </div>
       )}
@@ -1276,33 +1288,15 @@ function useBoltzFiles(panel: StructurePanel): BoltzFiles {
 }
 
 /** Download links: the structure, its ligand, sequence, MSA and the files the prediction wrote. */
-function FilesTab({ panel, title, residues, smiles }: { panel: StructurePanel; title: string; residues: FileResidue[] | null; smiles: string | null }) {
-  const boltz = useBoltzFiles(panel);
+function structureFiles(panel: StructurePanel, title: string, residues: FileResidue[] | null, smiles: string | null, boltz: BoltzFiles): RelatedFile[] {
   const stem = panel.name.replace(/\.(cif|mmcif|pdb)$/i, "");
   const sdf = boltz.files.find((file) => file.type === "SDF");
   const proteins = boltz.input?.proteins.length ? boltz.input.proteins : residues ? chainSequences(residues) : [];
-  const files = [
+  return [
     { label: "Structure", type: panel.format.toUpperCase(), url: panel.url, name: panel.name },
     sdf ?? (smiles ? smilesFile(title, smiles) : null),
     fastaFile(stem, proteins),
     ...(boltz.input ? inputFiles(boltz.input) : []),
     ...boltz.files.filter((file) => file !== sdf),
   ].filter((file): file is RelatedFile => file !== null);
-  return (
-    <ul className="flex flex-wrap gap-1.5">
-      {files.map((file) => (
-        <li key={file.url}>
-          <a
-            href={file.url}
-            download={file.name}
-            title={file.name}
-            className="bg-sunken hover:bg-inset text-body flex items-baseline gap-1.5 rounded-full px-2.5 py-1 text-[11px] no-underline"
-          >
-            {file.label}
-            <span className="text-faint text-[10px]">{file.type}</span>
-          </a>
-        </li>
-      ))}
-    </ul>
-  );
 }

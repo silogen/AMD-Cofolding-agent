@@ -326,17 +326,6 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
               <span className="font-mono">{base.id}</span> · v{base.version} · edits are kept in this browser until saved or applied
             </p>
           </div>
-          <label className="text-muted flex items-center gap-1 text-[11px]">
-            Combine
-            <select
-              value={draft.scoring.aggregation ?? "geometric_mean"}
-              onChange={(event) => edit({ ...draft, scoring: { ...draft.scoring, aggregation: event.target.value as "geometric_mean" | "arithmetic_mean" } })}
-              className="bg-sunken border-subtle rounded-md border px-1 py-0.5 text-[11px]"
-            >
-              <option value="geometric_mean">geometric mean</option>
-              <option value="arithmetic_mean">arithmetic mean</option>
-            </select>
-          </label>
         </div>
 
         {outdated && (
@@ -388,7 +377,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
           {save.state === "error" ? (
             <span style={{ color: "var(--color-accent)" }}>{save.message}</span>
           ) : dirty ? (
-            `Edited: ${[...diff.changed, ...diff.removed.map((n) => `−${n}`)].join(", ") || "aggregation"}`
+            `Edited: ${[...diff.changed, ...diff.removed.map((n) => `−${n}`)].join(", ")}`
           ) : (
             "Move a weight, a threshold or drag one on a curve."
           )}
@@ -561,7 +550,7 @@ function TtpReadView({
         )}
       </Block>
 
-      <Block title="Objectives" hint={`${all.length} · ${geometric ? "geometric mean" : "arithmetic mean"}`}>
+      <Block title="Objectives" hint={geometric ? `${all.length}` : `${all.length} · arithmetic mean`}>
         <ul>
           {objectivesOf(ttp, "pre_scoring").map((o) => (
             <ObjectiveLine key={o.name} objective={o} share={shares.get(o.name) ?? 0} relative={o.weight / largest} tag="pre-scoring" />
@@ -570,9 +559,6 @@ function TtpReadView({
             <ObjectiveLine key={o.name} objective={o} share={shares.get(o.name) ?? 0} relative={o.weight / largest} />
           ))}
         </ul>
-        <p className="text-faint mt-1 text-[10px]">
-          {geometric ? "Geometric mean: a molecule must do reasonably on every objective; one zero sinks the total." : "Arithmetic mean: a strong score can make up for a weak one."}
-        </p>
       </Block>
 
       {smarts.length > 0 && (

@@ -1889,6 +1889,49 @@ class TestMol2MolValidation:
         call_kwargs = mock_mgr.return_value.create_and_start.call_args.kwargs
         assert call_kwargs["seed_smiles"] == ["CCO", "c1ccccc1"]
 
+    @patch("reinvent4_mcp.tools.optimization._unsupported_tokens", return_value={})
+    @patch("reinvent4_mcp.jobs.manager.get_job_manager")
+    @patch("reinvent4_mcp.ttp.mapper.ttp_to_scorer_config")
+    @patch("reinvent4_mcp.ttp.mapper.get_mapper_summary")
+    @patch("reinvent4_mcp.tools.ttp.resolve_ttp")
+    def test_pasted_seeds_are_split(
+        self, mock_resolve, mock_summary, mock_scorer, mock_mgr, _tokens,
+    ):
+        from reinvent4_mcp.tools.optimization import run_optimization
+        from reinvent4_mcp.ttp.schema import TTP
+
+        mock_resolve.return_value = TTP.model_validate(MINIMAL_TTP)
+        mock_scorer.return_value = {"type": "geometric_mean", "component": [{"QED": {}}]}
+        mock_summary.return_value = {"n_total_components": 1}
+        mock_mgr.return_value.create_and_start.return_value = {"job_id": "m2m02"}
+
+        result = run_optimization(
+            ttp_id="test-opt-ttp",
+            model=".mol2mol_medium_similarity",
+            seed_smiles=["CCO\nc1ccccc1, CCN", " "],
+        )
+
+        assert "error" not in result
+        call_kwargs = mock_mgr.return_value.create_and_start.call_args.kwargs
+        assert call_kwargs["seed_smiles"] == ["CCO", "c1ccccc1", "CCN"]
+
+    @patch(
+        "reinvent4_mcp.tools.optimization._unsupported_tokens",
+        return_value={"C[C-]C": ["[C-]"]},
+    )
+    @patch("reinvent4_mcp.tools.ttp.resolve_ttp")
+    def test_seeds_outside_the_vocabulary_are_rejected(self, mock_resolve, _tokens):
+        from reinvent4_mcp.tools.optimization import run_optimization
+
+        result = run_optimization(
+            ttp_id="test-opt-ttp",
+            model=".mol2mol_medium_similarity",
+            seed_smiles=["CCO", "C[C-]C"],
+        )
+
+        assert "[C-]" in result["error"]
+        mock_resolve.assert_not_called()
+
     @patch("reinvent4_mcp.jobs.manager.get_job_manager")
     @patch("reinvent4_mcp.ttp.mapper.ttp_to_scorer_config")
     @patch("reinvent4_mcp.ttp.mapper.get_mapper_summary")

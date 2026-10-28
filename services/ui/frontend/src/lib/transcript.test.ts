@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { AgentTurn, ConversationEvent } from "../types/api";
-import { applyEvents, EMPTY_TRANSCRIPT, toolSteps } from "./transcript";
+import { applyEvents, EMPTY_TRANSCRIPT, stepError, stepState, toolSteps, turnTrace } from "./transcript";
 
 type Unnumbered = ConversationEvent extends infer E ? (E extends ConversationEvent ? Omit<E, "seq" | "ts"> : never) : never;
 
@@ -119,11 +119,73 @@ describe("applyEvents", () => {
     expect(state.turns.every((t) => t.role === "user" || t.done)).toBe(true);
   });
 
+  it("traces reasoning, tool calls and errors in the order they happened", () => {
+    const state = applyEvents(
+      EMPTY_TRANSCRIPT,
+      turn(
+        { type: "thinking", content: "Plan" },
+        { type: "tool_call", id: "c1", name: "list_jobs", arguments: {} },
+        { type: "thinking", content: "Next" },
+        { type: "error", message: "Boltz timed out" },
+        result("c1", "list_jobs"),
+        { type: "assistant_message", content: "Done.", inputTokens: 1, outputTokens: 1 },
+      ),
+    );
+    const trace = turnTrace(state.turns[1] as AgentTurn);
+    expect(trace.map((entry) => entry.kind)).toEqual(["thinking", "tool", "thinking", "error"]);
+    expect(trace[1]).toMatchObject({ kind: "tool", result: { name: "list_jobs" } });
+  });
+
   it("shows a monitor alert outside a turn as its own finished block", () => {
     seq = 0;
     const state = applyEvents(EMPTY_TRANSCRIPT, events({ type: "monitor_alert", alert: { job: "ab12" } }));
     const agent = state.turns[0] as AgentTurn;
     expect(agent.done).toBe(true);
     expect(agent.blocks[0].kind).toBe("alert");
+  });
+});
+
+describe("step failures", () => {
+  const step = (extra?: object) => {
+    const state = applyEvents(
+      EMPTY_TRANSCRIPT,
+      turn(
+        { type: "tool_call", id: "c1", name: "run_optimization", arguments: {} },
+        ...(extra ? [result("c1", "run_optimization", extra)] : []),
+      ),
+    );
+    return toolSteps(state.turns[1] as AgentTurn)[0];
+  };
+
+  it("tells running, done and failed apart", () => {
+    expect(stepState(step())).toBe("running");
+    expect(stepError(step())).toBeNull();
+    expect(stepState(step({ result: '{"job_id": "ab12"}' }))).toBe("ok");
+    expect(stepState(step({ result: "Tool crashed\nTraceback ...", isError: true }))).toBe("failed");
+  });
+
+  it("gives the first line of a failed result", () => {
+    expect(stepError(step({ result: "\nTool crashed\nTraceback ...", isError: true }))).toBe("Tool crashed");
+    expect(stepError(step({ result: "", isError: true }))).toBe("Failed");
+  });
+
+  it("counts an error payload as a failure even when the call itself succeeded", () => {
+    const failed = step({ result: JSON.stringify({ error: "TTP 'x' not found", job_id: null }) });
+    expect(stepState(failed)).toBe("failed");
+    expect(stepError(failed)).toBe("TTP 'x' not found");
+    expect(stepError(step({ result: JSON.stringify({ error: { message: "bad config" } }) }))).toBe("bad config");
+    expect(stepError(step({ result: JSON.stringify({ ok: false, detail: "queue full" }) }))).toBe("queue full");
+    expect(stepState(step({ result: JSON.stringify({ error: null, ok: true }) }))).toBe("ok");
+  });
+
+  it("reads the error from output cut for display", () => {
+    const cut = `{"error": "config \\"x\\" invalid", "log": "${"a".repeat(50)}`;
+    expect(stepError(step({ result: cut, truncated: true }))).toBe('config "x" invalid');
+  });
+
+  it("keeps the message short", () => {
+    const message = stepError(step({ result: "x".repeat(500), isError: true }));
+    expect(message?.length).toBe(200);
+    expect(message?.endsWith("…")).toBe(true);
   });
 });

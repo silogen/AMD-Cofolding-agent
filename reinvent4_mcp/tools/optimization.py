@@ -10,6 +10,7 @@ agent-monitored RL optimization campaigns.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,36 @@ def _is_mol2mol_model(model: str) -> bool:
 
     key = model.lower()
     return "m2m" in key or "mol2mol" in key
+
+
+_SEED_SEPARATORS = re.compile(r"[\s,;]+")
+
+
+def _split_seeds(seed_smiles: list[str]) -> list[str]:
+    """Split entries holding several pasted SMILES (SMILES never contain
+    whitespace, commas or semicolons)."""
+
+    return [s for entry in seed_smiles for s in _SEED_SEPARATORS.split(entry or "") if s]
+
+
+def _unsupported_tokens(model: str, seeds: list[str]) -> dict[str, list[str]] | None:
+    """Tokens in each seed that the prior's vocabulary lacks, as REINVENT4
+    checks after launch; None when the vocabulary cannot be read."""
+
+    from reinvent4_mcp.jobs.toml_generator import resolve_model_path
+
+    try:
+        import torch
+        from reinvent.utils import get_tokens_from_vocabulary
+        from reinvent.utils.config_parse import find_invalid_tokens
+
+        ckpt = torch.load(resolve_model_path(model), map_location="cpu", weights_only=False)
+        allowed = get_tokens_from_vocabulary(ckpt["vocabulary"])[0]
+    except Exception:
+        logger.debug("Could not read the vocabulary of '%s'", model, exc_info=True)
+        return None
+    found = {s: sorted(find_invalid_tokens(s, allowed)) for s in seeds}
+    return {s: tokens for s, tokens in found.items() if tokens}
 
 
 def run_optimization(
@@ -120,6 +151,9 @@ def run_optimization(
         )
 
     if is_mol2mol and seed_smiles:
+        seed_smiles = _split_seeds(seed_smiles)
+        if not seed_smiles:
+            return {"error": "seed_smiles is empty."}
         try:
             from rdkit import Chem
         except ImportError:
@@ -128,21 +162,24 @@ def run_optimization(
                 "Invalid seeds may cause a downstream failure in mol2mol."
             )
         else:
-            cleaned, bad = [], []
-            for s in seed_smiles:
-                s2 = (s or "").strip()
-                if not s2 or Chem.MolFromSmiles(s2) is None:
-                    bad.append(s)
-                else:
-                    cleaned.append(s2)
+            bad = [s for s in seed_smiles if Chem.MolFromSmiles(s) is None]
             if bad:
                 return {
                     "error": (
-                        "Invalid seed_smiles (empty or not parseable by "
-                        f"RDKit): {bad}"
+                        f"{len(bad)} of {len(seed_smiles)} seed_smiles are not "
+                        f"parseable by RDKit: {bad}. Pass one SMILES per list "
+                        "item, exactly as given."
                     ),
                 }
-            seed_smiles = cleaned
+        unsupported = _unsupported_tokens(model, seed_smiles)
+        if unsupported:
+            return {
+                "error": (
+                    f"The prior '{model}' cannot read these seeds; their tokens "
+                    f"are outside its vocabulary: {unsupported}. Drop them, or "
+                    "rewrite each with neutral atoms (e.g. no [C-], [c-], [s+])."
+                ),
+            }
 
     resolved = resolve_ttp(ttp_id=ttp_id, ttp_data=ttp)
     if isinstance(resolved, dict):

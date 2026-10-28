@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useState } from "react";
-import { CURVE_LABELS, TRANSFORM_TYPES, objectiveSource, rangeFields, retypeObjective, setRange, type Objective, type Transform } from "../../lib/ttp";
+import { CURVE_LABELS, TRANSFORM_TYPES, groupColour, objectiveGroup, rangeFields, retypeObjective, setRange, type Objective, type Transform } from "../../lib/ttp";
 import { TransformCurve } from "../TtpPanel/TransformCurve";
 
 interface Props {
@@ -26,7 +26,8 @@ export function BuilderObjective({ objective, onChange, onRename, onRemove, weig
   const reference = Array.isArray(objective.params?.smiles) ? String(objective.params.smiles[0] ?? "") : "";
   const known = (TRANSFORM_TYPES as readonly string[]).includes(transform?.type ?? "");
   const relative = weights.max > 0 ? objective.weight / weights.max : 1;
-  const colour = objectiveSource(objective) === "native" ? "var(--color-ok)" : "var(--color-structure)";
+  const group = objectiveGroup(objective);
+  const colour = groupColour(group);
   const setTransform = (next: Transform | null) => onChange({ transform: next });
   const field = (key: string) =>
     transform && <NumberField value={transform[key]} onChange={(value) => setTransform(setRange(transform, { [key]: value }))} label={`${objective.name} ${key}`} />;
@@ -36,7 +37,7 @@ export function BuilderObjective({ objective, onChange, onRename, onRemove, weig
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center gap-2">
           <span className="flex w-44 min-w-0 shrink-0 items-center gap-1.5">
-            <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} />
+            <span aria-hidden="true" title={group ?? undefined} className="size-1.5 shrink-0 rounded-full" style={{ background: colour }} />
             <input
               value={objective.name}
               onChange={(event) => onRename(event.target.value)}

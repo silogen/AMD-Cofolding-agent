@@ -34,8 +34,9 @@ import {
   objectiveCatalogue,
   objectiveKey,
   objectiveGroups,
-  groupState,
-  toggleGroup,
+  defaultObjectives,
+  groupColour,
+  objectiveGroup,
   toggleObjective,
   dropObjectives,
   parseComponents,
@@ -396,8 +397,8 @@ describe("objectives", () => {
     expect(keys).not.toContain("native:HBondDonors");
     expect(keys).not.toContain("interaction_profiler:hbond");
     for (const e of catalogue) expect(objectiveKey(e.make())).toBe(e.key);
-    expect(catalogue.find((e) => e.key === "native:Csp3")).toMatchObject({ extra: true, core: false });
-    expect(catalogue.find((e) => e.key === "posebusters:")).toMatchObject({ core: true, after: "boltz:" });
+    expect(catalogue.find((e) => e.key === "native:Csp3")).toMatchObject({ extra: true });
+    expect(catalogue.find((e) => e.key === "posebusters:")).toMatchObject({ after: "boltz:" });
   });
 
   it("matches REINVENT's class names to the usual metrics, whatever their case", () => {
@@ -418,14 +419,33 @@ describe("objectives", () => {
   it("starts each metric at its preset weight", () => {
     const groups = objectiveGroups(objectiveCatalogue(services, []));
     const druglike = groups.find((g) => g.name === "Drug-likeness")!;
-    const core = druglike.entries.filter((e) => e.core).map((e) => e.make());
-    expect(core).toEqual(presetObjectives("druglike", services));
+    const preset = new Set(presetObjectives("druglike", services).map(objectiveKey));
+    const made = druglike.entries.filter((e) => preset.has(e.key)).map((e) => e.make());
+    expect(made).toEqual(presetObjectives("druglike", services));
     expect(druglike.entries.find((e) => e.key === "native:HBondDonors")?.make().weight).toBe(0.5);
+  });
+
+  it("starts a new profile with cofolding, pose checks, drug-likeness and key ADMET endpoints the catalogue offers", () => {
+    const list = defaultObjectives(objectiveCatalogue(services, []));
+    expect(list.map(objectiveKey)).toEqual(["boltz:", "posebusters:", "native:QED", "native:SAScore", "admet:logd"]);
+    expect(list[1].depends_on).toBe(list[0].name);
+    expect(list[0].service_url).toBe("http://localhost:8091/score");
+    expect(list.map((o) => o.weight)).toEqual([1, 0.6, 1, 0.6, 0.8]);
+    expect(defaultObjectives(objectiveCatalogue({}, [])).map(objectiveKey)).toContain("admet:aqueous_solubility");
+    expect(defaultObjectives(objectiveCatalogue({ admet: services.admet }, [])).map(objectiveKey)).toEqual(["native:QED", "native:SAScore", "admet:logd"]);
+  });
+
+  it("gives each picker group its own theme colour", () => {
+    const catalogue = objectiveCatalogue(services, []);
+    for (const e of catalogue) expect(objectiveGroup(e.make())).toBe(e.group);
+    const colours = objectiveGroups(catalogue).map((g) => groupColour(g.name));
+    expect(new Set(colours).size).toBe(4);
+    for (const c of colours) expect(c).toMatch(/^var\(--color-/);
+    expect(groupColour(objectiveGroup({ type: "external", service: "my_api" }))).toBe("var(--text-faint)");
   });
 
   describe("picking", () => {
     const groups = objectiveGroups(objectiveCatalogue(services, []));
-    const group = (name: string) => groups.find((g) => g.name === name)!;
     const pick = (key: string) => groups.flatMap((g) => g.entries).find((e) => e.key === key)!;
     const names = (list: Objective[]) => list.map((o) => o.name);
 
@@ -459,38 +479,9 @@ describe("objectives", () => {
       expect(toggleObjective(renamed, pick("posebusters:"), true)[1].depends_on).toBe("Affinity");
     });
 
-    it("shows a group as all, some or none of its core metrics", () => {
-      const druglike = group("Drug-likeness");
-      expect(groupState([], druglike)).toBe("none");
-      expect(groupState(presetObjectives("druglike", services), druglike)).toBe("all");
-      expect(groupState([nativeObjective("HBondDonors")], druglike)).toBe("some");
-      expect(groupState(presetObjectives("druglike", services).slice(1), druglike)).toBe("some");
-    });
-
-    it("selects a group's core metrics without touching other groups", () => {
-      const start = [serviceObjective(services, "admet", "logd"), nativeObjective("QED")];
-      const next = toggleGroup(start, group("Drug-likeness"));
-      expect(next.slice(0, 2)).toEqual(start);
-      expect(names(next)).toEqual(["LogD", "QED", "Molecular weight", "cLogP", "TPSA", "Synthetic accessibility"]);
-      const cofold = toggleGroup([], group("Cofold"));
-      expect(names(cofold)).toEqual(["Boltz affinity", "Pose quality"]);
-      expect(cofold[1].depends_on).toBe("Boltz affinity");
-      expect(names(toggleGroup([], group("ADMET")))).toHaveLength(services.admet.endpoints.length);
-    });
-
-    it("clears a group but keeps objectives edited by hand and what they run after", () => {
-      const list = [...toggleGroup([], group("Cofold")), ...presetObjectives("druglike", services), serviceObjective(services, "admet", "logd")];
-      const tuned = list.find((o) => o.name === "TPSA")!;
-      expect(names(toggleGroup(list, group("Drug-likeness"), (o) => o === tuned))).toEqual(["Boltz affinity", "Pose quality", "TPSA", "LogD"]);
-      const pose = list[1];
-      expect(names(toggleGroup(list, group("Cofold"), (o) => o === pose)).slice(0, 2)).toEqual(["Boltz affinity", "Pose quality"]);
-      expect(names(toggleGroup(list, group("Cofold")))).toEqual(names(list.slice(2)));
-      const extra = toggleObjective(list, pick("native:HBondDonors"), true);
-      expect(names(toggleGroup(extra, group("Drug-likeness")))).toEqual(["Boltz affinity", "Pose quality", "LogD"]);
-    });
-
     it("drops what runs after a removed objective", () => {
-      const list = [...toggleGroup([], group("Cofold")), nativeObjective("QED")];
+      const list = [...toggleObjective(toggleObjective([], pick("boltz:"), true), pick("posebusters:"), true), nativeObjective("QED")];
+      expect(names(list)).toEqual(["Boltz affinity", "Pose quality", "QED"]);
       expect(names(dropObjectives(list, (o) => o.service === "boltz"))).toEqual(["QED"]);
       expect(dropObjectives(list, () => false)).toBe(list);
     });

@@ -1,9 +1,10 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type { InteractionsPanel, MoleculePanel, Panel, PropertiesPanel, StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
+import { mergeTurnPanels } from "../../lib/artifacts";
 import { StructureCard } from "../StructureCard/StructureCard";
 import { MoleculeCard } from "../MoleculeCard/MoleculeCard";
 import { InteractionsCard } from "../InteractionsCard/InteractionsCard";
@@ -19,7 +20,8 @@ interface Props {
 
 /** What tool calls produced: complexes and their contacts, predictions, then molecules. Tables feed the candidates, not the chat. */
 export function PanelGrid({ panels, theme, openStructurePath, onOpenMolecule, onShowProperties }: Props) {
-  const of = <K extends Panel["kind"]>(kind: K) => panels.filter((panel) => panel.kind === kind) as Extract<Panel, { kind: K }>[];
+  const merged = useMemo(() => mergeTurnPanels(panels), [panels]);
+  const of = <K extends Panel["kind"]>(kind: K) => merged.filter((panel) => panel.kind === kind) as Extract<Panel, { kind: K }>[];
   const structures: StructurePanel[] = of("structure");
   const interactions: InteractionsPanel[] = of("interactions");
   const properties: PropertiesPanel[] = of("properties");
@@ -28,7 +30,7 @@ export function PanelGrid({ panels, theme, openStructurePath, onOpenMolecule, on
   return (
     <div className="@container space-y-3">
       {structures.length > 0 && (
-        <div className="grid gap-3 @2xl:grid-cols-2">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,16rem),20rem))] gap-3">
           {structures.slice(0, 6).map((panel) => (
             <StructureCard key={panel.path} panel={panel} theme={theme} isOpen={openStructurePath === panel.path} />
           ))}
@@ -39,7 +41,7 @@ export function PanelGrid({ panels, theme, openStructurePath, onOpenMolecule, on
       )}
 
       {interactions.map((panel, index) => (
-        <InteractionsCard key={`${panel.structurePath}-${index}`} panel={panel} />
+        <InteractionsCard key={panel.structurePath ?? `${panel.smiles}-${index}`} panel={panel} />
       ))}
 
       {properties.map((panel, index) => (

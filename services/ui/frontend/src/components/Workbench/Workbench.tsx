@@ -32,6 +32,7 @@ import { MoleculePage } from "../MoleculePage/MoleculePage";
 import { summarise } from "../../lib/format";
 import { extractTargetFacts, toolEvents } from "../../lib/ttp";
 import { candidatesOf } from "../../lib/candidates";
+import { stepState } from "../../lib/transcript";
 import { CandidatesPanel } from "../CandidatesPanel/CandidatesPanel";
 import { JobsPanel } from "../JobsPanel/JobsPanel";
 import { RunResults } from "../RunResults/RunResults";
@@ -491,9 +492,9 @@ function MoleculesTab({ artifacts, theme, sessionId, onOpen }: Props & { onOpen:
 
 function ActivityTab({ artifacts }: Props) {
   const [filter, setFilter] = useState<"all" | "failed">("all");
-  const steps = filter === "failed" ? artifacts.steps.filter((step) => step.result?.isError) : artifacts.steps;
+  const steps = filter === "failed" ? artifacts.steps.filter((step) => stepState(step) === "failed") : artifacts.steps;
   const total = artifacts.steps.reduce((sum, step) => sum + (step.result?.elapsedMs ?? 0), 0);
-  const failed = artifacts.steps.filter((step) => step.result?.isError).length;
+  const failed = artifacts.steps.filter((step) => stepState(step) === "failed").length;
 
   if (artifacts.steps.length === 0) {
     return <Empty>No tool calls yet. Every call the agent makes is logged here with its duration.</Empty>;
@@ -523,7 +524,7 @@ function ActivityTab({ artifacts }: Props) {
       </div>
       <ol className="border-subtle min-h-0 flex-1 overflow-y-auto border-t">
         {steps.map((step) => {
-          const state = !step.result ? "running" : step.result.isError ? "failed" : "ok";
+          const state = stepState(step);
           return (
             <li key={step.id} className="border-subtle flex items-center gap-2 border-b px-3 py-1.5 text-[11px]">
               <span

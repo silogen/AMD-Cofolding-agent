@@ -853,8 +853,6 @@ export interface CatalogueEntry {
   group: string;
   label: string;
   make: () => Objective;
-  /** Selected by the group's checkbox. */
-  core?: boolean;
   /** Shown once the group is expanded: the less common native scorers. */
   extra?: boolean;
   /** The key of the objective it runs after (a Boltz pose); it cannot be added without it. */
@@ -885,7 +883,7 @@ const WEIGHTS: Record<string, number> = {
   "admet:efflux_mdck": 0.4,
 };
 
-function catalogueEntry(group: string, label: string, make: () => Objective, flags: Pick<CatalogueEntry, "core" | "extra" | "after"> = {}): CatalogueEntry {
+function catalogueEntry(group: string, label: string, make: () => Objective, flags: Pick<CatalogueEntry, "extra" | "after"> = {}): CatalogueEntry {
   const key = objectiveKey(make());
   return { key, group, label, make: () => ({ ...make(), weight: WEIGHTS[key] ?? 0.5 }), ...flags };
 }
@@ -895,8 +893,8 @@ export function objectiveCatalogue(services: Record<string, ServiceInfo>, compon
   const entries: CatalogueEntry[] = [];
   const has = (name: string) => name in services || Object.keys(services).length === 0;
   if (has("boltz")) {
-    entries.push(catalogueEntry("Cofold", "Binding affinity", () => serviceObjective(services, "boltz"), { core: true }));
-    if (has("posebusters")) entries.push(catalogueEntry("Cofold", "Pose quality", () => serviceObjective(services, "posebusters"), { core: true, after: BOLTZ_KEY }));
+    entries.push(catalogueEntry("Cofold", "Binding affinity", () => serviceObjective(services, "boltz")));
+    if (has("posebusters")) entries.push(catalogueEntry("Cofold", "Pose quality", () => serviceObjective(services, "posebusters"), { after: BOLTZ_KEY }));
     if (has("interaction_profiler")) entries.push(catalogueEntry("Cofold", "H-bond contacts", () => serviceObjective(services, "interaction_profiler", "hbond"), { after: BOLTZ_KEY }));
   }
   const lower = (names: string[]) => new Set(names.map((c) => c.toLowerCase()));
@@ -909,13 +907,12 @@ export function objectiveCatalogue(services: Record<string, ServiceInfo>, compon
   for (const component of native) {
     entries.push(
       catalogueEntry("Drug-likeness", COMPONENT_NAMES[component] ?? component, () => nativeObjective(component), {
-        core: CORE_NATIVE.has(component),
         extra: !PREFERRED_NATIVE.includes(component),
       }),
     );
   }
   const endpoints = services.admet?.endpoints.length ? services.admet.endpoints : has("admet") ? Object.keys(ADMET_TRANSFORMS) : [];
-  for (const endpoint of endpoints) entries.push(catalogueEntry("ADMET", ENDPOINT_NAMES[endpoint] ?? endpoint, () => serviceObjective(services, "admet", endpoint), { core: true }));
+  for (const endpoint of endpoints) entries.push(catalogueEntry("ADMET", ENDPOINT_NAMES[endpoint] ?? endpoint, () => serviceObjective(services, "admet", endpoint)));
   for (const [target, list] of Object.entries(services.retrodmta?.targets ?? {})) {
     for (const endpoint of list.length ? list : [""]) {
       entries.push(catalogueEntry("RetroDMTA", endpoint || target, () => serviceObjective(services, "retrodmta", endpoint || undefined, target)));
@@ -934,13 +931,42 @@ export function objectiveGroups(catalogue: CatalogueEntry[]): ObjectiveGroup[] {
   return groups;
 }
 
-/** "all" when every core objective of the group is in the list, "some" when any of its objectives is. */
-export function groupState(list: Objective[], group: ObjectiveGroup): "all" | "some" | "none" {
-  const keys = new Set(list.map(objectiveKey));
-  if (!group.entries.some((e) => keys.has(e.key))) return "none";
-  const core = group.entries.filter((e) => e.core);
-  return core.length > 0 && core.every((e) => keys.has(e.key)) ? "all" : "some";
+/** What a new profile starts with: cofolding, pose checks, QED, synthetic accessibility and two ADMET endpoints, as far as the catalogue offers them. */
+const DEFAULT_KEYS = [BOLTZ_KEY, "posebusters:", "native:QED", "native:SAScore", "admet:logd", "admet:aqueous_solubility"];
+
+export function defaultObjectives(catalogue: CatalogueEntry[]): Objective[] {
+  return DEFAULT_KEYS.reduce<Objective[]>((list, key) => {
+    const entry = catalogue.find((e) => e.key === key);
+    return entry ? toggleObjective(list, entry, true) : list;
+  }, []);
 }
+
+/** One hue per picker group, from the theme tokens so it follows light and dark. */
+export const GROUP_COLOURS: Record<string, string> = {
+  Cofold: "var(--color-structure)",
+  "Drug-likeness": "var(--color-ok)",
+  ADMET: "var(--color-table)",
+  RetroDMTA: "var(--color-molecule)",
+};
+
+/** The picker group an objective belongs to, or null for a custom endpoint. */
+export function objectiveGroup(o: Pick<Objective, "type" | "service">): string | null {
+  if (o.type === "native") return "Drug-likeness";
+  switch (o.service) {
+    case "boltz":
+    case "posebusters":
+    case "interaction_profiler":
+      return "Cofold";
+    case "admet":
+      return "ADMET";
+    case "retrodmta":
+      return "RetroDMTA";
+    default:
+      return null;
+  }
+}
+
+export const groupColour = (group: string | null) => (group && GROUP_COLOURS[group]) || "var(--text-faint)";
 
 /** The list without the objectives *drop* picks, and without whatever ran after them. */
 export function dropObjectives(list: Objective[], drop: (o: Objective) => boolean): Objective[] {
@@ -968,20 +994,6 @@ export function toggleObjective(list: Objective[], entry: CatalogueEntry, on: bo
     objective.depends_on = producer.name;
   }
   return [...list, { ...objective, name: uniqueName(objective.name, list.map((o) => o.name)) }];
-}
-
-/**
- * The group's checkbox: adds its missing core objectives, or once they are
- * all in, removes the group's objectives except those *keep* holds (edited
- * by hand) and what a kept objective runs after. Other groups stay as they are.
- */
-export function toggleGroup(list: Objective[], group: ObjectiveGroup, keep: (o: Objective) => boolean = () => false): Objective[] {
-  if (groupState(list, group) !== "all") return group.entries.filter((e) => e.core).reduce((next, e) => toggleObjective(next, e, true), list);
-  const keys = new Set(group.entries.map((e) => e.key));
-  const stays = (o: Objective) => !keys.has(objectiveKey(o)) || keep(o);
-  const needed = new Set(list.filter(stays).map((o) => o.depends_on));
-  const next = list.filter((o) => stays(o) || needed.has(o.name));
-  return next.length === list.length ? list : next;
 }
 
 /** A name not yet taken: "QED", "QED 2", ... */

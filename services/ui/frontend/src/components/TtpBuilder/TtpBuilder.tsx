@@ -10,9 +10,12 @@ import { sharedPath, sharedRcsbCif, sliceRegion, uploadStructure, type Region, t
 import { fetchText, msaMismatch, pdbIdFromPath, readA3mQuery, structureChains, targetFiles, type ProteinChain } from "../../lib/sharedFiles";
 import { uploadFile } from "../../lib/uploads";
 import {
+  asTtp,
   asTtpList,
   buildTtp,
+  createdTimes,
   createdTtp,
+  defaultObjectives,
   dropObjectives,
   emptyTargetFacts,
   formFromTtp,
@@ -24,14 +27,14 @@ import {
   objectiveCatalogue,
   objectiveGroups,
   parseComponents,
+  parseResult,
   parseServices,
   payloadError,
-  presetObjectives,
   rememberCreated,
   renameObjective,
   sequenceProblem,
   slugify,
-  toggleGroup,
+  sortTtps,
   toggleObjective,
   weightRangeOf,
   type Objective,
@@ -40,6 +43,7 @@ import {
   type TemplateConfig,
   type Ttp,
   type TtpForm,
+  type TtpSummary,
 } from "../../lib/ttp";
 import {
   loadRunSettings,
@@ -75,18 +79,19 @@ interface Props {
 interface Row {
   key: number;
   objective: Objective;
-  /** Changed by hand: a group's checkbox leaves it alone. */
-  edited: boolean;
 }
 
 interface Catalog {
   services: Record<string, ServiceInfo>;
   components: string[];
-  ids: string[];
+  /** The stored TTPs, most recently created first. */
+  ttps: TtpSummary[];
   models: PriorModel[];
   files: { structures: Asset[]; msas: Asset[] } | null;
   loaded: boolean;
 }
+
+type Loading = { state: "idle" } | { state: "busy"; id: string } | { state: "error"; message: string };
 
 type Lookup = { state: "idle" } | { state: "busy" } | { state: "error"; message: string } | { state: "found"; facts: TargetFacts };
 type Submit =
@@ -135,12 +140,101 @@ const loaded = (shared: SharedStructure, label: string, fromPdb: boolean, pdb: s
 });
 
 let nextKey = 1;
-const rows = (objectives: Objective[]): Row[] => objectives.map((objective) => ({ key: nextKey++, objective, edited: false }));
+const rows = (objectives: Objective[]): Row[] => objectives.map((objective) => ({ key: nextKey++, objective }));
 
 /** A form to define a Therapeutic Target Profile; the chat then gets the request to use it, or to run REINVENT on it. */
-export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
-  const [start] = useState(() => (initial ? formFromTtp(initial) : null));
-  const [catalog, setCatalog] = useState<Catalog>({ services: {}, components: [], ids: [], models: [], files: null, loaded: false });
+export function TtpBuilder({ initial, ...props }: Props) {
+  const [catalog, setCatalog] = useState<Catalog>({ services: {}, components: [], ttps: [], models: [], files: null, loaded: false });
+  const [source, setSource] = useState<{ ttp?: Ttp; key: number }>({ ttp: initial, key: 0 });
+  const [loading, setLoading] = useState<Loading>({ state: "idle" });
+  const latestLoad = useRef("");
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.allSettled([
+      callTool("list_external_services"),
+      callTool("list_scoring_components"),
+      callTool("list_ttps"),
+      callTool("list_available_models"),
+      callTool("list_shared_assets"),
+    ]).then(([services, components, ttps, models, assets]) => {
+      if (cancelled) return;
+      setCatalog({
+        services: services.status === "fulfilled" ? parseServices(services.value.result) : {},
+        components: components.status === "fulfilled" ? parseComponents(components.value.result) : [],
+        ttps: ttps.status === "fulfilled" ? sortTtps(asTtpList(ttps.value.result), createdTimes()) : [],
+        models: models.status === "fulfilled" ? parseMol2MolModels(models.value.result) : [],
+        files: assets.status === "fulfilled" ? targetFiles(assets.value.result) : { structures: [], msas: [] },
+        loaded: true,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const load = async (id: string) => {
+    latestLoad.current = id;
+    setLoading({ state: "busy", id });
+    try {
+      const response = await callTool("get_ttp", { ttp_id: id });
+      if (latestLoad.current !== id) return;
+      const error = payloadError(response.result);
+      const ttp = error ? null : asTtp(parseResult(response.result));
+      if (!ttp) {
+        setLoading({ state: "error", message: error ?? `Could not read the TTP "${id}".` });
+        return;
+      }
+      setLoading({ state: "idle" });
+      setSource((previous) => ({ ttp, key: previous.key + 1 }));
+    } catch (err) {
+      if (latestLoad.current === id) setLoading({ state: "error", message: message(err) });
+    }
+  };
+
+  const saved = <SavedTtps ttps={catalog.ttps} loaded={catalog.loaded} loading={loading} onPick={(id) => void load(id)} />;
+  return <BuilderForm key={source.key} {...props} initial={source.ttp} catalog={catalog} saved={saved} />;
+}
+
+/** Start from a stored TTP: a compact list that fills the form with a copy of the one picked. */
+function SavedTtps({ ttps, loaded, loading, onPick }: { ttps: TtpSummary[]; loaded: boolean; loading: Loading; onPick: (id: string) => void }) {
+  if (loaded && !ttps.length) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1.5">
+      {loading.state === "error" && (
+        <span className="max-w-40 truncate text-[11px]" style={{ color: "var(--color-accent)" }} title={loading.message}>
+          {loading.message}
+        </span>
+      )}
+      <select
+        value=""
+        onChange={(event) => event.target.value && onPick(event.target.value)}
+        disabled={!loaded || loading.state === "busy"}
+        aria-label="Start from a saved TTP"
+        title="Fill the form with a copy of a saved TTP"
+        className={`${INPUT} text-muted max-w-44 truncate py-0.5 text-[11px]`}
+      >
+        <option value="">{!loaded ? "Loading…" : loading.state === "busy" ? "Loading TTP…" : "Start from saved…"}</option>
+        {ttps.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.name} · v{t.version}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+}
+
+interface FormProps extends Omit<Props, "initial"> {
+  initial?: Ttp;
+  catalog: Catalog;
+  /** The saved-TTP picker, shown in the header. */
+  saved: ReactNode;
+}
+
+function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }: FormProps) {
+  const ids = catalog.ttps.map((t) => t.id);
+  const [start] = useState(() => (initial ? formFromTtp(initial, ids) : null));
   const [name, setName] = useState(start?.name ?? "");
   const [id, setId] = useState<string | null>(start?.id ?? null);
   const [sequence, setSequence] = useState(start?.sequence ?? "");
@@ -156,8 +250,10 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
   const [force, setForce] = useState(start?.templates?.[0]?.force ?? false);
   const [threshold, setThreshold] = useState(String(start?.templates?.[0]?.threshold ?? 2));
   const [msa, setMsa] = useState<FileRead<string | null>>(() => (start?.msaPath ? { state: "busy", path: start.msaPath } : { state: "idle" }));
-  const [aggregation, setAggregation] = useState<TtpForm["aggregation"]>(start?.aggregation ?? "geometric_mean");
-  const [objectives, setObjectives] = useState<Row[]>(() => rows(start?.objectives ?? presetObjectives("druglike", {})));
+  const [objectives, setObjectives] = useState<Row[]>(() => rows(start?.objectives ?? defaultObjectives(objectiveCatalogue(catalog.services, catalog.components))));
+  /** The objectives were picked by hand (or came with a stored TTP): the services loading late leaves them be. */
+  const [handPicked, setHandPicked] = useState(Boolean(start));
+  const [defaultsFor, setDefaultsFor] = useState(catalog);
   const [lookupOpen, setLookupOpen] = useState(Boolean(start?.sequence));
   const [query, setQuery] = useState("");
   const [organism, setOrganism] = useState("human");
@@ -167,30 +263,6 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
   const [copied, setCopied] = useState(false);
   const [run, setRun] = useState<RunSettings>(() => loadRunSettings());
   const latest = useRef({ structure: start?.structurePath ?? "", msa: start?.msaPath ?? "", template: "" });
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.allSettled([
-      callTool("list_external_services"),
-      callTool("list_scoring_components"),
-      callTool("list_ttps"),
-      callTool("list_available_models"),
-      callTool("list_shared_assets"),
-    ]).then(([services, components, ttps, models, assets]) => {
-      if (cancelled) return;
-      setCatalog({
-        services: services.status === "fulfilled" ? parseServices(services.value.result) : {},
-        components: components.status === "fulfilled" ? parseComponents(components.value.result) : [],
-        ids: ttps.status === "fulfilled" ? asTtpList(ttps.value.result).map((t) => t.id) : [],
-        models: models.status === "fulfilled" ? parseMol2MolModels(models.value.result) : [],
-        files: assets.status === "fulfilled" ? targetFiles(assets.value.result) : { structures: [], msas: [] },
-        loaded: true,
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const path = start?.msaPath;
@@ -244,7 +316,7 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
     msaPath,
     proteinPdbPath: start?.proteinPdbPath,
     templates,
-    aggregation,
+    aggregation: "geometric_mean",
     objectives: objectives.map((r) => r.objective),
     constraints: start?.constraints,
   };
@@ -258,10 +330,14 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
           : source && !chain
             ? [`Pick a chain of ${sourceName(source.label)}.`]
             : [];
-  const problems = [...proteinProblems, ...formProblems(form, catalog.ids)];
+  const problems = [...proteinProblems, ...formProblems(form, ids)];
   const runIssues = run.enabled ? runProblems(run) : [];
   const catalogue = useMemo(() => objectiveCatalogue(catalog.services, catalog.components), [catalog]);
   const groups = useMemo(() => objectiveGroups(catalogue), [catalogue]);
+  if (defaultsFor !== catalog) {
+    setDefaultsFor(catalog);
+    if (!handPicked) setObjectives(rows(defaultObjectives(catalogue)));
+  }
   const residues = structured ? (chain?.sequence ?? "") : normaliseSequence(sequence);
   const cofold = hasCofolding(form.objectives);
   const weights = weightRangeOf(form.objectives);
@@ -276,12 +352,15 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
   const shownRange = region === "range" && cut && "sequence" in cut && cut.sequence === residues;
   const showSequence = !structured && lookupOpen;
 
-  /** The list as rows, keeping the rows (and their editing state) of objectives that stay. */
-  const keepRows = (list: Objective[]) =>
-    setObjectives((previous) => list.map((objective) => previous.find((r) => r.objective === objective) ?? { key: nextKey++, objective, edited: false }));
-  const editRows = (list: Objective[], index: number) =>
-    setObjectives((previous) => list.map((objective, i) => ({ key: previous[i]?.key ?? nextKey++, objective, edited: i === index || (previous[i]?.edited ?? false) })));
-  const edited = (o: Objective) => objectives.some((r) => r.objective === o && r.edited);
+  /** The list as rows, keeping the rows of objectives that stay. */
+  const keepRows = (list: Objective[]) => {
+    setHandPicked(true);
+    setObjectives((previous) => list.map((objective) => previous.find((r) => r.objective === objective) ?? { key: nextKey++, objective }));
+  };
+  const editRows = (list: Objective[]) => {
+    setHandPicked(true);
+    setObjectives((previous) => list.map((objective, i) => ({ key: previous[i]?.key ?? nextKey++, objective })));
+  };
   const updateRun = (patch: Partial<RunSettings>) => {
     const next = { ...run, ...patch };
     setRun(next);
@@ -459,6 +538,7 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
             Therapeutic Target Profile
             {initial && <span className="text-faint font-normal"> · copy of {initial.name}</span>}
           </h2>
+          {saved}
           <button type="button" onClick={onClose} aria-label="Close" className="text-faint hover:text-body cursor-pointer px-1 text-lg leading-none">
             ×
           </button>
@@ -716,27 +796,8 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
             {start?.proteinPdbPath && <p className="text-faint text-[10px]">Keeps the original's protein_pdb_path, {start.proteinPdbPath}.</p>}
           </Section>
 
-          <Section
-            title="Objectives"
-            aside={
-              <select
-                value={aggregation}
-                onChange={(event) => setAggregation(event.target.value as TtpForm["aggregation"])}
-                aria-label="Combine scores"
-                title={aggregation === "geometric_mean" ? "Every objective counts: one zero sinks the total." : "Objectives trade off: a strong score can make up for a weak one."}
-                className={`${INPUT} py-0.5 text-[11px]`}
-              >
-                <option value="geometric_mean">Geometric mean</option>
-                <option value="arithmetic_mean">Arithmetic mean</option>
-              </select>
-            }
-          >
-            <ObjectivePicker
-              groups={groups}
-              objectives={form.objectives}
-              onToggle={(e, on) => keepRows(toggleObjective(form.objectives, e, on))}
-              onToggleGroup={(group) => keepRows(toggleGroup(form.objectives, group, edited))}
-            />
+          <Section title="Objectives">
+            <ObjectivePicker groups={groups} objectives={form.objectives} onToggle={(e, on) => keepRows(toggleObjective(form.objectives, e, on))} />
             {!catalog.loaded && <p className="text-faint text-[11px]">Loading the services…</p>}
             {cofold && <p className="text-faint text-[11px]">Cofolding is much slower: every molecule is cofolded with the protein.</p>}
             {objectives.length > 0 && (
@@ -747,8 +808,8 @@ export function TtpBuilder({ onClose, onCreated, initial, molecules }: Props) {
                     objective={row.objective}
                     weights={weights}
                     share={Math.max(0, row.objective.weight) / total}
-                    onChange={(patch) => editRows(form.objectives.map((o, i) => (i === index ? { ...o, ...patch } : o)), index)}
-                    onRename={(value) => editRows(renameObjective(form.objectives, index, value), index)}
+                    onChange={(patch) => editRows(form.objectives.map((o, i) => (i === index ? { ...o, ...patch } : o)))}
+                    onRename={(value) => editRows(renameObjective(form.objectives, index, value))}
                     onRemove={() => keepRows(dropObjectives(form.objectives, (o) => o === row.objective))}
                   />
                 ))}
@@ -871,13 +932,10 @@ function Pill({ on, disabled, title, onClick, children }: { on: boolean; disable
   );
 }
 
-function Section({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-2">
-      <h3 className="flex items-center gap-2 text-[11px] font-semibold">
-        <span className="flex-1">{title}</span>
-        {aside}
-      </h3>
+      <h3 className="text-[11px] font-semibold">{title}</h3>
       {children}
     </section>
   );

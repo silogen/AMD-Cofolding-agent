@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import type { AgentTurn, ConversationEvent, Turn, TurnBlock } from "../types/api";
+import type { AgentTurn, ConversationEvent, ToolResultEvent, Turn, TurnBlock } from "../types/api";
 
 /**
  * The conversation as the UI renders it, built from the gateway's events.
@@ -130,7 +130,76 @@ function findOpenToolCall(blocks: TurnBlock[], id: string | null, name: string):
   return -1;
 }
 
+type ToolStep = Extract<TurnBlock, { kind: "tool" }>;
+
 /** The tool steps of a turn, in order. */
-export function toolSteps(turn: AgentTurn): Extract<TurnBlock, { kind: "tool" }>[] {
-  return turn.blocks.filter((block): block is Extract<TurnBlock, { kind: "tool" }> => block.kind === "tool");
+export function toolSteps(turn: AgentTurn): ToolStep[] {
+  return turn.blocks.filter((block): block is ToolStep => block.kind === "tool");
+}
+
+/** What the agent did, in order: its reasoning, its tool calls and the errors it hit. */
+export type TraceEntry = Extract<TurnBlock, { kind: "thinking" | "tool" | "error" }>;
+
+export function turnTrace(turn: AgentTurn): TraceEntry[] {
+  return turn.blocks.filter((block): block is TraceEntry => block.kind === "thinking" || block.kind === "tool" || block.kind === "error");
+}
+
+export type StepState = "running" | "ok" | "failed";
+
+export function stepState(step: ToolStep): StepState {
+  if (!step.result) return "running";
+  return stepError(step) === null ? "ok" : "failed";
+}
+
+const ERROR_CHARS = 200;
+const errors = new WeakMap<ToolResultEvent, string | null>();
+
+/**
+ * Why a tool call failed, in one short line, or null when it did not.
+ * Tools also fail by answering normally with an `{"error": ...}` payload
+ * (run_optimization does), so those count too. Results never change once
+ * received, so the answer is kept per result.
+ */
+export function stepError(step: ToolStep): string | null {
+  const result = step.result;
+  if (!result) return null;
+  if (!errors.has(result)) errors.set(result, resultError(result));
+  return errors.get(result) ?? null;
+}
+
+function resultError(result: ToolResultEvent): string | null {
+  const text = result.result ?? "";
+  const reported = payloadMessage(text);
+  if (reported === null && !result.isError) return null;
+  return short(reported ?? text) || "Failed";
+}
+
+/** The error a JSON payload reports, also from output cut for display. */
+function payloadMessage(text: string): string | null {
+  const start = text.trimStart();
+  if (!start.startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(start);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const payload = parsed as Record<string, unknown>;
+    const error = payload.error;
+    if (typeof error === "string" && error.trim()) return error;
+    if (typeof error === "object" && error !== null && typeof (error as { message?: unknown }).message === "string") {
+      return (error as { message: string }).message;
+    }
+    if (payload.ok === false || payload.success === false) {
+      const message = payload.message ?? payload.detail;
+      return typeof message === "string" && message.trim() ? message : "Failed";
+    }
+    return null;
+  } catch {
+    const match = /"error"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(start);
+    return match ? match[1].replace(/\\n/g, "\n").replace(/\\(.)/g, "$1") : null;
+  }
+}
+
+function short(text: string): string {
+  const line = text.split("\n").find((part) => part.trim()) ?? "";
+  const trimmed = line.trim();
+  return trimmed.length > ERROR_CHARS ? `${trimmed.slice(0, ERROR_CHARS - 1)}…` : trimmed;
 }

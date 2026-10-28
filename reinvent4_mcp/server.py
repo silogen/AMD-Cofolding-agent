@@ -639,8 +639,9 @@ def run_optimization(
             default=None,
             description=(
                 "List of SMILES strings used as input seeds for Mol2Mol "
-                "priors. Required when model is a Mol2Mol variant "
-                "(e.g. '.m2m_medium'). Ignored for "
+                "priors, one SMILES per list item, copied exactly as given "
+                "(never joined into one string). Required when model is a "
+                "Mol2Mol variant (e.g. '.m2m_medium'). Ignored for "
                 "Reinvent priors."
             ),
         ),
