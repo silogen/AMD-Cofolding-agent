@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 import type { ConversationEvent, Panel, SessionSummary } from "../types/api";
+import type { CofoldStatus } from "./cofold";
+import type { JobStructure } from "./jobStructures";
 
 /**
  * The gateway's REST endpoints (reinvent4_agent/web/server.py).
@@ -133,8 +135,14 @@ export function callTool<T = unknown>(name: string, args: Record<string, unknown
   return call;
 }
 
+/** What Boltz is cofolding now; `{ available: false }` when the service cannot be read. */
+export const fetchCofoldStatus = () => request<CofoldStatus>("/api/services/cofold");
+
 export const jobFileUrl = (jobId: string, name: string) =>
   `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`;
+
+export const fetchJobStructures = (jobId: string) =>
+  request<JobStructure[]>(`/api/jobs/${encodeURIComponent(jobId)}/structures`);
 
 /** Save text as a file in the browser's downloads. */
 export function download(name: string, content: string, type = "text/plain"): void {

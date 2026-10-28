@@ -73,6 +73,8 @@ export default function App() {
   const chat = useSession(request, onAttached);
   const { transcript, session, connection, agent } = chat;
   const busy = transcript.busy;
+  const lastTurn = transcript.turns[transcript.turns.length - 1];
+  const turnAt = busy && lastTurn?.role === "agent" && !lastTurn.done ? lastTurn.at : null;
   const connected = connection === "open" && !chat.gatewayError;
 
   const [railOpen, setRailOpen] = useState(wide);
@@ -373,7 +375,7 @@ export default function App() {
               </button>
             )}
           </div>
-          <RunBar sessionId={session?.id ?? null} steps={artifacts.steps} onNotice={hint} />
+          <RunBar sessionId={session?.id ?? null} steps={artifacts.steps} turnAt={turnAt} onNotice={hint} />
           <Composer
             ref={composerRef}
             value={draft}

@@ -20,12 +20,17 @@ import {
   type RunEvent,
 } from "../../lib/runProgress";
 import { notifyRunsChanged, onRunsChanged, openRun, openWorkbench } from "../../lib/workbenchBus";
+import { cofoldShown, inFlightCofold, runUsesBoltz } from "../../lib/cofold";
+import { CofoldRow } from "./CofoldRow";
 import { ScoreTrend } from "./ScoreTrend";
+import { useCofoldStatus } from "./useCofoldStatus";
 
 interface Props {
   sessionId: string | null;
   /** The conversation's tool calls: the runs it started are followed first. */
   steps: Artifacts["steps"];
+  /** When the agent turn in progress started; null when none is. Its open calls may be cofolding. */
+  turnAt?: number | null;
   /** A short in-app message when a run ends or raises an alert, in any conversation. */
   onNotice?: (message: string) => void;
 }
@@ -108,7 +113,7 @@ async function readLive(jobId: string, withLog: boolean): Promise<Live | null> {
  * A click opens the run in the workbench; Stop asks first, then calls
  * stop_optimization. A finished run stays a few seconds with its outcome.
  */
-export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props) {
+export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, onNotice }: Props) {
   const conversation = useMemo(() => conversationJobIds(steps), [steps]);
   const conversationKey = conversation.join(",");
   const [jobs, setJobs] = useState<JobSummary[]>([]);
@@ -212,6 +217,13 @@ export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props
     return () => window.clearTimeout(timer);
   }, [finished]);
 
+  const cofoldCalls = useMemo(() => inFlightCofold(steps, turnAt), [steps, turnAt]);
+  const designing = jobs.filter((job) => job.type === "optimization" && stateOf(job) === "running");
+  const boltzUse = designing.map((job) => runUsesBoltz(steps, job.ttpId, live[job.id]?.status.components));
+  const boltzRun = boltzUse.includes(true) ? true : boltzUse.includes(null) ? null : false;
+  const cofold = useCofoldStatus(cofoldCalls, boltzRun, designing.length > 0);
+  const cofoldRow = cofoldShown(cofold.status, cofoldCalls) ? <CofoldRow status={cofold.status} at={cofold.at} calls={cofoldCalls} /> : null;
+
   async function stop(job: JobSummary) {
     setConfirm(false);
     setStopping(true);
@@ -247,7 +259,7 @@ export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props
 
     if (confirm) {
       return (
-        <Shell>
+        <Shell extra={cofoldRow}>
           <span className="min-w-0 flex-1 leading-tight">
             Stop <b className="font-semibold">{title}</b> at step {progress.done}? REINVENT saves a checkpoint, so it can be resumed.
           </span>
@@ -260,7 +272,7 @@ export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props
     }
 
     return (
-      <Shell>
+      <Shell extra={cofoldRow}>
         <button
           type="button"
           onClick={() => openRun(first.id, "jobs")}
@@ -319,7 +331,7 @@ export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props
     const color = state === "completed" ? "var(--color-ok)" : state === "failed" ? "var(--color-accent)" : "var(--color-warn)";
     const label = state === "completed" ? "Design finished" : state === "failed" ? "Design failed" : "Design stopped";
     return (
-      <Shell>
+      <Shell extra={cofoldRow}>
         <button type="button" onClick={() => openRun(job.id, "jobs")} className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 overflow-hidden text-left">
           <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ background: color }} />
           <span className="shrink-0 font-medium" style={{ color }}>
@@ -339,13 +351,19 @@ export const RunBar = memo(function RunBar({ sessionId, steps, onNotice }: Props
     );
   }
 
-  return null;
+  return cofoldRow ? <Shell>{cofoldRow}</Shell> : null;
 });
 
-function Shell({ children }: { children: React.ReactNode }) {
+const ROW = "flex min-h-7 items-center gap-1.5 py-0.5 pr-1 pl-2.5";
+
+/** The bar; *extra* is a second line under the run, e.g. what Boltz is cofolding. */
+function Shell({ children, extra }: { children: React.ReactNode; extra?: React.ReactNode }) {
   return (
     <div className="@container mx-auto w-full max-w-3xl px-3 sm:px-4" role="status" aria-live="polite">
-      <div className="bg-sunken border-subtle flex min-h-7 items-center gap-1.5 rounded-t-lg border border-b-0 py-0.5 pr-1 pl-2.5 text-[11px]">{children}</div>
+      <div className="bg-sunken border-subtle rounded-t-lg border border-b-0 text-[11px]">
+        <div className={ROW}>{children}</div>
+        {extra && <div className={`${ROW} border-subtle border-t`}>{extra}</div>}
+      </div>
     </div>
   );
 }

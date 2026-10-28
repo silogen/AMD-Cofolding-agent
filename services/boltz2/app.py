@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -713,6 +714,74 @@ def _assemble_response(
 
 
 # ---------------------------------------------------------------------------
+# Requests in progress (reported on /health)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _TrackedRequest:
+    id: str
+    molecules: int
+    started: float
+    started_at: float
+    # preparing (MSA, YAMLs) | pool | waiting (for the subprocess slot) | running
+    stage: str = "preparing"
+    done: int = 0
+
+    def molecule_done(self, _future: Any = None) -> None:
+        self.done += 1
+
+
+_requests: dict[str, _TrackedRequest] = {}
+
+
+@contextmanager
+def _tracked(molecules: int) -> Iterator[_TrackedRequest]:
+    entry = _TrackedRequest(
+        id=uuid.uuid4().hex[:12], molecules=molecules,
+        started=time.monotonic(), started_at=time.time(),
+    )
+    _requests[entry.id] = entry
+    try:
+        yield entry
+    finally:
+        _requests.pop(entry.id, None)
+
+
+def _active_requests() -> list[dict[str, Any]]:
+    progress = _pool.request_progress() if _pool is not None else {}
+    now = time.monotonic()
+    active = []
+    for entry in _requests.values():
+        left = max(0, entry.molecules - entry.done)
+        if entry.stage == "pool":
+            counts = progress.get(entry.id, {})
+            queued, running = counts.get("queued", 0), counts.get("running", 0)
+        elif entry.stage == "waiting":
+            queued, running = left, 0
+        elif entry.stage == "running":
+            queued, running = 0, left
+        else:
+            queued = running = 0
+        if entry.stage == "preparing":
+            state = "preparing"
+        elif queued and not running:
+            state = "queued"
+        else:
+            state = "running"
+        active.append({
+            "id": entry.id,
+            "molecules": entry.molecules,
+            "done": entry.done,
+            "queued": queued,
+            "running": running,
+            "state": state,
+            "started_at": round(entry.started_at, 3),
+            "elapsed_s": round(now - entry.started, 1),
+        })
+    return active
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -720,9 +789,10 @@ def _assemble_response(
 async def health() -> dict[str, Any]:
     # "loading" is still HTTP 200: requests queue until a worker is ready, and
     # run.sh's startup gate only checks for a successful response.
+    requests = _active_requests()
     if _pool is None:
-        return {"status": "ok"}
-    return _pool.health()
+        return {"status": "ok", "requests": requests} if requests else {"status": "ok"}
+    return {**_pool.health(), "requests": requests}
 
 
 @app.post("/score", response_model=ScoreResponse)
@@ -763,47 +833,51 @@ async def score(request: ScoreRequest, http_request: Request) -> ScoreResponse:
         len(valid_smiles), n_total, n_total - len(valid_smiles),
     )
 
-    if _pool is not None and _pool.usable:
-        try:
-            return await _score_with_pool(
-                params, valid_smiles, valid_indices, skip_reasons, n_total,
-                http_request,
-            )
-        except worker_pool.PoolUnavailable as exc:
-            logger.warning("Worker pool unavailable (%s); falling back to boltz predict", exc)
+    with _tracked(len(valid_smiles)) as tracked:
+        if _pool is not None and _pool.usable:
+            try:
+                return await _score_with_pool(
+                    params, valid_smiles, valid_indices, skip_reasons, n_total,
+                    http_request, tracked,
+                )
+            except worker_pool.PoolUnavailable as exc:
+                logger.warning("Worker pool unavailable (%s); falling back to boltz predict", exc)
 
-    # --- Blocking GPU work runs off the event loop, serialized via the
-    # semaphore so /health stays responsive and predictions are FIFO. ---
-    async with _predict_sem:
-        handle = _PredictionHandle()
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                _run_prediction,
-                params, valid_smiles, valid_indices, skip_reasons, n_total,
-                handle,
+        # --- Blocking GPU work runs off the event loop, serialized via the
+        # semaphore so /health stays responsive and predictions are FIFO. ---
+        tracked.stage = "waiting"
+        tracked.done = 0
+        async with _predict_sem:
+            tracked.stage = "running"
+            handle = _PredictionHandle()
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    _run_prediction,
+                    params, valid_smiles, valid_indices, skip_reasons, n_total,
+                    handle,
+                )
             )
-        )
-        # If the client goes away (agent exits / job killed), kill the boltz
-        # subprocess directly -- cancelling the asyncio task does NOT stop the
-        # worker thread. We then keep holding the semaphore until the thread
-        # actually unwinds, so the GPU is never handed to the next request
-        # while this boltz process is still tearing down (which would break
-        # FIFO serialization and risk OOM).
-        while True:
-            done, _ = await asyncio.wait({task}, timeout=2.0)
-            if done:
-                break
-            if await http_request.is_disconnected():
-                logger.warning("Client disconnected — killing prediction")
-                handle.cancelled = True
-                if handle.proc is not None:
-                    _kill_process_group(handle.proc)
-                try:
-                    await task
-                except Exception:
-                    pass
-                raise HTTPException(status_code=499, detail="Client disconnected")
-        return task.result()
+            # If the client goes away (agent exits / job killed), kill the boltz
+            # subprocess directly -- cancelling the asyncio task does NOT stop the
+            # worker thread. We then keep holding the semaphore until the thread
+            # actually unwinds, so the GPU is never handed to the next request
+            # while this boltz process is still tearing down (which would break
+            # FIFO serialization and risk OOM).
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=2.0)
+                if done:
+                    break
+                if await http_request.is_disconnected():
+                    logger.warning("Client disconnected — killing prediction")
+                    handle.cancelled = True
+                    if handle.proc is not None:
+                        _kill_process_group(handle.proc)
+                    try:
+                        await task
+                    except Exception:
+                        pass
+                    raise HTTPException(status_code=499, detail="Client disconnected")
+            return task.result()
 
 
 @dataclass
@@ -1087,9 +1161,10 @@ async def _score_with_pool(
     skip_reasons: list[str],
     n_total: int,
     http_request: Request,
+    tracked: Optional[_TrackedRequest] = None,
 ) -> ScoreResponse:
     """Score through the resident workers; same output layout as `boltz predict`."""
-    batch_id = uuid.uuid4().hex[:12]
+    batch_id = tracked.id if tracked is not None else uuid.uuid4().hex[:12]
     batch_dir = SHARED_DIR / "batches" / f"batch_{batch_id}"
     out_dir = SHARED_DIR / "predictions" / f"out_{batch_id}"
     results_dir = out_dir / f"boltz_results_{batch_dir.name}"
@@ -1113,6 +1188,10 @@ async def _score_with_pool(
             for path in prepared.yaml_paths
         ]
         futures = _pool.submit(batch_id, payloads)
+        if tracked is not None:
+            tracked.stage = "pool"
+            for future in futures:
+                future.add_done_callback(tracked.molecule_done)
         logger.info(
             "Batch %s: %d molecule(s) queued on the worker pool (queue length %d)",
             batch_id, len(payloads), _pool.queue_length(),

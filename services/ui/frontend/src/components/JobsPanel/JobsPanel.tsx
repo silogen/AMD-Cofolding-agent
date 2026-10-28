@@ -43,6 +43,7 @@ import {
   type JobSummary,
   type Tone,
 } from "../../lib/jobs";
+import { loadJobStructures, openRunStructure, runStructurePanel, type JobStructure } from "../../lib/jobStructures";
 import { focusRun, notifyRunsChanged, openRun, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
@@ -156,6 +157,21 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     };
   }, [activeId, hasResults, tick]);
 
+  const [structures, setStructures] = useState<Loaded<Map<string, JobStructure>> | null>(null);
+  const growing = summary ? isActive(summary.state) : false;
+  useEffect(() => {
+    if (!activeId || !hasResults) return;
+    let cancelled = false;
+    loadJobStructures(activeId, growing)
+      .then((value) => {
+        if (!cancelled) setStructures((previous) => (previous?.id === activeId && previous.value === value ? previous : { id: activeId, value, error: null }));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, hasResults, growing, tick]);
+
   useEffect(() => {
     if (!live) return;
     const timer = window.setInterval(() => {
@@ -244,6 +260,12 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const top = candidates && candidates.id === job.id ? candidates : null;
   const runtime = runtimeMs(job);
   const best = bestScore(s, top?.value ?? []);
+  const complexes = structures && structures.id === job.id ? structures.value : null;
+
+  function showComplex(entry: JobStructure) {
+    const panel = job && runStructurePanel(entry.path, entry.smiles, job.id, entry.step, entry.metrics);
+    if (panel) openRunStructure(sessionId ?? "new", panel);
+  }
 
   return (
     <div className="@container flex h-full min-h-0 text-xs">
@@ -494,36 +516,50 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
                     </tr>
                   </thead>
                   <tbody>
-                    {top.value.map((c) => (
-                      <tr key={c.smiles} className="group border-subtle border-b last:border-b-0">
-                        <td className="px-3 py-1">
-                          <span className="flex items-center gap-2">
-                            <StarButton smiles={c.smiles} source={job.id} values={() => candidateScores(c)} session={sessionId ?? "new"} />
-                            <button
-                              type="button"
-                              onClick={() => onOpenMolecule?.(c.smiles)}
-                              disabled={!onOpenMolecule}
-                              className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
-                              title="Open the 2D drawing"
-                            >
-                              <MolDepiction smiles={c.smiles} theme={theme} width={128} height={96} className="size-full" />
-                            </button>
-                            <span className="flex min-w-0 flex-col">
-                              <SmilesText smiles={c.smiles} className="max-w-28 text-[10px] @xl:max-w-44" />
+                    {top.value.map((c) => {
+                      const complex = complexes?.get(c.smiles);
+                      return (
+                        <tr key={c.smiles} className="group border-subtle border-b last:border-b-0">
+                          <td className="px-3 py-1">
+                            <span className="flex items-center gap-2">
+                              <StarButton smiles={c.smiles} source={job.id} values={() => candidateScores(c)} session={sessionId ?? "new"} />
+                              <button
+                                type="button"
+                                onClick={() => onOpenMolecule?.(c.smiles)}
+                                disabled={!onOpenMolecule}
+                                className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
+                                title="Open the 2D drawing"
+                              >
+                                <MolDepiction smiles={c.smiles} theme={theme} width={128} height={96} className="size-full" />
+                              </button>
+                              <span className="flex min-w-0 flex-col items-start">
+                                <SmilesText smiles={c.smiles} className="max-w-28 text-[10px] @xl:max-w-44" />
+                                {complex && (
+                                  <button
+                                    type="button"
+                                    onClick={() => showComplex(complex)}
+                                    title={`Show the Boltz complex${complex.step !== null ? ` from step ${complex.step}` : ""} in the viewer`}
+                                    className="hover:bg-inset -ml-1 cursor-pointer rounded px-1 py-0.5 text-[10px] font-semibold"
+                                    style={{ color: "var(--color-structure)" }}
+                                  >
+                                    3D
+                                  </button>
+                                )}
+                              </span>
                             </span>
-                          </span>
-                        </td>
-                        <td className="px-2 py-1 text-right font-mono font-semibold tabular-nums">{fmt(c.total)}</td>
-                        {top.value[0].components.map((col) => {
-                          const value = c.components.find((x) => x.name === col.name);
-                          return (
-                            <td key={col.name} className="px-2 py-1 text-right font-mono tabular-nums" title={value?.raw != null ? `raw ${value.raw}` : undefined}>
-                              {fmt(value?.transformed, 2)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono font-semibold tabular-nums">{fmt(c.total)}</td>
+                          {top.value[0].components.map((col) => {
+                            const value = c.components.find((x) => x.name === col.name);
+                            return (
+                              <td key={col.name} className="px-2 py-1 text-right font-mono tabular-nums" title={value?.raw != null ? `raw ${value.raw}` : undefined}>
+                                {fmt(value?.transformed, 2)}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

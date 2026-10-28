@@ -217,6 +217,17 @@ class WorkerPool:
     def queue_length(self) -> int:
         return sum(1 for j in self._queue if not j.cancelled)
 
+    def request_progress(self) -> dict[str, dict[str, int]]:
+        """Queued and running molecules per request id."""
+        progress: dict[str, dict[str, int]] = {}
+        for job in self._queue:
+            if not job.cancelled:
+                progress.setdefault(job.request_id, {"queued": 0, "running": 0})["queued"] += 1
+        for w in self.workers:
+            if w.job is not None:
+                progress.setdefault(w.job.request_id, {"queued": 0, "running": 0})["running"] += 1
+        return progress
+
     def health(self) -> dict[str, Any]:
         workers = []
         for w in self.workers:

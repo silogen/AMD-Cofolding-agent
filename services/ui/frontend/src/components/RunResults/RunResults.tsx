@@ -8,6 +8,7 @@ import { sameFile, type Artifacts } from "../../lib/artifacts";
 import { assetUrl } from "../../lib/assets";
 import { fileName } from "../../lib/csv";
 import { canResume, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
+import { openRunStructure, rowMetrics, runStructurePanel } from "../../lib/jobStructures";
 import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
   defaultColumns,
@@ -19,14 +20,11 @@ import {
   rowValues,
   runSeeds,
   sortRows,
-  structurePanel,
   type ColumnRole,
   type RunRow,
   type RunTable,
   type SortKey,
 } from "../../lib/runResults";
-import { addUserStructure } from "../../lib/userStructures";
-import { sendToViewer } from "../../lib/viewerBus";
 import { focusRun, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { ContinueRun } from "../JobsPanel/ContinueRun";
@@ -225,16 +223,13 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   }
 
   function openStructure(row: RunRow) {
-    if (!row.structure) return;
-    const panel = structurePanel(row.structure, row.smiles || null, `REINVENT ${runId}`);
+    if (!row.structure || !runId || !table) return;
+    const panel = runStructurePanel(row.structure, row.smiles || null, runId, row.step, rowMetrics(table, row));
     if (!panel) {
       setNotice(`${row.structure} is not on the shared volume, so the viewer cannot load it.`);
       return;
     }
-    const known = artifacts.structures.some(({ item }) => sameFile(item.path, panel.path));
-    if (!known) addUserStructure(sessionId ?? "new", panel);
-    // Let the app pick up the added structure before the viewer asks for it.
-    window.setTimeout(() => sendToViewer({ path: panel.path, action: { kind: "ligand" }, source: "results" }), known ? 0 : 50);
+    openRunStructure(session, panel, artifacts.structures.some(({ item }) => sameFile(item.path, panel.path)));
   }
 
   if (jobs === null) {

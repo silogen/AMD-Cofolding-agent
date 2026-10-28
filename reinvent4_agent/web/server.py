@@ -24,6 +24,8 @@ Endpoints
 ``POST   /api/sessions/{id}/purge``          delete one with the data picked from that list.
 ``POST   /api/tools/{name}``                 call one MCP tool without the LLM.
 ``GET    /api/jobs/{job_id}/files/{name}``   a results, log or config file of a job.
+``GET    /api/services/cofold``              what Boltz is cofolding now (see ``cofold_status.py``).
+``GET    /api/jobs/{job_id}/structures``     the cofolded complex of each molecule of a run.
 ``POST   /api/uploads?session=&name=``       store a file the user brought (raw body).
 ``POST   /api/uploads/rcsb``                 fetch a PDB entry from RCSB into the same place.
 ``WS     /api/chat?session=&after=``         the conversation itself.
@@ -53,6 +55,8 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from reinvent4_agent.web import artifacts as shared_files
 from reinvent4_agent.web.artifacts import extract_panels, parse_tool_result, resolve_artifact
+from reinvent4_agent.web import cofold_status
+from reinvent4_agent.web import job_structures
 from reinvent4_agent.web import models as chat_models
 from reinvent4_agent.web import session_data
 from reinvent4_agent.web.events import WebSocketEventHandler
@@ -608,6 +612,19 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="File not found")
         media_type = _ARTIFACT_MEDIA_TYPES.get(path.suffix.lower(), "text/plain")
         return FileResponse(path, media_type=media_type, filename=name)
+
+    @app.get("/api/services/cofold")
+    async def cofold_service() -> dict[str, Any]:
+        return await cofold_status.cofold_status()
+
+    @app.get("/api/jobs/{job_id}/structures")
+    async def job_structure_list(job_id: str) -> list[dict[str, Any]]:
+        if not _JOB_ID.match(job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        found = await asyncio.to_thread(job_structures.job_structures, jobs_dir / f"job_{job_id}", shared_files.SHARED_ROOT)
+        if found is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return found
 
     # -- files the user brings ------------------------------------------------
 
