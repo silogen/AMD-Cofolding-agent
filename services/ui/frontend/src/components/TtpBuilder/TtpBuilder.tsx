@@ -33,7 +33,7 @@ import {
   rememberCreated,
   renameObjective,
   sequenceProblem,
-  slugify,
+  freeSlug,
   sortTtps,
   toggleObjective,
   weightRangeOf,
@@ -236,7 +236,7 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
   const ids = catalog.ttps.map((t) => t.id);
   const [start] = useState(() => (initial ? formFromTtp(initial, ids) : null));
   const [name, setName] = useState(start?.name ?? "");
-  const [id, setId] = useState<string | null>(start?.id ?? null);
+  const id = start?.id ?? null;
   const [sequence, setSequence] = useState(start?.sequence ?? "");
   const [region, setRegion] = useState<Region>("full");
   const [range, setRange] = useState({ from: "", to: "" });
@@ -254,7 +254,7 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
   /** The objectives were picked by hand (or came with a stored TTP): the services loading late leaves them be. */
   const [handPicked, setHandPicked] = useState(Boolean(start));
   const [defaultsFor, setDefaultsFor] = useState(catalog);
-  const [lookupOpen, setLookupOpen] = useState(Boolean(start?.sequence));
+  const [mode, setMode] = useState<ProteinSource | null>(start?.structurePath ? "shared" : start?.sequence ? "sequence" : null);
   const [query, setQuery] = useState("");
   const [organism, setOrganism] = useState("human");
   const [lookup, setLookup] = useState<Lookup>({ state: "idle" });
@@ -307,7 +307,7 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
   const keptPdb = start?.pdbId && !start.structurePath && sequence === start.sequence ? start.pdbId : "";
   const form: TtpForm = {
     name,
-    id: id ?? slugify(name),
+    id: id ?? freeSlug(name, ids),
     description: start?.description ?? "",
     sequence: structured ? "" : sequence,
     structurePath: structure.state === "ready" ? structure.path : "",
@@ -350,7 +350,11 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
   const reference = lookup.state === "found" ? (lookup.facts.uniprotSequence ?? lookup.facts.sequence) : null;
   const cut = reference && range.from && range.to ? sliceRegion(reference, Number(range.from), Number(range.to)) : null;
   const shownRange = region === "range" && cut && "sequence" in cut && cut.sequence === residues;
-  const showSequence = !structured && lookupOpen;
+  const showSequence = !structured && (mode === "lookup" || mode === "sequence");
+  const chooseSource = (next: ProteinSource) => {
+    if ((next === "lookup" || next === "sequence") && structured) clearStructure();
+    setMode(next);
+  };
 
   /** The list as rows, keeping the rows of objectives that stay. */
   const keepRows = (list: Objective[]) => {
@@ -545,22 +549,45 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
         </header>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
-          <div className="grid gap-2 sm:grid-cols-[1fr_12rem]">
-            <Labelled label="Name">
-              <input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. BRD4 cofolding lead optimisation" autoFocus className={BLOCK} />
-            </Labelled>
-            <Labelled label="Id">
-              <input value={form.id} onChange={(event) => setId(event.target.value)} placeholder="brd4-cofolding" className={`${BLOCK} font-mono`} spellCheck={false} />
-            </Labelled>
-          </div>
+          <Labelled label="Name">
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. BRD4 cofolding lead optimisation" autoFocus className={BLOCK} />
+          </Labelled>
 
           <Section title="Protein">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <div className="min-w-44 flex-1">
-                <FileSelect files={files?.structures} value={picked} onChange={pickStructure} label="Structure file" empty="Structure file" detail={() => null} />
-              </div>
-              <label className={SECONDARY} title="Upload a .pdb or .cif file">
-                Upload
+            <div role="radiogroup" aria-label="Protein source" className="flex flex-wrap items-center gap-1">
+              {PROTEIN_SOURCES.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === s.id}
+                  onClick={() => chooseSource(s.id)}
+                  className={`cursor-pointer rounded-md border px-2.5 py-1 font-medium touch:min-h-11 ${
+                    mode === s.id ? "border-strong bg-sunken text-body" : "border-subtle text-muted hover:text-body"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+              {structured && (
+                <button type="button" onClick={clearStructure} aria-label="Clear the structure" title="Clear" className="text-faint hover:text-body cursor-pointer px-1 text-sm leading-none">
+                  ×
+                </button>
+              )}
+            </div>
+
+            {mode === "shared" && <SharedList files={files?.structures} value={picked} onPick={pickStructure} />}
+            {mode === "upload" && (
+              <label
+                className="border-subtle text-muted hover:text-body flex cursor-pointer items-center justify-center rounded-lg border border-dashed px-3 py-4 text-[11px]"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const file = event.dataTransfer.files?.[0];
+                  if (file) upload(file);
+                }}
+              >
+                Drop a .pdb or .cif file, or click to choose
                 <input
                   type="file"
                   accept=".pdb,.ent,.cif,.mmcif"
@@ -572,7 +599,8 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
                   }}
                 />
               </label>
-              <span className="text-faint text-[11px]">or</span>
+            )}
+            {mode === "pdb" && (
               <form
                 className="flex items-center gap-1.5"
                 onSubmit={(event) => {
@@ -583,21 +611,17 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
                 <input
                   value={entry}
                   onChange={(event) => setEntry(event.target.value)}
-                  placeholder="PDB id"
+                  placeholder="e.g. 4ZC9"
                   aria-label="PDB id"
-                  className={`${INPUT} w-20 font-mono`}
+                  autoFocus
+                  className={`${INPUT} w-28 font-mono`}
                   spellCheck={false}
                 />
                 <button type="submit" disabled={!isPdbId(entry) || structure.state === "busy"} className={SECONDARY}>
                   Fetch
                 </button>
               </form>
-              {structured && (
-                <button type="button" onClick={clearStructure} aria-label="Clear the structure" title="Clear" className="text-faint hover:text-body cursor-pointer px-1 text-sm leading-none">
-                  ×
-                </button>
-              )}
-            </div>
+            )}
 
             {structure.state === "busy" && <p className="text-faint text-[11px]">{structure.path.startsWith(RCSB) ? "Fetching" : structure.path.startsWith(UPLOAD) ? "Uploading" : "Reading"} {sourceName(structure.path)}…</p>}
             {structure.state === "error" && <p style={{ color: "var(--color-accent)" }}>{structure.message}</p>}
@@ -657,14 +681,9 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
               </div>
             )}
 
-            {!structured && !lookupOpen && (
-              <button type="button" onClick={() => setLookupOpen(true)} className="text-muted hover:text-body cursor-pointer text-[11px] underline underline-offset-2">
-                or look up a target
-              </button>
-            )}
-
             {showSequence && (
               <div className="space-y-2">
+                {mode === "lookup" && (
                 <form
                   className="flex flex-wrap gap-2"
                   onSubmit={(event) => {
@@ -691,8 +710,9 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
                     {lookup.state === "busy" ? "Looking up…" : "Look up"}
                   </button>
                 </form>
-                {lookup.state === "error" && <p style={{ color: "var(--color-accent)" }}>{lookup.message}</p>}
-                {lookup.state === "found" && (
+                )}
+                {mode === "lookup" && lookup.state === "error" && <p style={{ color: "var(--color-accent)" }}>{lookup.message}</p>}
+                {mode === "lookup" && lookup.state === "found" && (
                   <div className="bg-sunken border-subtle rounded-lg border px-3 py-2">
                     <p className="font-medium">
                       {lookup.facts.name ?? lookup.facts.entryName}
@@ -707,7 +727,10 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
                           <button
                             key={pdb}
                             type="button"
-                            onClick={() => fetchEntry(pdb)}
+                            onClick={() => {
+                              setMode("pdb");
+                              fetchEntry(pdb);
+                            }}
                             title={`Fold the construct of ${pdb}`}
                             className="border-subtle text-muted hover:text-body cursor-pointer rounded-md border px-1.5 py-px font-mono text-[10px]"
                           >
@@ -719,7 +742,7 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
                   </div>
                 )}
 
-                {reference && (
+                {mode === "lookup" && reference && (
                   <div role="radiogroup" aria-label="Region" className="flex flex-wrap items-center gap-1">
                     {REGIONS.map((r) => (
                       <Pill key={r.id} on={region === r.id} onClick={() => chooseRegion(r.id)}>
@@ -799,7 +822,6 @@ function BuilderForm({ onClose, onCreated, initial, molecules, catalog, saved }:
           <Section title="Objectives">
             <ObjectivePicker groups={groups} objectives={form.objectives} onToggle={(e, on) => keepRows(toggleObjective(form.objectives, e, on))} />
             {!catalog.loaded && <p className="text-faint text-[11px]">Loading the services…</p>}
-            {cofold && <p className="text-faint text-[11px]">Cofolding is much slower: every molecule is cofolded with the protein.</p>}
             {objectives.length > 0 && (
               <ul className="border-subtle divide-y rounded-lg border">
                 {objectives.map((row, index) => (
@@ -878,6 +900,46 @@ const BLOCK = `${INPUT} w-full`;
 const SECONDARY = "bg-inset text-body hover:bg-sunken border-subtle cursor-pointer rounded-md border px-2.5 py-1 font-medium disabled:cursor-default disabled:opacity-50 touch:min-h-11";
 const GHOST = "text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 font-medium disabled:opacity-50 touch:min-h-11";
 const PRIMARY = "cursor-pointer rounded-md px-3 py-1 font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-50 touch:min-h-11";
+
+type ProteinSource = "shared" | "upload" | "pdb" | "lookup" | "sequence";
+const PROTEIN_SOURCES: { id: ProteinSource; label: string }[] = [
+  { id: "shared", label: "Shared volume" },
+  { id: "upload", label: "Upload" },
+  { id: "pdb", label: "PDB id" },
+  { id: "lookup", label: "Look up target" },
+  { id: "sequence", label: "Sequence" },
+];
+
+/** The structures on the shared volume as a short scrolling list, grouped by top-level folder. */
+function SharedList({ files, value, onPick }: { files?: Asset[]; value: string; onPick: (path: string) => void }) {
+  if (!files) return <p className="text-faint text-[11px]">Loading…</p>;
+  if (!files.length) return <p className="text-faint text-[11px]">No structures on the shared volume.</p>;
+  return (
+    <ul role="listbox" aria-label="Shared structures" className="border-subtle max-h-40 overflow-y-auto rounded-lg border py-0.5">
+      {groupByFolder(files).map((f) => (
+        <li key={f.folder}>
+          <p className="text-faint px-2.5 pt-1 text-[10px]">{f.folder}</p>
+          <ul>
+            {f.assets.map((a) => (
+              <li key={a.path}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={a.path === value}
+                  title={a.path}
+                  onClick={() => onPick(a.path)}
+                  className={`w-full cursor-pointer truncate px-2.5 py-0.5 text-left font-mono text-[11px] ${a.path === value ? "bg-sunken text-body" : "text-muted hover:bg-inset hover:text-body"}`}
+                >
+                  {a.name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 /** A shared file picker, grouped by top-level folder. */
 function FileSelect({

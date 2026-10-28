@@ -625,6 +625,15 @@ export function slugify(name: string): string {
     .replace(/-+$/, "");
 }
 
+/** The slug of *name*, numbered past any id already taken. */
+export function freeSlug(name: string, taken: readonly string[]): string {
+  const base = slugify(name);
+  if (!base || !taken.includes(base)) return base;
+  let n = 2;
+  while (taken.includes(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
 export const TTP_ID = /^[a-z0-9][a-z0-9_-]*$/;
 const TEMPLATE_FILE = /\.(cif|mmcif|pdb|ent)$/i;
 const AMINO_ACIDS = /^[ACDEFGHIKLMNPQRSTVWY]+$/;

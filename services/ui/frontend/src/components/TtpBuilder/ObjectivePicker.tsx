@@ -10,7 +10,7 @@ interface Props {
   onToggle: (entry: CatalogueEntry, on: boolean) => void;
 }
 
-/** One checkbox per metric, under its group's title, tinted by group. */
+/** One checkbox per metric, a row per group, tinted by group. */
 export function ObjectivePicker({ groups, objectives, onToggle }: Props) {
   const [expanded, setExpanded] = useState<string[]>([]);
   const keys = new Set(objectives.map(objectiveKey));
@@ -22,15 +22,13 @@ export function ObjectivePicker({ groups, objectives, onToggle }: Props) {
         const shown = group.entries.filter((e) => open || !e.extra || keys.has(e.key));
         const colour = groupColour(group.name);
         return (
-          <div key={group.name} role="group" aria-label={group.name} className="flex items-start gap-2">
-            <span className="text-muted w-28 shrink-0 pt-0.5 text-[11px] font-medium">{group.name}</span>
-            <div className="flex min-w-0 flex-1 flex-wrap gap-1">
+          <div key={group.name} role="group" aria-label={group.name} className="flex flex-wrap gap-1">
               {shown.map((e) => {
                 const on = keys.has(e.key);
                 const blocked = !on && e.after !== undefined && !keys.has(e.after);
                 const needs = blocked ? group.entries.find((x) => x.key === e.after)?.label : undefined;
                 return (
-                  <Chip key={e.key} on={on} colour={colour} disabled={blocked} title={needs ? `Needs ${needs}` : undefined} onClick={() => onToggle(e, !on)}>
+                  <Chip key={e.key} on={on} colour={colour} disabled={blocked} title={needs ? `Needs ${needs}` : group.name} onClick={() => onToggle(e, !on)}>
                     {e.label}
                   </Chip>
                 );
@@ -44,7 +42,6 @@ export function ObjectivePicker({ groups, objectives, onToggle }: Props) {
                   {open ? "Fewer" : `${extras} more`}
                 </button>
               )}
-            </div>
           </div>
         );
       })}
