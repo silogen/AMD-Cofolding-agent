@@ -254,7 +254,9 @@ AGENT_BINDS=(
     --bind "${DATA_DIR}/agent_logs:/logs"
 )
 # The model supervisor hands the gateway the running model through this directory.
-if [ -n "${REINVENT4_WEB_MODEL_CONTROL:-}" ]; then
+# A path inside the container (e.g. /logs/model-control) is already covered by
+# the log bind; only a host directory needs its own bind.
+if [ -n "${REINVENT4_WEB_MODEL_CONTROL:-}" ] && [ -d "${REINVENT4_WEB_MODEL_CONTROL}" ]; then
     AGENT_BINDS+=(--bind "${REINVENT4_WEB_MODEL_CONTROL}:${REINVENT4_WEB_MODEL_CONTROL}")
 fi
 # DEV_SOURCE=1 runs the agent and MCP server from this checkout instead of the
