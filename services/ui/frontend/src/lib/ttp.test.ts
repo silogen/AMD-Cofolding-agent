@@ -247,6 +247,11 @@ describe("extractTargetFacts", () => {
     ],
   };
 
+  it("names a run's saved TTP when only its id was passed", () => {
+    const facts = extractTargetFacts([{ type: "tool_call", name: "run_optimization", arguments: { ttp_id: "egfr", max_steps: 30 } }]);
+    expect(facts.ttpId).toBe("egfr");
+  });
+
   it("combines UniProt, TTP target and contacts", () => {
     const facts = extractTargetFacts([
       { type: "tool_call", name: "fetch_target_info", arguments: { query: "O60885" } },

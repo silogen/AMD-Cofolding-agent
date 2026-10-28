@@ -6,7 +6,7 @@ import { useJobOwners, useRunsKnown, useSessionRuns } from "../../hooks/useSessi
 import type { Theme } from "../../hooks/useTheme";
 import { callTool, jobFileUrl } from "../../lib/api";
 import { conversationJobs, errorSummary, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
-import { rowMolecule } from "../../lib/jobStructures";
+import { openRunStructure, rowMetrics, rowMolecule, runStructurePanel } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
 import { countMask, goalOf, heading, moleculesOf, selectionMask, spreads, stepStats, topByWeight, TOTAL, type Endpoint, type Goal, type Molecules, type Ranges, type StepStats, type TransformLike } from "../../lib/runAnalysis";
 import { parseRunResults, type RunTable } from "../../lib/runResults";
@@ -221,6 +221,15 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
     },
     [molecules, table, job, onOpenMolecule],
   );
+  const openStructure = useCallback(
+    (i: number) => {
+      const row = molecules?.rows[i];
+      if (!row?.structure || !table || !job) return;
+      const panel = runStructurePanel(row.structure, row.smiles || null, job.id, row.step, rowMetrics(table, row));
+      if (panel) openRunStructure(sessionId ?? "new", panel);
+    },
+    [molecules, table, job, sessionId],
+  );
 
   useEffect(() => {
     if (!filtered) return;
@@ -322,7 +331,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
               actions={
                 <PickMenu
                   label="Endpoints"
-                  items={endpoints.map((e) => ({ key: e.key, label: e.source === "score" ? "${e.label} (score)" : heading(e), colour: colours.get(e.key) }))}
+                  items={endpoints.map((e) => ({ key: e.key, label: heading(e), colour: colours.get(e.key) }))}
                   checked={shown}
                   onToggle={onToggle}
                 />
@@ -343,7 +352,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
                   >
                     {endpoints.map((e: Endpoint) => (
                       <option key={e.key} value={e.key}>
-                        {e.source === "score" ? "${e.label} (score)" : heading(e)}
+                        {heading(e)}
                       </option>
                     ))}
                     <option value={STEP}>Step</option>
@@ -390,6 +399,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
               hovered={hovered}
               onHover={onHover}
               onOpen={open}
+              onOpenStructure={openStructure}
               theme={theme}
             />
           </Card>

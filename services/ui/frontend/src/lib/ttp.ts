@@ -1448,6 +1448,8 @@ export function extractTargetFacts(events: ToolEvent[]): TargetFacts {
       else {
         const seq = findSequence(event.arguments);
         if (seq) facts = withSource({ ...facts, sequence: seq, sequenceLength: seq.length }, event.name);
+        const ttpId = str(event.arguments.ttp_id);
+        if (ttpId && !facts.ttpId) facts = { ...facts, ttpId };
       }
       const query = str(event.arguments.query);
       if (event.name === "fetch_target_info" && query && isAccession(query) && !facts.uniprot) {

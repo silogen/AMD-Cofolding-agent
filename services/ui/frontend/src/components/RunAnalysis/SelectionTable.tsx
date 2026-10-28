@@ -16,6 +16,8 @@ interface Props {
   hovered: number | null;
   onHover: (index: number | null) => void;
   onOpen: (index: number) => void;
+  /** Show the molecule's cofolded complex in the viewer. */
+  onOpenStructure?: (index: number) => void;
   theme: Theme;
 }
 
@@ -28,7 +30,8 @@ const THUMB = 88;
  * 0–1 score. Scrolls both ways inside its own box, the header and the
  * structures staying in view.
  */
-export const SelectionTable = memo(function SelectionTable({ molecules, mask, columns, colours, hovered, onHover, onOpen, theme }: Props) {
+export const SelectionTable = memo(function SelectionTable({ molecules, mask, columns, colours, hovered, onHover, onOpen, onOpenStructure, theme }: Props) {
+  const complexes = !!onOpenStructure && molecules.rows.some((r) => r.structure);
   const [sort, setSort] = useState<{ key: string; desc: boolean }>({ key: TOTAL, desc: true });
   const [paging, setPaging] = useState<{ mask: Uint8Array | null; page: number }>({ mask, page: 0 });
   const scroller = useRef<HTMLDivElement>(null);
@@ -67,6 +70,11 @@ export const SelectionTable = memo(function SelectionTable({ molecules, mask, co
               <th scope="col" className="bg-raised border-subtle sticky top-0 left-0 z-20 border-b" style={{ width: THUMB, minWidth: THUMB }}>
                 <span className="sr-only">Structure</span>
               </th>
+              {complexes && (
+                <th scope="col" className="bg-raised border-subtle sticky top-0 z-10 border-b" style={{ width: 36 }}>
+                  <span className="sr-only">Complex</span>
+                </th>
+              )}
               <th scope="col" className="bg-raised border-subtle text-muted sticky top-0 z-10 border-b px-2 py-1 text-left align-bottom font-medium" style={{ minWidth: 180 }}>
                 SMILES
               </th>
@@ -77,7 +85,7 @@ export const SelectionTable = memo(function SelectionTable({ molecules, mask, co
           <tbody>
             {shown.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + 3} className="text-faint py-8 text-center">
+                <td colSpan={columns.length + (complexes ? 4 : 3)} className="text-faint py-8 text-center">
                   No molecule matches the selection.
                 </td>
               </tr>
@@ -90,6 +98,24 @@ export const SelectionTable = memo(function SelectionTable({ molecules, mask, co
                     <td className={`${cell} sticky left-0 z-[5] p-0 ${active ? "" : "bg-raised"}`} style={{ width: THUMB, minWidth: THUMB }}>
                       <LazyDepiction smiles={molecules.smiles[i]} theme={theme} root={scroller} />
                     </td>
+                    {complexes && (
+                      <td className={`${cell} px-1 text-center`}>
+                        {molecules.rows[i]?.structure && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onOpenStructure?.(i);
+                            }}
+                            title="Show the complex in the viewer"
+                            className="hover:bg-inset cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                            style={{ color: "var(--color-structure)" }}
+                          >
+                            3D
+                          </button>
+                        )}
+                      </td>
+                    )}
                     <td className={`${cell} max-w-[260px] px-2`}>
                       <SmilesText smiles={molecules.smiles[i]} className="text-[10px]" />
                     </td>

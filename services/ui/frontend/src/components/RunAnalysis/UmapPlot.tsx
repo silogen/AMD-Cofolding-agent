@@ -57,6 +57,8 @@ const HOME: View = { k: 1, x: 0, y: 0 };
  * button, to move; double-click resets the view, Esc clears the selection.
  * Hover a point for its structure, click it to open the molecule.
  */
+const DOUBLE_CLICK_MS = 250;
+
 export function UmapPlot({ molecules, layout, working, colourBy, endpoint, goal, mask, mode, onRegion, hovered, onHover, onOpen, theme }: Props) {
   const [measure, width] = useWidth<HTMLDivElement>();
   const [box, setBox] = useState<HTMLDivElement | null>(null);
@@ -68,6 +70,8 @@ export function UmapPlot({ molecules, layout, working, colourBy, endpoint, goal,
     [measure],
   );
   const canvas = useRef<HTMLCanvasElement>(null);
+  const pendingOpen = useRef(0);
+  useEffect(() => () => window.clearTimeout(pendingOpen.current), []);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [view, setView] = useState<View>(HOME);
   const viewRef = useRef(view);
@@ -266,9 +270,13 @@ export function UmapPlot({ molecules, layout, working, colourBy, endpoint, goal,
     setDrag(null);
     const moved = current.kind === "pan" ? current.moved : current.kind === "box" ? Math.abs(current.x1 - current.x0) + Math.abs(current.y1 - current.y0) > 6 : current.points.length > 6;
     if (!moved) {
-      // The second click of a double-click resets the view; it does not open the molecule again.
+      // A double-click resets the view, so a click opens its molecule only once no second click follows.
+      window.clearTimeout(pendingOpen.current);
       const i = event.detail > 1 || event.button !== 0 ? -1 : nearest(x, y);
-      if (i >= 0) onOpen(points!.index[i]);
+      if (i >= 0) {
+        const index = points!.index[i];
+        pendingOpen.current = window.setTimeout(() => onOpen(index), DOUBLE_CLICK_MS);
+      }
       return;
     }
     if (current.kind === "pan") return;
