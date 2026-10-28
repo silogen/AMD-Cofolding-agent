@@ -2,22 +2,24 @@
 // SPDX-License-Identifier: MIT
 
 import type { PropertiesPanel, StructureMetrics } from "../types/api";
+import { jobFileUrl } from "./api";
 import type { Sourced } from "./artifacts";
 import type { Candidate } from "./candidates";
-import type { JobStructure } from "./jobStructures";
+import { rowMolecule, type JobStructure } from "./jobStructures";
 import {
   componentFacts,
   isMetricName,
   metricsFromValues,
-  otherRawValues,
   predictionGroups,
   propertyFacts,
   propertyKey,
+  runPredictions,
   type Fact,
   type FactGroup,
   type ScoreComponent,
 } from "./moleculeFacts";
 import type { Descriptors } from "./rdkit";
+import { parseRunResults, type RunRow, type RunTable } from "./runResults";
 
 /**
  * Opens a molecule's page in the workbench from anywhere: a Results row, a
@@ -89,6 +91,8 @@ export function moleculeView(input: {
   fetched?: JobStructure | null;
   descriptors?: Descriptors | null;
   predictions?: readonly Sourced<PropertiesPanel>[];
+  /** Canonical SMILES, to find the molecule in predictions that wrote it differently. */
+  key?: (smiles: string) => string;
 }): MoleculeView {
   const { smiles, context, candidate, fetched } = input;
   const values = candidate?.components ?? {};
@@ -99,6 +103,8 @@ export function moleculeView(input: {
     .filter(([name]) => !propertyKey(name) && !isMetricName(name))
     .map(([name, value]) => ({ name, value }));
   const raws = Object.fromEntries((fromRun ?? []).map((c) => [c.name, c.raw]));
+  const services = predictionGroups(smiles, input.predictions ?? [], input.key);
+  const scored = runPredictions(fromRun ?? [], services);
   return {
     name: context?.name ?? candidate?.name ?? null,
     origin: originLabel(context?.run ? { run: context.run, step } : undefined) ?? "Chat",
@@ -107,7 +113,25 @@ export function moleculeView(input: {
     components: componentFacts(fromRun ?? other),
     cofold: structure?.metrics ?? candidate?.metrics ?? metricsFromValues(values) ?? null,
     structurePath: structure?.path ?? candidate?.structurePath ?? null,
-    properties: [...propertyFacts({ ...raws, ...values }, input.descriptors), ...otherRawValues(fromRun ?? [])],
-    predictions: predictionGroups(smiles, input.predictions ?? []),
+    properties: propertyFacts({ ...raws, ...values }, input.descriptors),
+    predictions: services.concat(scored.length ? [{ title: "Run", facts: scored }] : []),
   };
+}
+
+/** The run row of `smiles` (its best scoring one) as page context; `key` (canonical SMILES) when the CSV wrote it differently. */
+export function runRowContext(table: RunTable, smiles: string, run: string, key?: (smiles: string) => string): MoleculeContext | null {
+  let rows = table.rows.filter((row) => row.smiles === smiles);
+  if (!rows.length && key) {
+    const wanted = key(smiles);
+    rows = table.rows.filter((row) => row.smiles && key(row.smiles) === wanted);
+  }
+  const rank = (row: RunRow) => (row.failure ? -Infinity : (row.total ?? -Infinity));
+  const best = rows.reduce<RunRow | null>((top, row) => (!top || rank(row) > rank(top) ? row : top), null);
+  return best ? rowMolecule(table, best, run) : null;
+}
+
+/** A run's results CSV (GET /api/jobs/{id}/files/results_1.csv), or null when it has none yet. */
+export async function loadRunTable(run: string): Promise<RunTable | null> {
+  const response = await fetch(jobFileUrl(run, "results_1.csv"));
+  return response.ok ? parseRunResults(await response.text()) : null;
 }

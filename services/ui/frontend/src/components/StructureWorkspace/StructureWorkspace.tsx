@@ -33,8 +33,8 @@ import { canonical, descriptors } from "../../lib/rdkit";
 import { useRDKit } from "../../hooks/useRDKit";
 import { fetchPdbEntry, isPdbId } from "../../lib/rcsb";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { DetailsColumns } from "./DetailsColumns";
-import { cofoldBars, predictionBars, propertyBars } from "./detailFacts";
+import { DetailsColumns } from "../MoleculeFacts/FactBars";
+import { cofoldBars, predictionBars, propertyBars } from "../../lib/factBars";
 import { pickKind, pickQuestion, pickTitle, structureRef, type PickedResidue } from "./pickQuestion";
 
 interface Props {

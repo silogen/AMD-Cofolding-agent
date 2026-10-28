@@ -5,7 +5,7 @@ import { memo, useEffect, useMemo, useState, type CSSProperties, type ReactNode 
 import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
 import { structureTitle, type Artifacts } from "../../lib/artifacts";
-import { clock, duration } from "../../lib/format";
+import { clock } from "../../lib/format";
 import {
   DOCK_DEFAULT_WIDTH,
   DOCK_MAX_FRACTION,
@@ -29,13 +29,12 @@ import { StructureWorkspace } from "../StructureWorkspace/StructureWorkspace";
 import { PropertiesCard } from "../PropertiesCard/PropertiesCard";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { MoleculePage } from "../MoleculePage/MoleculePage";
-import { summarise } from "../../lib/format";
 import { extractTargetFacts, toolEvents } from "../../lib/ttp";
 import { candidatesOf } from "../../lib/candidates";
-import { stepState } from "../../lib/transcript";
 import { CandidatesPanel } from "../CandidatesPanel/CandidatesPanel";
 import { JobsPanel } from "../JobsPanel/JobsPanel";
 import { RunResults } from "../RunResults/RunResults";
+import { RunAnalysis } from "../RunAnalysis/RunAnalysis";
 import { TtpPanel } from "../TtpPanel/TtpPanel";
 import { TargetCard } from "../TargetCard/TargetCard";
 import { AssetsPanel } from "../AssetsPanel/AssetsPanel";
@@ -43,7 +42,7 @@ import { ShortlistPanel } from "../Shortlist/ShortlistPanel";
 import { StarButton } from "../Shortlist/StarButton";
 import { useShortlist } from "../../lib/shortlist";
 
-/** A tab, or a view inside one: "candidates" and "properties" open in Molecules, "activity" in Jobs. */
+/** A tab, or a view inside one: "candidates" and "properties" open in Molecules, "activity" (Analysis) in Jobs. */
 export type WorkbenchTab = DockView;
 export type WorkbenchLayout = "sidebar" | "sheet";
 
@@ -98,7 +97,8 @@ const MOLECULE_VIEWS = [
 const JOB_VIEWS = [
   { id: "jobs", label: "Jobs" },
   { id: "results", label: "Results" },
-  { id: "activity", label: "Activity" },
+  // The view id predates the Analysis view; dock.ts and the workbench bus still call it "activity".
+  { id: "activity", label: "Analysis" },
 ] as const;
 
 /**
@@ -138,7 +138,7 @@ export const Workbench = memo(function Workbench(props: Props) {
     target: 0,
     assets: 0,
     tables: 0,
-    activity: artifacts.steps.length,
+    activity: 0,
   };
 
   const labelOf = (id: DockTab) => (id === "structure" && props.activeStructure ? structureTitle(props.activeStructure) : LABEL[id]);
@@ -373,7 +373,11 @@ export const Workbench = memo(function Workbench(props: Props) {
                   <RunResults artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />
                 </div>
               )}
-              {tab === "activity" && <ActivityTab {...props} />}
+              {tab === "activity" && (
+                <div className="min-h-0 flex-1">
+                  <RunAnalysis sessionId={sessionId} theme={props.theme} onOpenMolecule={show} />
+                </div>
+              )}
             </>
           )}
           {(active === "ttp" || active === "target" || active === "assets") && <ContextTab {...props} />}
@@ -487,64 +491,6 @@ function MoleculesTab({ artifacts, theme, sessionId, onOpen }: Props & { onOpen:
           ))}
         </ul>
       </div>
-    </>
-  );
-}
-
-function ActivityTab({ artifacts }: Props) {
-  const [filter, setFilter] = useState<"all" | "failed">("all");
-  const steps = filter === "failed" ? artifacts.steps.filter((step) => stepState(step) === "failed") : artifacts.steps;
-  const total = artifacts.steps.reduce((sum, step) => sum + (step.result?.elapsedMs ?? 0), 0);
-  const failed = artifacts.steps.filter((step) => stepState(step) === "failed").length;
-
-  if (artifacts.steps.length === 0) {
-    return <Empty>No tool calls yet. Every call the agent makes is logged here with its duration.</Empty>;
-  }
-
-  return (
-    <>
-      <div className="text-faint flex shrink-0 items-center gap-3 px-3 py-2 text-[11px]">
-        <span>
-          {artifacts.steps.length} calls · {duration(total)} in tools
-        </span>
-        {failed > 0 && (
-          <div role="group" aria-label="Filter" className="ml-auto flex gap-0.5">
-            {(["all", "failed"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={filter === value}
-                onClick={() => setFilter(value)}
-                className={`cursor-pointer rounded-md px-2 py-0.5 ${filter === value ? "bg-inset text-body" : "hover:text-body"}`}
-              >
-                {value === "all" ? "All" : `Failed ${failed}`}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      <ol className="border-subtle min-h-0 flex-1 overflow-y-auto border-t">
-        {steps.map((step) => {
-          const state = stepState(step);
-          return (
-            <li key={step.id} className="border-subtle flex items-center gap-2 border-b px-3 py-1.5 text-[11px]">
-              <span
-                aria-label={state}
-                className={`size-1.5 shrink-0 rounded-full ${state === "running" ? "animate-pulse" : ""}`}
-                style={{ background: state === "ok" ? "var(--border-strong)" : state === "failed" ? "var(--color-accent)" : "var(--color-warn)" }}
-              />
-              <span className="text-faint shrink-0 font-mono">{clock(step.at)}</span>
-              <span className="shrink-0 font-mono font-semibold">{step.name}</span>
-              <span className="text-faint min-w-0 flex-1 truncate font-mono" title={summarise(step.arguments)}>
-                {summarise(step.arguments)}
-              </span>
-              <span className="text-faint shrink-0 font-mono">
-                {step.result?.elapsedMs != null ? duration(step.result.elapsedMs) : state === "running" ? "…" : ""}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
     </>
   );
 }

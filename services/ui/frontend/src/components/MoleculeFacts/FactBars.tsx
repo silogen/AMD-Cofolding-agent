@@ -1,14 +1,36 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+import type { ReactNode } from "react";
+import type { Bar, BarFact, BarGroup } from "../../lib/factBars";
 import type { RelatedFile } from "../../lib/structureFiles";
-import type { Bar, BarFact, BarGroup } from "./detailFacts";
 
 const BAR_COLORS: Record<Bar["tone"], string> = { ok: "var(--color-ok)", warn: "var(--color-warn)", plain: "var(--color-structure)" };
 
+/**
+ * Groups of values side by side once the enclosing `@container` is wide
+ * enough: `left` stacked in the first column, `right` in the second.
+ */
+export function FactColumns({ left, right }: { left: (BarGroup & { action?: ReactNode })[]; right: BarGroup[] }) {
+  if (!left.length && !right.length) return null;
+  const column = (groups: (BarGroup & { action?: ReactNode })[]) =>
+    groups.length > 0 && (
+      <div className="space-y-3">
+        {groups.map((group) => (
+          <FactList key={group.title} {...group} />
+        ))}
+      </div>
+    );
+  return (
+    <div className="grid items-start gap-x-8 gap-y-3 text-[11px] @xl:grid-cols-2">
+      {column(left)}
+      {column(right)}
+    </div>
+  );
+}
+
 /** The files of a structure as one row of download links, then cofold and predictions next to the ligand's properties. */
 export function DetailsColumns({ files, cofold, predictions, properties }: { files: RelatedFile[]; cofold: BarFact[]; predictions: BarGroup[]; properties: BarFact[] }) {
-  const left = [...(cofold.length ? [{ title: "Cofold", facts: cofold }] : []), ...predictions];
   return (
     <div className="space-y-3 text-[11px]">
       {files.length > 0 && (
@@ -28,26 +50,19 @@ export function DetailsColumns({ files, cofold, predictions, properties }: { fil
           ))}
         </ul>
       )}
-      {(left.length > 0 || properties.length > 0) && (
-        <div className="grid items-start gap-x-8 gap-y-3 @xl:grid-cols-2">
-          {left.length > 0 && (
-            <div className="space-y-3">
-              {left.map((group) => (
-                <FactList key={group.title} title={group.title} facts={group.facts} />
-              ))}
-            </div>
-          )}
-          {properties.length > 0 && <FactList title="Properties" facts={properties} />}
-        </div>
-      )}
+      <FactColumns left={[...(cofold.length ? [{ title: "Cofold", facts: cofold }] : []), ...predictions]} right={properties.length ? [{ title: "Properties", facts: properties }] : []} />
     </div>
   );
 }
 
-function FactList({ title, facts }: BarGroup) {
+/** One value per row: label, a short bar, the value and its unit. */
+export function FactList({ title, facts, action }: BarGroup & { action?: ReactNode }) {
   return (
     <section aria-label={title} className="max-w-xs">
-      <h4 className="text-faint mb-0.5 text-[10px] font-semibold">{title}</h4>
+      <h4 className="text-faint mb-0.5 flex items-center gap-2 text-[10px] font-semibold">
+        <span className="min-w-0 truncate">{title}</span>
+        {action}
+      </h4>
       <dl>
         {facts.map((fact) => (
           <div key={fact.label} className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2 leading-5" title={fact.title}>

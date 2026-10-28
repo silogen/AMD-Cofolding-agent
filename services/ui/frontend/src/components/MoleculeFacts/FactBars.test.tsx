@@ -3,7 +3,7 @@
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { DetailsColumns } from "./DetailsColumns";
+import { DetailsColumns } from "./FactBars";
 
 const files = [
   { label: "Structure", type: "PDB", url: "/files/a.pdb", name: "a.pdb" },

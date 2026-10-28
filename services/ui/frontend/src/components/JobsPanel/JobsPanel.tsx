@@ -8,7 +8,6 @@ import { callTool, download, jobFileUrl } from "../../lib/api";
 import { candidatesSdf, candidatesSheet, fileName } from "../../lib/csv";
 import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
-  bestPerStep,
   bestScore,
   canResume,
   candidateScores,
@@ -45,8 +44,7 @@ import {
 } from "../../lib/jobs";
 import { loadJobStructures, openRunStructure, runStructurePanel, type JobStructure } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
-import { parseRunResults } from "../../lib/runResults";
-import { focusRun, notifyRunsChanged, onRunsChanged, openRun, useFocusedRun } from "../../lib/workbenchBus";
+import { focusRun, notifyRunsChanged, onRunsChanged, openRun, openWorkbench, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { SmilesText } from "../MolDepiction/SmilesText";
@@ -54,7 +52,6 @@ import { ScoreTrend } from "../RunBar/ScoreTrend";
 import { StarButton } from "../Shortlist/StarButton";
 import { Badge } from "./Badge";
 import { ContinueRun } from "./ContinueRun";
-import { TrajectoryChart } from "./TrajectoryChart";
 
 interface Props {
   /** The conversation on screen: only its runs are listed. */
@@ -67,8 +64,6 @@ interface Props {
 
 /** How often to refresh while a job runs. Nothing is polled once all jobs are done. */
 const POLL_MS = 10_000;
-/** The results file is read again every this many refreshes, for the chart's per-step best. */
-const RESULTS_EVERY = 3;
 const TOP_N = 10;
 
 interface Loaded<T> {
@@ -189,24 +184,6 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
       cancelled = true;
     };
   }, [activeId, hasResults, growing, tick]);
-
-  const [stepBest, setStepBest] = useState<Loaded<Map<number, number>> | null>(null);
-  const statusHasBest = current?.value?.trajectory.some((p) => p.max !== null) ?? false;
-  const resultsName = summary ? resultsFile(summary) : null;
-  const resultsTick = Math.floor(tick / RESULTS_EVERY);
-  useEffect(() => {
-    if (!activeId || !hasResults || statusHasBest || !resultsName) return;
-    let cancelled = false;
-    fetch(jobFileUrl(activeId, resultsName))
-      .then((response) => (response.ok ? response.text() : ""))
-      .then((text) => {
-        if (!cancelled && text) setStepBest({ id: activeId, value: bestPerStep(parseRunResults(text).rows), error: null });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId, hasResults, statusHasBest, resultsName, resultsTick]);
 
   useEffect(() => {
     if (!live) return;
@@ -375,7 +352,17 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
             {job.type === "optimization" && (
-              <ActionButton onClick={() => openRun(job.id, "results")}>Results</ActionButton>
+              <>
+                <ActionButton onClick={() => openRun(job.id, "results")}>Results</ActionButton>
+                <ActionButton
+                  onClick={() => {
+                    focusRun(job.id);
+                    openWorkbench("activity");
+                  }}
+                >
+                  Analysis
+                </ActionButton>
+              </>
             )}
             {job.state === "running" && job.type === "optimization" && (
               <ActionButton tone="bad" disabled={busy} onClick={() => setConfirm("stop")}>
@@ -454,14 +441,6 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
         )}
 
         <Alerts alerts={jobAlerts} />
-
-        <Card title="Score trajectory">
-          {s ? (
-            <TrajectoryChart status={s} best={stepBest?.id === job.id ? stepBest.value : null} />
-          ) : (
-            <p className="text-faint py-8 text-center">{current ? "No status available." : "Loading status…"}</p>
-          )}
-        </Card>
 
         {diagnostics && (
           <div className="mt-3 grid gap-3 @xl:grid-cols-2">

@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { PropertiesPanel } from "../types/api";
-import { cofoldFacts, componentFacts, ic50, metricsFromValues, otherRawValues, predictionGroups, propertyFacts, propertyKey } from "./moleculeFacts";
+import { cofoldFacts, componentFacts, ic50, metricsFromValues, otherRawValues, predictionGroups, propertyFacts, propertyKey, runPredictions } from "./moleculeFacts";
 
 describe("ic50", () => {
   it("reads log10(IC50 / µM) as a concentration", () => {
@@ -105,10 +105,35 @@ describe("predictionGroups", () => {
       {
         title: "ADMET",
         facts: [
-          { label: "LogD", value: "2.13" },
-          { label: "Aq. solubility", value: "−4.30 ± 0.20", unit: "log₁₀ M", title: "log10(mol/L)" },
+          { label: "LogD", endpoint: "logd", value: "2.13" },
+          { label: "Aq. solubility", endpoint: "aqueous_solubility", value: "−4.30 ± 0.20", unit: "log₁₀ M", title: "log10(mol/L)" },
         ],
       },
     ]);
+  });
+
+  it("finds a molecule the service wrote differently by its canonical SMILES", () => {
+    const key = (s: string) => (s === "OCC" ? "CCO" : s);
+    const panels = [{ item: panel("admet", "OCC"), tool: "predict_admet", at: 1 }];
+    expect(predictionGroups("CCO", panels)).toEqual([]);
+    expect(predictionGroups("CCO", panels, key)[0].facts.map((f) => f.label)).toEqual(["LogD", "Aq. solubility"]);
+  });
+});
+
+describe("runPredictions", () => {
+  const components = [
+    { name: "Boltz affinity", value: 0.98, raw: -1.66, cofold: true },
+    { name: "QED", value: 0.29, raw: 0.29 },
+    { name: "Aqueous solubility", value: 0.5, raw: -4.12 },
+    { name: "hERG", value: 0.9, raw: 0.12 },
+  ];
+
+  it("lists the run's raw endpoint values, less those a prediction service already gave", () => {
+    expect(runPredictions(components, [])).toEqual([
+      { label: "Aqueous solubility", value: "−4.12" },
+      { label: "hERG", value: "0.12" },
+    ]);
+    const admet = [{ title: "ADMET", facts: [{ label: "Aq. solubility", endpoint: "aqueous_solubility", value: "−4.30" }] }];
+    expect(runPredictions(components, admet)).toEqual([{ label: "hERG", value: "0.12" }]);
   });
 });

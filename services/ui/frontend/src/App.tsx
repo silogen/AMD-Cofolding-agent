@@ -233,7 +233,7 @@ export default function App() {
       { id: "tab-properties", group: "Workbench", label: "Show predicted properties", hint: "Molecules", run: () => showWorkbench("properties") },
       { id: "tab-jobs", group: "Workbench", label: "Show REINVENT jobs", hint: "/jobs", run: () => showWorkbench("jobs") },
       { id: "tab-results", group: "Workbench", label: "Show run results", run: () => showWorkbench("results") },
-      { id: "tab-activity", group: "Workbench", label: "Show tool activity", hint: "Jobs", run: () => showWorkbench("activity") },
+      { id: "tab-activity", group: "Workbench", label: "Show run analysis", hint: "Jobs", run: () => showWorkbench("activity") },
       { id: "tab-target", group: "Workbench", label: "Show the target", run: () => showWorkbench("target") },
       { id: "tab-ttp", group: "Workbench", label: "Show the therapeutic target profile", run: () => showWorkbench("ttp") },
       { id: "tab-assets", group: "Workbench", label: "Show shared assets", hint: "/shared", run: () => showWorkbench("assets") },

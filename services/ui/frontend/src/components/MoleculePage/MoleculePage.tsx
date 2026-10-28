@@ -7,8 +7,9 @@ import { useRDKit } from "../../hooks/useRDKit";
 import { sameFile, type Artifacts } from "../../lib/artifacts";
 import { admetPrompt, candidatesOf, cofoldPrompt } from "../../lib/candidates";
 import { loadJobStructures, openRunStructure, runStructurePanel, type JobStructure } from "../../lib/jobStructures";
-import { moleculeView, type MoleculeContext } from "../../lib/moleculePage";
-import { descriptors } from "../../lib/rdkit";
+import { loadRunTable, moleculeView, runRowContext, type MoleculeContext } from "../../lib/moleculePage";
+import { canonical, descriptors } from "../../lib/rdkit";
+import type { RunTable } from "../../lib/runResults";
 import { sendToViewer } from "../../lib/viewerBus";
 import { CopyButton } from "../CopyButton/CopyButton";
 import { MoleculeFacts } from "../MoleculeFacts/MoleculeFacts";
@@ -31,11 +32,26 @@ const action = "text-muted hover:text-body hover:bg-inset cursor-pointer rounded
 /** One molecule: its drawing, where it came from, and every value the conversation has for it. */
 export function MoleculePage({ smiles, context, artifacts, theme, sessionId, onBack, onAsk }: Props) {
   const { rdkit } = useRDKit();
-  const candidate = useMemo(() => candidatesOf(artifacts).find((c) => c.smiles === smiles), [artifacts, smiles]);
+  const canonicalOf = useMemo(() => {
+    if (!rdkit) return undefined;
+    const seen = new Map<string, string>();
+    return (value: string) => {
+      let out = seen.get(value);
+      if (out === undefined) seen.set(value, (out = canonical(rdkit, value) ?? value));
+      return out;
+    };
+  }, [rdkit]);
+  const candidate = useMemo(() => {
+    const all = candidatesOf(artifacts);
+    const wanted = canonicalOf?.(smiles);
+    return all.find((c) => c.smiles === smiles) ?? (wanted ? all.find((c) => canonicalOf?.(c.smiles) === wanted) : undefined);
+  }, [artifacts, smiles, canonicalOf]);
   const run = context?.run ?? null;
   const [fetched, setFetched] = useState<{ key: string; entry: JobStructure | null } | null>(null);
+  const [table, setTable] = useState<{ run: string; table: RunTable | null } | null>(null);
   const key = `${run} ${smiles}`;
   const needsRun = run !== null && !context?.structure;
+  const needsRow = run !== null && !context?.components;
   useEffect(() => {
     if (!needsRun || !run) return;
     let cancelled = false;
@@ -46,18 +62,36 @@ export function MoleculePage({ smiles, context, artifacts, theme, sessionId, onB
       cancelled = true;
     };
   }, [needsRun, run, smiles, key]);
+  useEffect(() => {
+    if (!needsRow || !run) return;
+    let cancelled = false;
+    loadRunTable(run)
+      .then((loaded) => !cancelled && setTable({ run, table: loaded }))
+      .catch(() => !cancelled && setTable({ run, table: null }));
+    return () => {
+      cancelled = true;
+    };
+  }, [needsRow, run]);
+  const runTable = run && table?.run === run ? table.table : null;
+  const merged = useMemo(() => {
+    const row = runTable && run ? runRowContext(runTable, smiles, run, canonicalOf) : null;
+    if (!row) return context;
+    const given = Object.fromEntries(Object.entries(context ?? {}).filter(([, value]) => value !== undefined && value !== null)) as MoleculeContext;
+    return { ...row, ...given };
+  }, [runTable, run, smiles, canonicalOf, context]);
 
   const view = useMemo(
     () =>
       moleculeView({
         smiles,
-        context,
+        context: merged,
         candidate,
         fetched: fetched?.key === key ? fetched.entry : null,
         descriptors: rdkit ? descriptors(rdkit, smiles) : null,
         predictions: artifacts.properties,
+        key: canonicalOf,
       }),
-    [smiles, context, candidate, fetched, key, rdkit, artifacts.properties],
+    [smiles, merged, candidate, fetched, key, rdkit, artifacts.properties, canonicalOf],
   );
   const [notice, setNotice] = useState<string | null>(null);
   const session = sessionId ?? "new";
@@ -67,17 +101,17 @@ export function MoleculePage({ smiles, context, artifacts, theme, sessionId, onB
       sendToViewer({ path, action: { kind: "ligand" }, source: "molecule" });
       return;
     }
-    const panel = run ? runStructurePanel(path, smiles, run, context?.step ?? fetched?.entry?.step ?? null, view.cofold ?? undefined) : null;
+    const panel = run ? runStructurePanel(path, smiles, run, merged?.step ?? fetched?.entry?.step ?? null, view.cofold ?? undefined) : null;
     if (!panel) {
-      setNotice(`${path} is not on the shared volume, so the viewer cannot load it.`);
+      setNotice("The complex is not on the shared volume.");
       return;
     }
     openRunStructure(session, panel);
   }
 
-  const why = context?.ttpId && context.components?.length ? Object.fromEntries(context.components.flatMap((c) => [[c.name, c.value], [`${c.name} (raw)`, c.raw ?? null]])) : null;
+  const why = merged?.ttpId && merged.components?.length ? Object.fromEntries(merged.components.flatMap((c) => [[c.name, c.value], [`${c.name} (raw)`, c.raw ?? null]])) : null;
   const scores = () => ({
-    ...Object.fromEntries((context?.components ?? []).flatMap((c) => (c.value === null ? [] : [[c.name, c.value]]))),
+    ...Object.fromEntries((merged?.components ?? []).flatMap((c) => (c.value === null ? [] : [[c.name, c.value]]))),
     ...(view.score !== null ? { Score: view.score } : {}),
   });
 
@@ -112,7 +146,7 @@ export function MoleculePage({ smiles, context, artifacts, theme, sessionId, onB
                   Cofold…
                 </button>
               )}
-              {view.predictions.length === 0 && (
+              {!view.predictions.some((group) => group.title === "ADMET") && (
                 <button type="button" className={action} onClick={() => onAsk(admetPrompt([{ smiles }]))}>
                   ADMET…
                 </button>
@@ -126,20 +160,22 @@ export function MoleculePage({ smiles, context, artifacts, theme, sessionId, onB
 
         {notice && <p className="text-faint text-[11px]">{notice}</p>}
 
-        <MoleculeFacts
-          score={view.score}
-          components={view.components}
-          cofold={view.cofold}
-          onOpenComplex={view.structurePath ? () => openComplex(view.structurePath as string) : undefined}
-          properties={view.properties}
-          predictions={view.predictions}
-        />
+        <div className="@container">
+          <MoleculeFacts
+            score={view.score}
+            components={view.components}
+            cofold={view.cofold}
+            onOpenComplex={view.structurePath ? () => openComplex(view.structurePath as string) : undefined}
+            properties={view.properties}
+            predictions={view.predictions}
+          />
+        </div>
 
         {why && (
           <details className="text-[11px]">
             <summary className="text-muted hover:text-body cursor-pointer select-none">Why this score</summary>
             <div className="mt-1.5">
-              <ScoreWhy values={why} ttpId={context?.ttpId} ttpVersion={context?.ttpVersion} />
+              <ScoreWhy values={why} ttpId={merged?.ttpId} ttpVersion={merged?.ttpVersion} />
             </div>
           </details>
         )}

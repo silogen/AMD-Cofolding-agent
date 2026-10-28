@@ -21,6 +21,8 @@ export interface Fact {
   title?: string;
   /** "warn" when the value fails the quality gate. */
   tone?: "warn";
+  /** The service's name for a predicted endpoint ("aqueous_solubility"). */
+  endpoint?: string;
 }
 
 export interface FactGroup {
@@ -137,11 +139,17 @@ export function componentFacts(components: readonly ScoreComponent[]): Fact[] {
   }));
 }
 
-/** ADMET and RetroDMTA predictions of `smiles` in the conversation, one group per service, newest first. */
-export function predictionGroups(smiles: string, panels: readonly Sourced<PropertiesPanel>[]): FactGroup[] {
+/**
+ * ADMET and RetroDMTA predictions of `smiles` in the conversation, one group
+ * per service, newest first. `key` (canonical SMILES) matches a molecule the
+ * service wrote differently.
+ */
+export function predictionGroups(smiles: string, panels: readonly Sourced<PropertiesPanel>[], key?: (smiles: string) => string): FactGroup[] {
   const groups: FactGroup[] = [];
+  const wanted = key?.(smiles);
+  const same = (s: string | null | undefined) => !!s && (s === smiles || (wanted !== undefined && key?.(s) === wanted));
   for (const { item } of panels) {
-    const molecule = item.molecules.find((m) => m.ok && (m.smiles === smiles || m.standardized === smiles));
+    const molecule = item.molecules.find((m) => m.ok && (m.smiles === smiles || m.standardized === smiles)) ?? item.molecules.find((m) => m.ok && (same(m.smiles) || same(m.standardized)));
     if (!molecule) continue;
     const title = serviceName(item);
     if (groups.some((g) => g.title === title)) continue;
@@ -151,11 +159,24 @@ export function predictionGroups(smiles: string, panels: readonly Sourced<Proper
         const value = molecule.values[endpoint];
         if (!value) return [];
         const unit = shortUnit(value.unit);
-        return [{ label: endpointLabel(endpoint), value: formatValue(value).replace(/^-/, "−"), ...(unit ? { unit } : {}), ...(value.unit ? { title: value.unit } : {}) }];
+        return [{ label: endpointLabel(endpoint), endpoint, value: formatValue(value).replace(/^-/, "−"), ...(unit ? { unit } : {}), ...(value.unit ? { title: value.unit } : {}) }];
       }),
     });
   }
   return groups.filter((g) => g.facts.length > 0);
+}
+
+/** An endpoint's name for comparison: "aqueous_solubility", "Aqueous solubility" and "Aq. solubility" are one. */
+export const endpointKey = (name: string) => name.toLowerCase().replace(/\(raw\)$/, "").replace(/[^a-z0-9]/g, "");
+
+/**
+ * A run's raw values of the components that are neither properties nor
+ * cofolding (otherRawValues), less the endpoints a prediction service in
+ * `groups` already gave for the molecule.
+ */
+export function runPredictions(components: readonly ScoreComponent[], groups: readonly FactGroup[]): Fact[] {
+  const known = new Set(groups.flatMap((g) => g.facts.flatMap((f) => [endpointKey(f.label), ...(f.endpoint ? [endpointKey(f.endpoint)] : [])])));
+  return otherRawValues(components).filter((fact) => !known.has(endpointKey(fact.label)));
 }
 
 /** Metric names a results table or a scoring tool uses for the Boltz and PoseBusters values. */
