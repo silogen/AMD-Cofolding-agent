@@ -5,7 +5,7 @@ This document lists all tests that can be run against the current codebase (Phas
 ## Quick Start
 
 ```bash
-cd examples/dd_agentic
+cd dd_agentic
 pip install pytest numpy pydantic PyYAML pandas fastapi httpx requests rdkit gemmi
 python -m pytest tests/ -v
 ```
@@ -1016,7 +1016,7 @@ These tests verify the complete `dd-agent` -> `dd-mcp` -> REINVENT4 pipeline.
 
 | # | Test | How to run | Expected result |
 |---|------|-----------|-----------------|
-| 3 | Agent starts and connects | `dd-agent --backend anthropic --model claude-sonnet-4.6 --base-url https://llm-api.amd.com/Anthropic --gateway-key "$LLM_GATEWAY_KEY" --no-verify-ssl` | Prints welcome banner, lists 9 tools, shows `You>` prompt |
+| 3 | Agent starts and connects | `dd-agent --backend anthropic --model claude-sonnet-4.6 --base-url "$REINVENT4_AGENT_BASE_URL" --gateway-key "$LLM_GATEWAY_KEY" --no-verify-ssl` | Prints welcome banner, lists 9 tools, shows `You>` prompt |
 | 4 | Help command | Type `/help` | Shows available commands (`/help`, `/reset`, `/exit`) |
 | 5 | List components | Ask: `What scoring components are available?` | Agent calls `list_scoring_components` tool, lists 40+ components |
 | 6 | List models | Ask: `What generative models are available?` | Agent calls `list_available_models`, lists model priors with availability |

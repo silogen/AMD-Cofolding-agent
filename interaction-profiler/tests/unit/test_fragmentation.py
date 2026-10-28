@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Unit tests for hierarchical fragmentation (requires RDKit + AccFG)."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """ExternalRESTScorer -- REINVENT4 scoring plugin for external REST services.
 
 Calls external FastAPI services (Boltz2, PoseBusters, ADMET, RetroDMTA,

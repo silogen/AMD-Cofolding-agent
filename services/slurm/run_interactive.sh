@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # Launch the complete Cofolding Agent stack on one Slurm GPU allocation.
 set -euo pipefail
 
@@ -85,36 +88,9 @@ COMPOSE_ARGS=(
     -f "${PROJECT_DIR}/docker-compose.yml"
 )
 
-relay_pid=""
-if [[ "${REINVENT4_AGENT_BASE_URL}" =~ llm-api\.amd\.com:([0-9]+) ]]; then
-    tunnel_port="${BASH_REMATCH[1]}"
-    if ! python3 - "${tunnel_port}" <<'PY'
-import socket
-import sys
-with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3):
-    pass
-PY
-    then
-        echo "ERROR: no SSH reverse tunnel on 127.0.0.1:${tunnel_port}." >&2
-        exit 1
-    fi
-
-    bridge_ip="$(docker network inspect bridge \
-        --format '{{(index .IPAM.Config 0).Gateway}}')"
-    python3 "${PROJECT_DIR}/services/slurm/llm_tunnel_relay.py" \
-        --bind "${bridge_ip}" \
-        --port "${tunnel_port}" \
-        >"${DATA_DIR}/logs/llm_tunnel_relay.log" 2>&1 &
-    relay_pid="$!"
-    COMPOSE_ARGS+=(-f "${PROJECT_DIR}/docker-compose.tunnel.yml")
-fi
-
 cleanup() {
     docker compose "${COMPOSE_ARGS[@]}" down --remove-orphans \
         >/dev/null 2>&1 || true
-    if [ -n "${relay_pid}" ]; then
-        kill "${relay_pid}" >/dev/null 2>&1 || true
-    fi
 }
 trap cleanup EXIT INT TERM
 

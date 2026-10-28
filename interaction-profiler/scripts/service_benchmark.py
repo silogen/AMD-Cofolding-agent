@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Smoke-test + speed-benchmark the interaction-profiler REST service.
 
 Starts (or connects to) the FastAPI service, runs a functional smoke test

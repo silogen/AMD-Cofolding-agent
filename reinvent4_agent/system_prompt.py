@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """System prompts for the Drug Discovery co-scientist agents.
 
 Two roles share the same medicinal-chemistry knowledge base but carry

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Vectorized distance / angle kernels.
 
 Pure-numpy by default (fast for pocket-sized problems). When ``use_gpu``

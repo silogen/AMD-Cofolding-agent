@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """TTP persistence layer -- versioned JSON file storage.
 
 Each TTP is stored as ``{id}.json`` (current version) alongside

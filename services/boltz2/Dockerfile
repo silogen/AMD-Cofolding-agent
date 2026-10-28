@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # Self-contained Boltz2 scoring wrapper.
 #
 # Installs Boltz2 from the local source tree (boltz2/) and adds the

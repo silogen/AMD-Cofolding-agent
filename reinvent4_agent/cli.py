@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Entry point for the ``dd-agent`` command.
 
 Launches the interactive terminal chatbot that connects to the Drug Discovery

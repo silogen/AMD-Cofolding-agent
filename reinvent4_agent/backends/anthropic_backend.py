@@ -1,8 +1,11 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Anthropic Messages API backend with extended thinking support.
 
 Uses the ``anthropic`` SDK to talk to the Anthropic Messages API
-(directly or via an AMD gateway).  Supports ``thinking`` blocks for
-reasoning-capable models like claude-sonnet-4.6.
+(directly or via an API-management gateway).  Supports ``thinking``
+blocks for reasoning-capable models like claude-sonnet-4.6.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ class AnthropicBackend(LLMBackend):
     api_key:
         API key.  Use ``"dummy"`` when gateway auth handles authn.
     gateway_key:
-        ``Ocp-Apim-Subscription-Key`` header value for AMD gateway.
+        ``Ocp-Apim-Subscription-Key`` header value for a gateway.
     verify_ssl:
         Whether to verify TLS certificates.
     thinking_budget:
@@ -127,8 +130,9 @@ class AnthropicBackend(LLMBackend):
                     self.base_url or "https://api.anthropic.com",
                     verify_ssl=self._verify_ssl,
                     hints=[
-                        "On the AMD gateway the Anthropic route is "
-                        "/Anthropic (POST /Anthropic/v1/messages).",
+                        "A gateway usually serves the Anthropic API under "
+                        "its own route prefix, e.g. /Anthropic "
+                        "(POST /Anthropic/v1/messages).",
                         "If the endpoint uses a private CA, retry with "
                         "--no-verify-ssl.",
                     ],

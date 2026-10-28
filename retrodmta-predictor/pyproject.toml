@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -9,7 +12,6 @@ description = "Per-target, per-temporal-window RetroDMTA project-endpoint predic
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Pierre Llompart" }]
 dependencies = [
     "numpy==1.26.4",
     "rdkit==2024.3.1",

@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for score_molecules tool -- TTP integration (Phase 2).
 
 Tests cover:

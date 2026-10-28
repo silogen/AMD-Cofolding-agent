@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # The agent and the MCP server. CPU only, no REINVENT4, no priors.
 #
 # This image used to extend the REINVENT4 ROCm image and bake in REINVENT4 plus
@@ -46,10 +49,10 @@ ENV REINVENT4_MCP_CONFIG=/app/reinvent4_mcp_config.yaml
 # No REINVENT4_ROOT and no reinvent_plugins on the path: both exist for
 # REINVENT's own scorer, which runs in the RL subprocess on the runner.
 
-# AMD gateway defaults
+# Agent defaults. No endpoint is baked in: pass REINVENT4_AGENT_BASE_URL at
+# runtime (-e / compose) to target a gateway, or omit it for the SDK default.
 ENV REINVENT4_AGENT_BACKEND=anthropic
 ENV REINVENT4_AGENT_MODEL=claude-sonnet-4.6
-ENV REINVENT4_AGENT_BASE_URL=https://llm-api.amd.com/Anthropic
 ENV REINVENT4_AGENT_NO_VERIFY_SSL=true
 ENV REINVENT4_AGENT_THINKING_BUDGET=1024
 ENV REINVENT4_AGENT_LOG_DIR=/logs

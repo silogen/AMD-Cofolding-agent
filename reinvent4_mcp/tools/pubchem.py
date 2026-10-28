@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """PubChem compound lookup: resolve a molecule NAME to a real SMILES.
 
 The agent must never recall a SMILES from memory (it hallucinates invalid or

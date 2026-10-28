@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Curated SMARTS library to enrich AccFG coverage.
 
 AccFG provides a strong hierarchical functional-group taxonomy but can

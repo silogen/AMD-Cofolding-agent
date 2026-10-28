@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """TTP management tools: create, update, get, list, delete.
 
 Provides the implementation behind the MCP ``create_ttp``,

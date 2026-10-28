@@ -29,7 +29,7 @@ logs/
 .cursor/
 
 # Model weights -- large binaries, NOT committed. Restore dd_agentic/models/ from the
-# SharePoint zip (see admet-predictor / retrodmta-predictor READMEs). Docker bakes them in
+# weights archive (see admet-predictor / retrodmta-predictor READMEs). Docker bakes them in
 # at build time from this central dir; .dockerignore keeps them IN the build context.
 /models/
 

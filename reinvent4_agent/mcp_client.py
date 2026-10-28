@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """MCP client for connecting to the Drug Discovery MCP server via stdio.
 
 Manages the lifecycle of a subprocess running the MCP server, provides

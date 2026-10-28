@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """PoseBusters FastAPI wrapper — validates plausibility of predicted 3D poses via REST."""
 
 from __future__ import annotations

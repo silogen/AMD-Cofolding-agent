@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Drug Discovery MCP Server entry point.
 
 Exposes REINVENT4 drug design capabilities via the Model Context Protocol

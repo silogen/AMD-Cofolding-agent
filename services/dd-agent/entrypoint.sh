@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 # Entrypoint wrapper for the dd-agent container (Docker + Apptainer/Singularity).
 #
 # Its only job is to prepend a timestamp to every line the agent writes when the

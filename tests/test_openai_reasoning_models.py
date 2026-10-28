@@ -1,3 +1,6 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Regression tests for reasoning models on the OpenAI backend.
 
 On gpt-5 and the o-series the response cap covers the model's hidden
