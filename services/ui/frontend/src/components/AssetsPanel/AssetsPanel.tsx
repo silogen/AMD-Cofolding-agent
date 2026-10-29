@@ -99,9 +99,6 @@ export function AssetsPanel({ events = [], onOpenStructure, onInsert }: Props) {
           </p>
         )}
         {listing.state === "ready" && listing.note && <p className="text-muted px-1 text-[11px]">{listing.note}</p>}
-        <p className="text-faint px-1 text-[11px] leading-snug">
-          Paths are part of the service contract and cannot be fabricated by the UI. Insert one into the prompt to ground the agent.
-        </p>
         {groups.map((group) => (
           <section key={group.folder}>
             <h3 className="text-muted mb-1.5 px-1 font-mono text-[11px]">

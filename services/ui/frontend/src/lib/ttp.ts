@@ -1410,7 +1410,7 @@ function withSource(facts: TargetFacts, tool: string): TargetFacts {
   return facts.sources.includes(tool) ? facts : { ...facts, sources: [...facts.sources, tool] };
 }
 
-function mergeTtpTarget(facts: TargetFacts, ttp: Ttp, tool: string): TargetFacts {
+export function mergeTtpTarget(facts: TargetFacts, ttp: Ttp, tool: string): TargetFacts {
   const target = ttp.target;
   if (!target) return { ...facts, ttpId: ttp.id };
   const sequence = cleanSequence(target.protein_sequence);

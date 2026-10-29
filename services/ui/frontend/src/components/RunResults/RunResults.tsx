@@ -7,7 +7,8 @@ import { callTool, download, jobFileUrl } from "../../lib/api";
 import { sameFile, type Artifacts } from "../../lib/artifacts";
 import { assetUrl } from "../../lib/assets";
 import { fileName } from "../../lib/csv";
-import { canResume, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
+import { useJobOwners, useRunsKnown, useSessionRuns } from "../../hooks/useSessions";
+import { canResume, conversationJobs, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
 import { openRunStructure, rowMetrics, rowMolecule, runStructurePanel } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
 import { loadRDKit, withMol } from "../../lib/rdkit";
@@ -79,7 +80,12 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   const [listError, setListError] = useState<string | null>(null);
   const focused = useFocusedRun();
   const runs = useMemo(() => (jobs ?? []).filter((job) => job.type === "optimization"), [jobs]);
-  const job = runs.find((j) => j.id === focused) ?? runs.find((j) => j.state !== "failed" && j.state !== "queued") ?? runs[0] ?? null;
+  const sessionRuns = useSessionRuns(sessionId);
+  const owners = useJobOwners();
+  const known = useRunsKnown();
+  const own = useMemo(() => (known ? conversationJobs(runs, sessionRuns, focused, owners, sessionId).own : runs), [known, runs, sessionRuns, focused, owners, sessionId]);
+  const started = (j: JobSummary) => j.state !== "failed" && j.state !== "queued";
+  const job = runs.find((j) => j.id === focused) ?? own.find(started) ?? own[0] ?? runs.find(started) ?? runs[0] ?? null;
   const runId = job?.id ?? null;
 
   const [tick, setTick] = useState(0);

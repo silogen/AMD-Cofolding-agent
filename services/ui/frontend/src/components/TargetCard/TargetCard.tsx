@@ -1,11 +1,12 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { callTool } from "../../lib/api";
+import { loadTtp } from "../../lib/scoreWhy";
 import { sendToViewer } from "../../lib/viewerBus";
 import { openPdbEntry } from "../../lib/rcsb";
-import { hasTargetFacts, mergeUniprot, payloadError, pocketBySequence, type PocketResidue, type TargetFacts } from "../../lib/ttp";
+import { hasTargetFacts, mergeTtpTarget, mergeUniprot, payloadError, pocketBySequence, type PocketResidue, type TargetFacts, type Ttp } from "../../lib/ttp";
 import { CopyButton } from "../CopyButton/CopyButton";
 
 interface Props {
@@ -31,7 +32,20 @@ export function TargetCard({ facts, onAsk }: Props) {
   const [showSequence, setShowSequence] = useState(false);
   const [showPocket, setShowPocket] = useState(false);
 
-  const shown = lookup.state === "done" ? mergeUniprot(facts, lookup.payload, "lookup") : facts;
+  const [saved, setSaved] = useState<{ id: string; ttp: Ttp | null } | null>(null);
+  const savedId = !hasTargetFacts(facts) ? facts.ttpId : null;
+  useEffect(() => {
+    if (!savedId) return;
+    let cancelled = false;
+    void loadTtp(savedId).then((ttp) => {
+      if (!cancelled) setSaved({ id: savedId, ttp });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [savedId]);
+  const base = savedId && saved?.id === savedId && saved.ttp ? mergeTtpTarget(facts, saved.ttp, "get_ttp") : facts;
+  const shown = lookup.state === "done" ? mergeUniprot(base, lookup.payload, "lookup") : base;
   const known = hasTargetFacts(shown);
   const label = shown.gene ?? shown.name ?? shown.uniprot ?? "the target";
 
