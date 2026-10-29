@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from reinvent4_mcp.config import get_config
 from reinvent4_mcp.ttp.schema import (
     TTP,
     ConstraintConfig,
@@ -1119,13 +1120,20 @@ class TestDescribeExternalObjectives:
     the description is the only thing that tells the instances apart."""
 
     def test_service_and_url_reported(self):
+        """The URL is where the service actually is, not what the TTP guessed.
+
+        A TTP carries whatever host its author wrote down, which is right only
+        on the deployment it came from; the configured URL is the one that
+        answers here, so that is the one reported and used.
+        """
+
         ttp = TTP.model_validate(FULL_TTP)
         by_name = {c["name"]: c for c in describe_external_objectives(ttp)}
 
         affinity = by_name["Binding Affinity"]
         assert affinity["component"] == "ExternalRESTScorer"
         assert affinity["service"] == "boltz"
-        assert affinity["service_url"] == "http://boltz:8080/score"
+        assert affinity["service_url"] == get_config().enabled_external_services["boltz"]
 
         assert by_name["Pose Quality"]["service"] == "posebusters"
 

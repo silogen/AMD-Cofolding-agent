@@ -1047,6 +1047,106 @@ def list_shared_assets() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: prepare_structure
+# ---------------------------------------------------------------------------
+
+@tool()
+def prepare_structure(
+    pdb_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                "PDB entry to fetch onto the shared volume (e.g. '4ZC9'); "
+                "already-fetched entries are reused."
+            ),
+        ),
+    ] = None,
+    path: Annotated[
+        str | None,
+        Field(
+            description=(
+                "A structure already on the shared volume, instead of pdb_id; "
+                "the /shared-relative path from list_shared_assets."
+            ),
+        ),
+    ] = None,
+    chain: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Author chain id to report in full and to build the template "
+                "from; needed when the file holds several proteins."
+            ),
+        ),
+    ] = None,
+    template: Annotated[
+        bool,
+        Field(
+            description=(
+                "Also write the cleaned single-chain mmCIF to use as a "
+                "Boltz-2 template."
+            ),
+        ),
+    ] = False,
+) -> str:
+    """Put a structure to work: fetch a PDB entry, read its chains, make a template.
+
+    This is the only way to get a file onto the shared volume, so use it instead
+    of asking the user to upload one. Three steps, in this order:
+    1. ``pdb_id`` downloads the entry's mmCIF (or ``path`` names one already
+       there) and reports every protein ``chains`` entry with its length.
+    2. ``chain`` returns that chain's sequence. Set TTP ``target.structure_path``
+       to the returned path and ``target.structure_chain`` to the chain to fold
+       exactly what the file holds, instead of pasting ``protein_sequence``.
+    3. ``template`` writes the cleaned single-chain mmCIF Boltz-2 templates
+       against and returns a ready ``target.templates`` entry; add
+       ``force``/``threshold`` to hold the cofold near it.
+    Returns an error, never a guess, when the entry or the chain does not exist.
+    """
+
+    from reinvent4_mcp.tools.structures import prepare_structure as _impl
+
+    return json.dumps(_impl(pdb_id=pdb_id, path=path, chain=chain, template=template), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Tool: read_molecules
+# ---------------------------------------------------------------------------
+
+@tool()
+def read_molecules(
+    path: Annotated[
+        str,
+        Field(
+            description=(
+                "A .smi, .smiles, .csv, .sdf or .mol file on the shared "
+                "volume, as a /shared-relative path."
+            ),
+        ),
+    ],
+    limit: Annotated[
+        int,
+        Field(
+            default=2000,
+            description="Most molecules to return; the file's total is reported either way.",
+        ),
+    ] = 2000,
+) -> str:
+    """Read the molecules of a file on the shared volume as SMILES.
+
+    Use it when the user points at a file of compounds -- a series to optimise,
+    a set to score -- instead of asking them to paste the SMILES. A CSV is read
+    from its SMILES column, an SD file through RDKit. Returns ``smiles`` (ready
+    for ``seed_smiles``, ``score_molecules`` or ``predict_admet``), the file's
+    ``count``, and how many records were ``unreadable``.
+    """
+
+    from reinvent4_mcp.tools.structures import read_molecules as _impl
+
+    return json.dumps(_impl(path, limit), indent=2, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
 # Tool: fetch_target_info
 # ---------------------------------------------------------------------------
 

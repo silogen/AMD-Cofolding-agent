@@ -11,10 +11,11 @@ from reinvent4_mcp import server
 
 def test_tools_keep_their_schemas():
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
-    assert len(tools) == 24
+    assert len(tools) == 26
     schema = tools["run_optimization"].inputSchema
     assert "seed_smiles" in schema["properties"]
     assert "ttp_id" in schema["properties"]
+    assert set(tools["prepare_structure"].inputSchema["properties"]) == {"pdb_id", "path", "chain", "template"}
 
 
 def test_a_slow_tool_does_not_block_a_fast_one():
