@@ -111,14 +111,26 @@ AUTO_POLICY = (
     "a problem with a run as the [MONITOR] section describes. Record what you "
     "learned and the next step, with the result behind it, in campaign_log. "
     "Keep the reply to a few lines. End with AUTONOMY DONE only when you cannot "
-    "name a result that justifies another step, or the next decision is the "
-    "user's; a run still going is never a reason to stop."
+    "name a result that justifies another step, or the next step needs something "
+    "only the user can give. Next steps you could carry out yourself are not the "
+    "user's call: choose the best one and start it. A run still going is never a "
+    "reason to stop."
 )
 
 #: Why an automatic turn was taken, as the turn is told.
 _WAKE_REASONS = {
     "start": "The user has just left the campaign with you.",
     "continue": "Carry on from your last turn.",
+    "confirm": (
+        "You were about to hand the campaign back. Check that first: if any next "
+        "step in your last answer or in the campaign log can be done with your "
+        "tools -- fix a TTP, cofold, score or profile another compound, start or "
+        "extend a run -- it is not the user's decision. Pick the one the latest "
+        "results support most and start it now. Hand back with AUTONOMY DONE only "
+        "if every remaining step needs something only the user can give: a target "
+        "they have not named, data you cannot fetch, or a choice between their own "
+        "goals."
+    ),
 }
 
 #: Last answer and user requests a condensed history keeps, in characters.
@@ -339,6 +351,9 @@ class LiveSession:
     #: When the agent last finished a turn, on the monotonic clock: the start
     #: of the quiet spell a long wait is measured from.
     last_turn: float = field(default_factory=time.monotonic)
+    #: The agent has said it is done once since it last did any work; the
+    #: first time is checked with a confirm turn, the second time is final.
+    done_once: bool = False
     #: The agent's campaign log.
     campaign: dict[str, Any] = field(default_factory=campaign_log.empty)
 
@@ -458,6 +473,7 @@ class LiveSession:
                 self.runs_seen.clear()
                 self.alerts_seen.clear()
                 self.pending.clear()
+                self.done_once = False
             # Turned on between two turns: pick the campaign up at once rather
             # than waiting for a message the user does not intend to send.
             if not self.busy and self.meta.get("turns"):
@@ -518,7 +534,7 @@ class LiveSession:
         self.auto_task = None
         if self.busy or not self.auto_on:
             return
-        if reason != "start" and self.running_runs and not self.pending:
+        if reason not in ("start", "confirm") and self.running_runs and not self.pending:
             return
         self._wake(reason)
 
@@ -626,7 +642,7 @@ class LiveSession:
         self.running = asyncio.create_task(self._run_turn(content))
 
     async def _run_turn(self, content: str) -> None:
-        unfinished = False
+        unfinished = done = False
         try:
             answer = await self.agent.chat(content)
             spoken = spoken_answer(answer)
@@ -639,7 +655,8 @@ class LiveSession:
                     "outputTokens": getattr(self.agent, "total_output_tokens", 0),
                 }
             )
-            unfinished = _DONE_PATTERN.search(answer or "") is None
+            done = _DONE_PATTERN.search(answer or "") is not None
+            unfinished = not done
         except asyncio.CancelledError:
             self.publish({"type": "cancelled"})
         except Exception as exc:
@@ -651,7 +668,11 @@ class LiveSession:
             self.save()
             # Never after a cancel or an error: both need the user.
             if unfinished:
+                self.done_once = False
                 self._schedule_continuation(self.auto_delay)
+            elif done and self.auto_on and not self.done_once:
+                self.done_once = True
+                self._schedule_continuation(self.auto_delay, reason="confirm")
             else:
                 self.end_autonomy()
 

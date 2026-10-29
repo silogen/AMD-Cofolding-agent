@@ -221,10 +221,45 @@ def test_the_loop_stops_when_the_agent_says_it_is_done(tmp_path):
         await idle(live)
         await asyncio.sleep(0.05)
 
-        assert agent.asked == ["Design ligands for BRD4"]
+        # Saying it once gets a check; saying it again after the check is final.
+        assert len(agent.asked) == 2
+        assert "You were about to hand the campaign back." in agent.asked[1]
         # Nothing is taking turns any more, so the budget must not look live.
         assert not live.auto_on
         assert live.auto_until is None
+
+    asyncio.run(run())
+
+
+def test_work_found_at_the_check_keeps_the_loop_going(tmp_path):
+    class Scripted(FakeAgent):
+        def __init__(self, answers: list[str]) -> None:
+            super().__init__()
+            self.answers = answers
+
+        async def chat(self, content: str) -> str:
+            self.asked.append(content)
+            return self.answers.pop(0)
+
+    async def run() -> None:
+        agent = Scripted(
+            [
+                "Nothing left to try. AUTONOMY DONE",
+                "Started a run with the fixed TTP.",
+                "Still nothing left. AUTONOMY DONE",
+                "Really nothing left. AUTONOMY DONE",
+            ]
+        )
+        live = make_session(tmp_path, agent)
+        live.set_autonomy(60)
+        assert live.start_turn("Design ligands for BRD4")
+        await wait_until(lambda: not agent.answers and not live.busy)
+        await asyncio.sleep(0.05)
+
+        checks = ["You were about to hand the campaign back." in asked for asked in agent.asked]
+        # Work in between makes the next stop a first one again, so it is checked too.
+        assert checks == [False, True, False, True]
+        assert not live.auto_on
 
     asyncio.run(run())
 

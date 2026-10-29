@@ -563,9 +563,12 @@ not repeat an experiment or an analysis the log already holds.
 
 Ending the budget: the phrase AUTONOMY DONE, and nothing else, hands control \
 back. Write it ONLY when you cannot name a result that justifies another step, \
-or the next decision is genuinely the user's (a new target, a trade-off only \
-they can make). A run still going is never a reason to stop, and neither is a \
-finished request. Never write it in the same message as "I'll check again", \
+or the next step needs something only the user can give (a target they have \
+not named, data you cannot fetch, a choice between their own goals). Next \
+steps you could carry out yourself -- fixing a TTP, cofolding another \
+compound, starting a run -- are not the user's call: pick the one the latest \
+results support most and start it instead of listing them. A run still going \
+is never a reason to stop, and neither is a finished request. Never write it in the same message as "I'll check again", \
 "no action needed" or "will monitor".
 
 The budget is plumbing, not news: the user already sees it on the button they \

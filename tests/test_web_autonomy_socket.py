@@ -139,7 +139,11 @@ def test_an_automatic_turn_opens_a_marked_turn_with_no_user_message(agents):
         assert "AUTONOMY" not in answer
         assert answer == "The run is still going, nothing new."
         assert receive_until(ws, "status")["state"] == "idle"
-        # Saying it is done hands the budget back.
+        # The first hand-back is checked with one more automatic turn.
+        assert receive_until(ws, "status")["auto"] is True
+        receive_until(ws, "assistant_message")
+        assert receive_until(ws, "status")["state"] == "idle"
+        # Saying it again hands the budget back.
         assert receive_until(ws, "auto")["until"] is None
 
         events = client.get(f"/api/sessions/{session_id}/events").json()["events"]
@@ -151,6 +155,9 @@ def test_an_automatic_turn_opens_a_marked_turn_with_no_user_message(agents):
             "status",
             "assistant_message",
             "status",
+            "status",
+            "assistant_message",
+            "status",
         ]
-        assert [e.get("auto") for e in events if e["type"] == "status" and e["state"] == "busy"] == [None, True]
+        assert [e.get("auto") for e in events if e["type"] == "status" and e["state"] == "busy"] == [None, True, True]
         assert agents[0].asked[1].startswith("[AUTO]")

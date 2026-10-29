@@ -133,6 +133,21 @@ def test_with_a_run_going_and_nothing_new_the_agent_is_left_alone(tmp_path):
     asyncio.run(run())
 
 
+def test_a_stop_is_checked_at_once_even_while_a_run_goes(tmp_path):
+    async def run() -> None:
+        agent = FakeAgent(answer="Nothing more to do. AUTONOMY DONE")
+        live = make_session(tmp_path, agent, runs={"abc12345": "running"})
+        live.set_autonomy(60)
+        await wait_until(lambda: len(agent.asked) >= 2)
+        await settle(live)
+
+        assert "You were about to hand the campaign back." in agent.asked[1]
+        assert len(agent.asked) == 2
+        assert not live.auto_on
+
+    asyncio.run(run())
+
+
 def test_a_run_that_ends_wakes_the_agent_with_the_news(tmp_path):
     async def run() -> None:
         agent = FakeAgent()
