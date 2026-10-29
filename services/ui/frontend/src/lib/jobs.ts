@@ -274,7 +274,9 @@ export function uniqueAlerts(items: readonly { severity: string; message: string
 /** The line of a job error worth reading first: a traceback's last line, after what exited. */
 export function errorSummary(error: string): string {
   const lines = error.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length <= 1 || !lines.some((line) => line.includes("Traceback"))) return lines[0] ?? "";
+  // The stderr is clipped to its tail, so "Traceback" may already be cut off.
+  const traceback = lines.some((line) => line.includes("Traceback") || line.startsWith('File "'));
+  if (lines.length <= 1 || !traceback) return lines[0] ?? "";
   const head = lines[0].split(/\.?\s*Last stderr:/)[0].replace(/Traceback.*$/, "").trim();
   const last = lines[lines.length - 1];
   return head ? `${head}: ${last}` : last;

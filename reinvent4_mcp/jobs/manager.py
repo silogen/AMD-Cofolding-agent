@@ -80,6 +80,8 @@ class JobInfo:
     output_model_file: Optional[str] = None
 
     _process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    # Set before a stop signals the process, so the exit it causes is not taken for a failure.
+    _stopping: bool = field(default=False, repr=False)
 
     @property
     def csv_path(self) -> Path:
@@ -433,6 +435,7 @@ class JobManager:
                 "job": job.to_dict(),
             }
 
+        job._stopping = True
         if job._process and job._process.poll() is None:
             logger.info("Sending SIGINT to job %s (pid %d)", job_id, job.pid)
             try:
@@ -455,6 +458,7 @@ class JobManager:
                 pass
 
         job.state = JobState.STOPPED
+        job.error = None
         job.finished_at = datetime.now(timezone.utc).isoformat()
         if job._process:
             job.exit_code = job._process.returncode
@@ -691,7 +695,7 @@ class JobManager:
         proc.wait()
         exit_code = proc.returncode
 
-        if job.state == JobState.STOPPED:
+        if job.state == JobState.STOPPED or job._stopping:
             return
 
         job.exit_code = exit_code
@@ -724,7 +728,7 @@ class JobManager:
         have finished frees its slot and starts the next queued job.
         """
 
-        if job.state != JobState.RUNNING or job._process is None:
+        if job.state != JobState.RUNNING or job._process is None or job._stopping:
             return
 
         retcode = job._process.poll()

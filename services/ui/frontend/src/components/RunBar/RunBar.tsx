@@ -4,7 +4,18 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import type { Artifacts } from "../../lib/artifacts";
 import { callTool, jobFileUrl } from "../../lib/api";
-import { isActive, jobTitle, parseAlerts, parseJobs, parseStatus, toolError, type JobState, type JobStatus, type JobSummary } from "../../lib/jobs";
+import {
+  errorSummary,
+  isActive,
+  jobTitle,
+  parseAlerts,
+  parseJobs,
+  parseStatus,
+  toolError,
+  type JobState,
+  type JobStatus,
+  type JobSummary,
+} from "../../lib/jobs";
 import {
   LOG_TAIL_BYTES,
   countDown,
@@ -128,7 +139,7 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
   const [now, setNow] = useState(() => Date.now());
   const [confirm, setConfirm] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<{ jobId: string; text: string } | null>(null);
 
   const stateOf = (job: JobSummary): JobState => live[job.id]?.status.state ?? job.state;
   const shown = runsToShow(
@@ -247,13 +258,15 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
   async function stop(job: JobSummary) {
     setConfirm(false);
     setStopping(true);
-    setError(null);
+    setStopError(null);
     try {
       const { result } = await callTool("stop_optimization", { job_id: job.id });
-      const failure = toolError(result);
-      if (failure) setError(failure);
+      // The stopped job comes back whole, with whatever its process last wrote as its error.
+      const stopped = parseStatus(result)?.state === "stopped";
+      const failure = stopped ? null : toolError(result);
+      if (failure) setStopError({ jobId: job.id, text: errorSummary(failure) });
     } catch (reason) {
-      setError(errorText(reason));
+      setStopError({ jobId: job.id, text: errorText(reason) });
     } finally {
       setStopping(false);
       setPollTick((t) => t + 1);
@@ -276,6 +289,7 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
     const remaining = estimate ? countDown(estimate.remainingMs, now - (entry?.at ?? now)) : null;
     const others = shown.slice(1);
     const title = jobTitle(first);
+    const error = stopError?.jobId === first.id ? stopError.text : null;
 
     if (confirm) {
       return (
@@ -303,7 +317,15 @@ export const RunBar = memo(function RunBar({ sessionId, steps, turnAt = null, on
         >
           <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full" style={{ background: "var(--color-accent)" }} />
           <span className="font-medium">{first.state === "queued" ? "Starting" : stopping ? "Stopping" : "Designing"}</span>
-          <span className="text-faint min-w-0 truncate">{error ? <span style={{ color: "var(--color-accent)" }}>{error}</span> : title}</span>
+          <span className="text-faint min-w-0 truncate">
+            {error ? (
+              <span style={{ color: "var(--color-accent)" }} title={error}>
+                {error}
+              </span>
+            ) : (
+              title
+            )}
+          </span>
           <Bar fraction={progress.fraction ?? 0} />
           <span className="text-muted text-right font-mono tabular-nums" title="Steps done / maximum steps">
             {progress.done}/{progress.max ?? "—"}

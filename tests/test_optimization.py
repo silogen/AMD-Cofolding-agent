@@ -1224,6 +1224,40 @@ class TestJobManagerStop:
         stop_result = manager.stop_job(job_id)
         assert "error" in stop_result
 
+    def test_the_exit_a_stop_causes_is_not_a_failure(self, manager):
+        """The watchers see the process die mid-stop; the job still ends stopped, with no error."""
+        with patch.object(manager, "_start_process"):
+            job_id = manager.create_and_start(
+                ttp_id="test-ttp",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )["job_id"]
+        job = manager._jobs[job_id]
+        job.pid = 4242
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.stderr.read.return_value = b"StageInterruptedUncontrolled: Signal 15"
+
+        def wait(timeout=None):
+            proc.returncode = 1
+            proc.poll.return_value = 1
+            if timeout is not None:
+                manager._monitor_process(job)
+                manager._poll_process(job)
+            return 1
+
+        proc.wait.side_effect = wait
+        job._process = proc
+
+        with patch("os.kill"):
+            result = manager.stop_job(job_id)
+
+        assert job.state == JobState.STOPPED
+        assert job.error is None
+        assert result["state"] == "stopped"
+        assert result["error"] is None
+
 
 # ---------------------------------------------------------------------------
 # JobManager -- Top Candidates

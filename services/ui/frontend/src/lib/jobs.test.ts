@@ -224,6 +224,12 @@ describe("alerts and candidates", () => {
     expect(errorSummary("Traceback (most recent call last):\n  File x\nValueError: bad")).toBe("ValueError: bad");
     expect(errorSummary("Server restarted while job was running")).toBe("Server restarted while job was running");
   });
+
+  it("summarises a traceback whose start was clipped away", () => {
+    const error =
+      'Process exited with code 1. Last stderr:   File "/app/REINVENT4/reinvent/Reinvent.py", line 170, in main_script\n    main(args)\n  File "handler.py", line 142, in _signal_handler\nreinvent.runmodes.handler.StageInterruptedUncontrolled: Signal 15\n';
+    expect(errorSummary(error)).toBe("Process exited with code 1: reinvent.runmodes.handler.StageInterruptedUncontrolled: Signal 15");
+  });
 });
 
 describe("resume", () => {
