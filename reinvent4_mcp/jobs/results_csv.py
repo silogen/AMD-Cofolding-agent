@@ -30,6 +30,11 @@ TOTAL_SCORE_COLUMNS = ("total_score", "Score", "score")
 #: still trustworthy when a row carries more fields than the header names.
 STEP_COLUMNS = ("Step", "step", "batch")
 
+#: What a component writes where it has no number. pandas reads these as
+#: missing when it parses a file itself, so do the same when we parse one:
+#: a column of nothing but these is an empty measurement, not text.
+MISSING_VALUES = frozenset({"", "nan", "NaN", "NAN", "None", "null", "NULL", "NA", "N/A", "-"})
+
 #: Identity and bookkeeping columns, plus the three likelihoods REINVENT
 #: reports next to the score. None of them is a scoring component.
 NON_COMPONENT_COLUMNS = frozenset(
@@ -98,37 +103,46 @@ def _read_ragged(path: Path) -> Any:
     if not body:
         return pd.DataFrame(columns=header)
 
-    width = max(len(row) for row in body)
-    names = _column_names(header, width)
-    shaped = [row[:width] + [None] * (width - len(row)) for row in body]
+    # Rows of one width can sit above rows of another, so each is placed on its
+    # own terms: what we recognise read from the left, the step read from the
+    # right, and whatever is left over gathered at the end of the frame.
+    anchored = int(bool(header) and header[-1] in STEP_COLUMNS)
+    known = len(header) - anchored
+    placed = [_place(row, known, anchored) for row in body]
+    surplus = max(len(row) for _, row in placed)
+    names = header + [f"_extra_{i}" for i in range(1, surplus + 1)]
+    shaped = [known_part + extras + [None] * (surplus - len(extras)) for known_part, extras in placed]
     return _numeric_where_possible(pd.DataFrame(shaped, columns=names))
 
 
-def _column_names(header: list[str], width: int) -> list[str]:
-    """Names for rows carrying ``width`` fields under a narrower header.
+def _place(row: list[str], known: int, anchored: int) -> tuple[list[Any], list[Any]]:
+    """One row split into the fields the header names and the fields it does not."""
 
-    Everything we recognise is matched from the left and the step number from
-    the right, which leaves the surplus -- the extra fields a component grew
-    mid-run -- under placeholder names in between.
-    """
-
-    if width <= len(header):
-        return header[:width]
-
-    surplus = [f"_extra_{i}" for i in range(1, width - len(header) + 1)]
-    if header[-1] in STEP_COLUMNS:
-        return header[:-1] + surplus + header[-1:]
-    return header + surplus
+    named: list[Any] = list(row[:known]) + [None] * (known - len(row))
+    if not anchored:
+        return named, list(row[known:])
+    if len(row) <= known:
+        return named + [None], []
+    return named + [row[-1]], list(row[known:-1])
 
 
 def _numeric_where_possible(frame: Any) -> Any:
-    """Give columns the dtypes ``read_csv`` would have inferred for them."""
+    """Give columns the dtypes ``read_csv`` would have inferred for them.
+
+    A column counts as numeric when every field is a number or one of the
+    ways a component writes "no value", so a measurement that failed all run
+    stays a column of NaN that monitoring can report on, rather than text it
+    has to ignore.
+    """
 
     import pandas as pd
 
     for column in frame.columns:
+        values = frame[column]
+        if values.dtype.kind in "fiub":
+            continue
         try:
-            frame[column] = pd.to_numeric(frame[column])
+            frame[column] = pd.to_numeric(values.mask(values.isin(MISSING_VALUES)))
         except (TypeError, ValueError):
             continue
     return frame

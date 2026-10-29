@@ -40,15 +40,16 @@ class TestReadingARaggedFile:
 
         assert len(df) == 3
 
-    def test_the_step_number_keeps_its_column(self, tmp_path):
+    def test_every_row_keeps_its_step_whatever_its_width(self, tmp_path):
         csv_path = write_csv(
-            tmp_path / "results_1.csv", [NARROW.format(step=7), WIDE.format(step=8)]
+            tmp_path / "results_1.csv",
+            [NARROW.format(step=7), WIDE.format(step=8), NARROW.format(step=9)],
         )
 
         df = read_results_csv(csv_path)
 
         assert step_column(df) == "step"
-        assert int(df["step"].max()) == 8
+        assert df["step"].tolist() == [7, 8, 9]
 
     def test_the_columns_named_in_the_header_keep_their_values(self, tmp_path):
         csv_path = write_csv(tmp_path / "results_1.csv", [WIDE.format(step=2)])
@@ -79,6 +80,34 @@ class TestReadingARaggedFile:
         df = read_results_csv(csv_path)
 
         assert df["Score"].mean() == pytest.approx(0.635)
+
+    def test_a_component_that_wrote_no_numbers_is_still_a_number_column(self, tmp_path):
+        """A dead service leaves 'nan' in every row; that is a failing
+        measurement, which monitoring can only report if it reads as one."""
+
+        csv_path = write_csv(
+            tmp_path / "results_1.csv",
+            [
+                NARROW.format(step=0).replace(",0.74,3.22,", ",nan,nan,"),
+                WIDE.format(step=1).replace(",0.91,2.93,", ",nan,nan,"),
+            ],
+        )
+
+        df = read_results_csv(csv_path)
+
+        assert df["Solubility"].isna().all()
+        assert df["Solubility"].dtype.kind == "f"
+
+    def test_a_component_that_came_back_keeps_the_values_it_did_write(self, tmp_path):
+        csv_path = write_csv(
+            tmp_path / "results_1.csv",
+            [NARROW.format(step=0).replace(",0.74,3.22,", ",nan,nan,"), WIDE.format(step=1)],
+        )
+
+        df = read_results_csv(csv_path)
+
+        assert df["Solubility"].tolist()[1] == pytest.approx(0.91)
+        assert df["Solubility"].isna().sum() == 1
 
     def test_a_file_with_no_rows_yet_is_empty_not_an_error(self, tmp_path):
         csv_path = tmp_path / "results_1.csv"
