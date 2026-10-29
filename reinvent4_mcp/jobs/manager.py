@@ -1604,10 +1604,18 @@ _manager: Optional[JobManager] = None
 
 
 def get_job_manager() -> JobManager:
-    """Return the singleton ``JobManager``, creating it on first call."""
+    """Return the singleton ``JobManager``, creating it on first call.
+
+    A restart leaves the jobs that were waiting their turn still queued, and
+    nothing is running to free a slot for them, so the queue is given a push
+    here rather than in the constructor: building a manager should not spawn
+    processes, but the server owning one should pick up where it left off.
+    """
+
     global _manager
     if _manager is None:
         _manager = JobManager()
+        _manager._promote_next_queued()
     return _manager
 
 

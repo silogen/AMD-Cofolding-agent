@@ -1112,6 +1112,27 @@ class TestJobManagerLifecycle:
 
             assert manager._jobs[queued_id].state == JobState.STOPPED
 
+    def test_a_job_left_queued_by_a_restart_is_picked_up(self, manager, monkeypatch):
+        """The server takes over a queue it finds, instead of leaving it to sit."""
+        from reinvent4_mcp.jobs import manager as manager_module
+
+        with patch.object(manager, "_start_process"):
+            queued_id = manager.create_and_start(
+                ttp_id="ttp-queued",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )["job_id"]
+        manager._jobs[queued_id].state = JobState.QUEUED
+
+        monkeypatch.setattr(manager_module, "_manager", None)
+        monkeypatch.setattr(manager_module, "JobManager", lambda: manager)
+        with patch.object(manager, "_start_process") as start_process:
+            restarted = manager_module.get_job_manager()
+
+        assert restarted._jobs[queued_id].state == JobState.RUNNING
+        start_process.assert_called_once()
+
     def test_launch_never_stops_a_running_job(self, manager):
         """Launching leaves running jobs alone, however many are queued."""
         with patch.object(manager, "_start_process"):
