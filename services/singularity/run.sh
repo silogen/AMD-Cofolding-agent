@@ -79,7 +79,8 @@ esac
 GPU_FLAG="${APPTAINER_GPU_FLAG-${GPU_FLAG}}"
 BOLTZ_GPUS="${BOLTZ_GPUS:-${BOLTZ_GPU}}"
 
-run() { echo "+ $*"; [ "${DRY_RUN}" -eq 0 ] && "$@"; return 0; }
+# The echo lands in the stack log, so keys and tokens passed as --env are masked.
+run() { echo "+ $*" | sed -E 's/((KEY|TOKEN)=)[^ ]+/\1***/g'; [ "${DRY_RUN}" -eq 0 ] && "$@"; return 0; }
 
 # --- Resolve the container runtime (apptainer or singularity) ---------
 # HPC clusters often expose it as a module (`module load apptainer`) or as the
@@ -300,6 +301,15 @@ for _v in LLM_GATEWAY_KEY REINVENT4_AGENT_API_KEY \
 done
 
 if [ "${WEB}" -eq 1 ]; then
+    case "${DD_WEB_HOST:-127.0.0.1}" in
+        127.0.0.1|localhost|::1) ;;
+        *)
+            if [ -z "${REINVENT4_WEB_TOKEN:-}" ]; then
+                echo "error: DD_WEB_HOST=${DD_WEB_HOST} is reachable by other users;" \
+                     "set REINVENT4_WEB_TOKEN first" >&2
+                exit 1
+            fi ;;
+    esac
     # The gateway is restarted whenever it exits, so a code change (DEV_SOURCE=1)
     # needs only `pkill -f '[d]d-web --host'`, not a restart of the services.
     # Ctrl-C or a TERM to this script ends the loop.
