@@ -1063,6 +1063,55 @@ class TestJobManagerLifecycle:
             manager.stop_job(running_ids[1])
             assert manager._jobs[second["job_id"]].state == JobState.RUNNING
 
+    def test_a_queued_job_can_be_dropped_before_it_starts(self, manager):
+        """Stopping a job that is still waiting takes it out of the queue."""
+        with patch.object(manager, "_start_process") as start_process:
+            for i in range(manager._config.jobs.max_concurrent_jobs):
+                manager.create_and_start(
+                    ttp_id=f"ttp-{i}",
+                    ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )
+
+            queued_id = manager.create_and_start(
+                ttp_id="ttp-queued",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )["job_id"]
+            start_process.reset_mock()
+
+            result = manager.stop_job(queued_id)
+
+            assert result["message"] == "Job dropped from the queue; it never started"
+            assert manager._jobs[queued_id].state == JobState.STOPPED
+            # It never ran, so nothing was signalled and no slot came free.
+            start_process.assert_not_called()
+
+    def test_a_dropped_job_does_not_start_when_a_slot_frees(self, manager):
+        with patch.object(manager, "_start_process"):
+            running_ids = [
+                manager.create_and_start(
+                    ttp_id=f"ttp-{i}",
+                    ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )["job_id"]
+                for i in range(manager._config.jobs.max_concurrent_jobs)
+            ]
+            queued_id = manager.create_and_start(
+                ttp_id="ttp-queued",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )["job_id"]
+
+            manager.stop_job(queued_id)
+            manager.stop_job(running_ids[0])
+
+            assert manager._jobs[queued_id].state == JobState.STOPPED
+
     def test_launch_never_stops_a_running_job(self, manager):
         """Launching leaves running jobs alone, however many are queued."""
         with patch.object(manager, "_start_process"):

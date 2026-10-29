@@ -210,7 +210,7 @@ export function cleanChain(path: string, text: string, chainId: string, name: st
   return { text: writeCif(name, chainId, chain), atoms: chain.atoms.length, residues: new Set(chain.atoms.map((a) => a.num)).size };
 }
 
-/** "1M17_A.cif" for chain A of 1M17 or of 1m17_protein.pdb. */
+/** "1M17_A.cif" for chain A of 1M17, "1m17_protein_A.cif" for chain A of 1m17_protein.pdb. */
 export function templateName(source: string, chainId: string): string {
   const stem = (source.replace(/\\/g, "/").split("/").pop() ?? source).replace(/\.[^.]+$/, "");
   return `${stem.replace(/[^A-Za-z0-9_-]/g, "_")}_${chainId.replace(/[^A-Za-z0-9]/g, "_")}.cif`;

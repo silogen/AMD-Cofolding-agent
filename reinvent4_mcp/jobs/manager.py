@@ -402,11 +402,30 @@ class JobManager:
         return result
 
     def stop_job(self, job_id: str) -> dict[str, Any]:
-        """Stop a running job gracefully (SIGINT for checkpoint save)."""
+        """Stop a running job gracefully (SIGINT for checkpoint save).
+
+        A job still waiting its turn is dropped from the queue instead: there
+        is no process to signal and no slot to free.
+        """
 
         job = self._get_job(job_id)
         if isinstance(job, dict):
             return job
+
+        # Under the lock, so a slot freeing up elsewhere cannot start this job
+        # between the state being read and it being taken out of the queue.
+        with self._lock:
+            waiting = job.state == JobState.QUEUED
+            if waiting:
+                job.state = JobState.STOPPED
+                job.finished_at = datetime.now(timezone.utc).isoformat()
+
+        if waiting:
+            self._save_metadata(job)
+            logger.info("Job %s dropped from the queue before it started", job_id)
+            result = job.to_dict()
+            result["message"] = "Job dropped from the queue; it never started"
+            return result
 
         if job.state != JobState.RUNNING:
             return {
