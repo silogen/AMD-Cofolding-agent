@@ -6,6 +6,8 @@ By default the agent runs as **two collaborating agents** — a Driver that does
 
 The stack runs either under **Docker Compose** or, on clusters with no Docker daemon, under **Apptainer/Singularity** (AMD ROCm and NVIDIA CUDA image variants).
 
+**On LUMI with the browser UI:** follow [services/lumi/README.md](services/lumi/README.md).
+
 ## Architecture
 
 ```
@@ -403,7 +405,8 @@ ssh -J <login-node> -L 8080:localhost:8080 <compute-node>   # on your machine
 ```
 
 Then open <http://localhost:8080>. See [services/ui/README.md](services/ui/README.md)
-for the details and for UI development without a GPU.
+for UI development, and [services/lumi/README.md](services/lumi/README.md) to
+run it on LUMI.
 
 ---
 
