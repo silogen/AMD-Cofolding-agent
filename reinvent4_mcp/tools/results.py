@@ -16,7 +16,7 @@ from typing import Any, Optional
 import numpy as np
 
 from reinvent4_mcp.jobs.results_csv import (
-    NON_COMPONENT_COLUMNS,
+    is_component_column,
     read_results_csv,
     total_score_column,
 )
@@ -174,7 +174,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
 
     score_cols = [
         c for c in df.columns
-        if c not in NON_COMPONENT_COLUMNS
+        if is_component_column(c)
         and "(raw)" not in c
         and df[c].dtype in ("float64", "float32")
     ]
@@ -252,7 +252,7 @@ def _parse_csv_candidates(
 
     score_columns = [
         c for c in df.columns
-        if c not in NON_COMPONENT_COLUMNS
+        if is_component_column(c)
         and df[c].dtype in ("float64", "float32", "int64", "int32")
         and "(raw)" not in c
         and c != total_col

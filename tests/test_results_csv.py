@@ -155,6 +155,15 @@ class TestTheToolsSurviveIt:
 
         assert set(result["component_summary"]) == {"Solubility"}
 
+    def test_nor_are_the_fields_nothing_named(self, tmp_path):
+        csv_path = write_csv(
+            tmp_path / "results_1.csv", [NARROW.format(step=0), WIDE.format(step=1)]
+        )
+
+        result = read_results(str(csv_path))
+
+        assert set(result["component_summary"]) == {"Solubility"}
+
     def test_candidates_come_back_ranked(self, tmp_path):
         csv_path = write_csv(
             tmp_path / "results_1.csv", [NARROW.format(step=0), WIDE.format(step=1)]

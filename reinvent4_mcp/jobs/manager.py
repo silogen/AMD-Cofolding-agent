@@ -27,7 +27,7 @@ import numpy as np
 
 from reinvent4_mcp.config import ProcessConfig, get_config
 from reinvent4_mcp.jobs.results_csv import (
-    NON_COMPONENT_COLUMNS,
+    is_component_column,
     read_results_csv,
     step_column,
     total_score_column,
@@ -843,7 +843,7 @@ class JobManager:
 
         score_columns = [
             c for c in df.columns
-            if c not in NON_COMPONENT_COLUMNS
+            if is_component_column(c)
             and df[c].dtype in ("float64", "float32", "int64", "int32")
         ]
 
@@ -1093,9 +1093,8 @@ def _per_component_stats(df: Any) -> dict[str, dict[str, Any]]:
     """Compute per-component summary statistics from the CSV."""
     stats: dict[str, dict[str, Any]] = {}
 
-    skip_cols = NON_COMPONENT_COLUMNS
     for col in df.columns:
-        if col in skip_cols or "(raw)" in col:
+        if not is_component_column(col) or "(raw)" in col:
             continue
         if df[col].dtype not in ("float64", "float32"):
             continue
@@ -1176,10 +1175,9 @@ def _per_component_trajectory(
     if step_col is None or step_col not in df.columns:
         return None
 
-    skip_cols = NON_COMPONENT_COLUMNS
     comp_cols = [
         c for c in df.columns
-        if c not in skip_cols and "(raw)" not in c
+        if is_component_column(c) and "(raw)" not in c
         and df[c].dtype in ("float64", "float32")
     ]
 
@@ -1368,11 +1366,10 @@ def _component_health(df: Any) -> dict[str, dict[str, Any]]:
     as 'failing' or 'degraded'.
     """
 
-    skip_cols = NON_COMPONENT_COLUMNS
     health: dict[str, dict[str, Any]] = {}
 
     for col in df.columns:
-        if col in skip_cols or "(raw)" in col:
+        if not is_component_column(col) or "(raw)" in col:
             continue
         if df[col].dtype not in ("float64", "float32"):
             continue

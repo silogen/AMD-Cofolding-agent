@@ -44,6 +44,20 @@ NON_COMPONENT_COLUMNS = frozenset(
 )
 
 
+#: Given to fields a row carried that the header never named.
+EXTRA_PREFIX = "_extra_"
+
+
+def is_component_column(column: str) -> bool:
+    """Whether a column is a scoring component rather than bookkeeping.
+
+    Says nothing about ``(raw)``: some callers want the raw values beside the
+    transformed ones, and they ask for them by name.
+    """
+
+    return column not in NON_COMPONENT_COLUMNS and not column.startswith(EXTRA_PREFIX)
+
+
 def total_score_column(df: Any) -> str | None:
     """The column holding the aggregated score, under whichever name."""
 
