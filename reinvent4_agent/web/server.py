@@ -403,9 +403,23 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     sessions = SessionManager(SessionStore(settings.resolved_session_dir()), gateway.new_agent)
     jobs_dir = Path(os.environ.get(_JOBS_DIR_ENV, _DEFAULT_JOBS_DIR))
 
+    async def session_runs(session_ids: list[str]) -> dict[str, dict[str, str]]:
+        runs = await asyncio.to_thread(run_index.runs, session_ids, _data_roots())
+        return {
+            sid: {job["id"]: job["state"] for job in info.get("jobs", []) if job.get("launched")}
+            for sid, info in runs.items()
+        }
+
+    async def job_alerts() -> list[dict[str, Any]]:
+        if not gateway.ready:
+            return []
+        alerts = json.loads(await gateway.call_tool("get_job_alerts", {}))
+        return [alert for alert in alerts if isinstance(alert, dict)] if isinstance(alerts, list) else []
+
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
         await gateway.start()
+        sessions.watch(session_runs, job_alerts)
         try:
             yield
         finally:
@@ -534,6 +548,10 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
     async def session_events(session_id: str) -> dict[str, Any]:
         live = _session_or_404(session_id)
         return {"session": live.summary(), "events": live.events}
+
+    @app.get("/api/sessions/{session_id}/campaign")
+    async def session_campaign(session_id: str) -> dict[str, Any]:
+        return _session_or_404(session_id).campaign
 
     # -- what a conversation produced, and removing it with the conversation --
 

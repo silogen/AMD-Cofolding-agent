@@ -23,7 +23,7 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from reinvent4_agent.backends import (
     ChatResult,
@@ -59,6 +59,10 @@ MAX_IDENTICAL_FAILURES = 3
 #: the context and slows every later round.  The event handler still gets the
 #: full text.
 MAX_TOOL_RESULT_CHARS = int(os.environ.get("REINVENT4_AGENT_MAX_TOOL_RESULT_CHARS") or 12000)
+
+#: A tool the host answers itself rather than the MCP server: its definition,
+#: in the same shape as an MCP one, and the function that answers a call.
+LocalTool = tuple[dict[str, Any], Callable[[dict[str, Any]], str]]
 
 
 @runtime_checkable
@@ -126,6 +130,11 @@ class Agent:
         self._seen_alerts: set[tuple[str, str]] = set()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        #: Input tokens of the latest LLM call: how much the next one re-reads.
+        self.context_tokens = 0
+        #: Tools that belong to whoever hosts this agent -- a conversation's own
+        #: notes, say -- which the shared MCP server cannot keep apart.
+        self.local_tools: dict[str, LocalTool] = {}
         #: The LLM call in flight.  A cancelled turn cannot stop the thread it
         #: runs in, and the backend appends the reply to the history when it
         #: arrives, so the next turn waits for it to keep the history in order.
@@ -144,7 +153,7 @@ class Agent:
         shared client's tool list is filtered down to that subset so the
         agent physically cannot call mutating tools.
         """
-        tools = await self.mcp.list_tools()
+        tools = await self.mcp.list_tools() + [definition for definition, _ in self.local_tools.values()]
         if self._allowed_tools is None:
             return tools
         return [t for t in tools if t["name"] in self._allowed_tools]
@@ -178,6 +187,7 @@ class Agent:
 
             self.total_input_tokens += result.input_tokens
             self.total_output_tokens += result.output_tokens
+            self.context_tokens = result.input_tokens
 
             logger.info(
                 "Turn %d round %d — LLM responded in %.2fs "
@@ -326,7 +336,11 @@ class Agent:
 
             t0 = time.monotonic()
             try:
-                result_text = await self.mcp.call_tool(tc.name, tc.arguments)
+                local = self.local_tools.get(tc.name)
+                if local is not None:
+                    result_text = local[1](tc.arguments)
+                else:
+                    result_text = await self.mcp.call_tool(tc.name, tc.arguments)
                 elapsed = time.monotonic() - t0
 
                 logger.info(
