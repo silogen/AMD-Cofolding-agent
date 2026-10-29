@@ -52,7 +52,8 @@ for target in $TARGETS; do
     log=$REPO/logs/build/$target.log
     case $target in
     vllm)
-        ok() { singularity pull --disable-cache "/tmp/$USER/vllm.sif" "$VLLM_IMAGE" && mv "/tmp/$USER/vllm.sif" "$VLLM_SIF"; } ;;
+        # Copied rather than moved, so the image takes the project group and stays shareable.
+        ok() { singularity pull --disable-cache "/tmp/$USER/vllm.sif" "$VLLM_IMAGE" && cp "/tmp/$USER/vllm.sif" "$VLLM_SIF" && rm "/tmp/$USER/vllm.sif"; } ;;
     qwen) ok() { download Qwen/Qwen3.8-27B; } ;;
     gemma) ok() { download google/gemma-4-31B-it; } ;;
     *) ok() { bash services/singularity/build.sh amd "$target"; } ;;
