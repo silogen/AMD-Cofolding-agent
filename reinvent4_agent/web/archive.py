@@ -29,6 +29,12 @@ from typing import Any
 from reinvent4_agent.web import artifacts as shared_files
 from reinvent4_agent.web.artifacts import resolve_artifact
 
+try:  # Annotations are postponed here, so FastAPI must find these names in the module.
+    from fastapi import HTTPException, Request
+    from fastapi.responses import StreamingResponse
+except ModuleNotFoundError:  # The helpers below are tested without the web extras.
+    HTTPException = Request = StreamingResponse = None  # type: ignore[assignment, misc]
+
 logger = logging.getLogger(__name__)
 
 MAX_FILES = 5000
@@ -190,11 +196,7 @@ def cached_listing(root: Path) -> dict[str, Any]:
 
 def register(app: Any, jobs_dir: Path) -> None:
     """Add the listing and archive routes to the gateway."""
-    # Imported here so the module, like ``artifacts``, loads without FastAPI.
     import asyncio
-
-    from fastapi import HTTPException, Request
-    from fastapi.responses import StreamingResponse
 
     @app.get("/api/files")
     async def shared_listing() -> dict[str, Any]:
