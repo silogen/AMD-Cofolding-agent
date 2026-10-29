@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { AgentEvent, AutoEvent, ClientMessage, ConnectionState, ConversationEvent, Effort, SessionSummary } from "../types/api";
+import type { AgentEvent, AutoEvent, Campaign, ClientMessage, ConnectionState, ConversationEvent, Effort, SessionSummary } from "../types/api";
 import { applyEvent, EMPTY_TRANSCRIPT, type Transcript } from "../lib/transcript";
 
 /** Reconnect delays in ms. The last value repeats for later attempts. */
@@ -29,6 +29,8 @@ export interface Notice {
 
 interface SessionState {
   transcript: Transcript;
+  /** The agent's campaign log, from the last campaign event; null before there is one. */
+  campaign: Campaign | null;
   session: SessionSummary | null;
   connection: ConnectionState;
   agent: AgentInfo | null;
@@ -325,6 +327,7 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
 
   return {
     transcript,
+    campaign: transcript.campaign,
     session,
     connection,
     agent,

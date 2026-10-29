@@ -136,6 +136,53 @@ describe("applyEvents", () => {
     expect(trace[1]).toMatchObject({ kind: "tool", result: { name: "list_jobs" } });
   });
 
+  it("keeps the campaign log out of the chat, inside a turn and between turns", () => {
+    const log = (next: string) => ({ goal: "Beat JQ1", findings: [{ ts: ts(1), text: "Methyl helps" }], next, updated: ts(1) });
+    const plain = turn(
+      { type: "tool_call", id: "c1", name: "score_molecules", arguments: {} },
+      result("c1", "score_molecules"),
+      { type: "assistant_message", content: "Done.", inputTokens: 1, outputTokens: 1 },
+      { type: "status", state: "idle" },
+    );
+    seq = 0;
+    const logged = events(
+      { type: "user_message", content: "Score JQ1" },
+      { type: "status", state: "busy" },
+      { type: "tool_call", id: "c1", name: "score_molecules", arguments: {} },
+      { type: "campaign", campaign: log("Dock it") },
+      result("c1", "score_molecules"),
+      { type: "assistant_message", content: "Done.", inputTokens: 1, outputTokens: 1 },
+      { type: "status", state: "idle" },
+      { type: "campaign", campaign: log("Cofold it") },
+    );
+
+    const without = applyEvents(EMPTY_TRANSCRIPT, plain);
+    const withLog = applyEvents(EMPTY_TRANSCRIPT, logged);
+    const ids = (state: typeof without) => state.turns.map((t) => (t.role === "agent" ? t.blocks.map((b) => b.kind) : t.role));
+    expect(ids(withLog)).toEqual(ids(without));
+    expect(withLog.turns).toHaveLength(2);
+    expect((withLog.turns[1] as AgentTurn).done).toBe(true);
+    expect(toolSteps(withLog.turns[1] as AgentTurn)[0].result).toBeDefined();
+    expect(withLog.busy).toBe(false);
+    expect(withLog.lastSeq).toBe(8);
+    expect(withLog.campaign?.next).toBe("Cofold it");
+    expect(without.campaign).toBeNull();
+  });
+
+  it("does not open a turn for a campaign event on its own", () => {
+    seq = 0;
+    const state = applyEvents(EMPTY_TRANSCRIPT, events({ type: "campaign", campaign: { goal: "x", findings: [], next: null, updated: null } }));
+    expect(state.turns).toEqual([]);
+    expect(state.campaign?.goal).toBe("x");
+  });
+
+  it("ignores an event type it does not know", () => {
+    seq = 0;
+    const state = applyEvents(EMPTY_TRANSCRIPT, events({ type: "something_new" } as unknown as Unnumbered));
+    expect(state.turns).toEqual([]);
+    expect(state.lastSeq).toBe(1);
+  });
+
   it("shows a monitor alert outside a turn as its own finished block", () => {
     seq = 0;
     const state = applyEvents(EMPTY_TRANSCRIPT, events({ type: "monitor_alert", alert: { job: "ab12" } }));

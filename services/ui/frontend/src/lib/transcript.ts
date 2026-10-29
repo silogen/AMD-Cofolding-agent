@@ -1,7 +1,7 @@
 // Copyright Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-import type { AgentTurn, ConversationEvent, ToolResultEvent, Turn, TurnBlock } from "../types/api";
+import type { AgentTurn, Campaign, ConversationEvent, ToolResultEvent, Turn, TurnBlock } from "../types/api";
 
 /**
  * The conversation as the UI renders it, built from the gateway's events.
@@ -14,9 +14,11 @@ export interface Transcript {
   busy: boolean;
   /** Highest event number applied; sent back on reconnect. */
   lastSeq: number;
+  /** The agent's campaign log as of the last campaign event; not part of any turn. */
+  campaign: Campaign | null;
 }
 
-export const EMPTY_TRANSCRIPT: Transcript = { turns: [], busy: false, lastSeq: 0 };
+export const EMPTY_TRANSCRIPT: Transcript = { turns: [], busy: false, lastSeq: 0, campaign: null };
 
 const time = (ts: string | undefined): number => (ts ? Date.parse(ts) : Date.now());
 
@@ -80,6 +82,13 @@ export function applyEvent(state: Transcript, event: ConversationEvent): Transcr
       // Not the end of the turn: errors also arrive while the agent keeps
       // working. Only "status: idle" ends a turn.
       return withBlock(next, at, event.seq, { kind: "error", id: `e-${event.seq}`, message: event.message });
+
+    case "campaign":
+      return { ...next, campaign: event.campaign };
+
+    default:
+      // A kind of event this page does not know yet, from a newer gateway.
+      return next;
   }
 }
 

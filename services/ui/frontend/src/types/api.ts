@@ -232,6 +232,33 @@ export interface MonitorResponseEvent extends Recorded {
   content: string;
 }
 
+/** One thing an experiment showed, as the agent wrote it down. */
+export interface CampaignFinding {
+  /** ISO 8601, UTC. */
+  ts: string;
+  text: string;
+}
+
+/**
+ * The log the agent keeps while it works on a goal: what it is after, what
+ * each experiment showed and what it does next. Also GET
+ * /api/sessions/{id}/campaign; an empty log has every field null or empty.
+ */
+export interface Campaign {
+  goal: string | null;
+  /** Oldest first. */
+  findings: CampaignFinding[];
+  next: string | null;
+  /** ISO 8601, UTC; null while the log is empty. */
+  updated: string | null;
+}
+
+/** The campaign log changed. Each event carries the whole log, so the last one is the current state. */
+export interface CampaignEvent extends Recorded {
+  type: "campaign";
+  campaign: Campaign;
+}
+
 /** Events that belong to the conversation and are replayed on reconnect. */
 export type ConversationEvent =
   | UserMessageEvent
@@ -243,7 +270,8 @@ export type ConversationEvent =
   | CancelledEvent
   | ErrorEvent
   | MonitorAlertEvent
-  | MonitorResponseEvent;
+  | MonitorResponseEvent
+  | CampaignEvent;
 
 export type AgentEvent = ReadyEvent | SessionEvent | NoticeEvent | AutoEvent | ConversationEvent;
 

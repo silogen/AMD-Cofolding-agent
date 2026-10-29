@@ -10,6 +10,7 @@ import { SessionRail } from "./components/SessionRail/SessionRail";
 import { Transcript } from "./components/Transcript/Transcript";
 import { Composer, type ComposerHandle } from "./components/Composer/Composer";
 import { RunBar } from "./components/RunBar/RunBar";
+import { CampaignCard } from "./components/Campaign/CampaignCard";
 import { Workbench, type WorkbenchTab } from "./components/Workbench/Workbench";
 import { CommandPalette, type PaletteItem } from "./components/CommandPalette/CommandPalette";
 import type { Effort, SessionSummary, StructurePanel } from "./types/api";
@@ -362,6 +363,7 @@ export default function App() {
               </button>
             )}
           </div>
+          <CampaignCard key={session?.id ?? "new"} campaign={chat.campaign} />
           <RunBar sessionId={session?.id ?? null} steps={artifacts.steps} turnAt={turnAt} onNotice={hint} />
           <Composer
             ref={composerRef}
