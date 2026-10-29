@@ -79,13 +79,18 @@ AUTO_INSTRUCTION = (
     "Check the jobs you started (get_job_alerts, get_optimization_status), read "
     "and analyse whatever results are ready (get_top_candidates, read_results), "
     "then decide the next step towards the goal and take it. Keep it short. "
-    "If a run is still going and nothing has changed, say so in one line. "
-    "When the goal is reached, or the only thing left needs the user, end your "
-    "message with AUTONOMY DONE."
+    "If a run is still going and nothing has changed, say so in one line and "
+    "leave it at that -- you will be called again. End with AUTONOMY DONE only "
+    "when the campaign itself is over: the goal is reached, or the next move is "
+    "the user's. A job still running is never done."
 )
 
 #: How an answer says the autonomy loop has nothing left to do.
 _DONE_PATTERN = re.compile(r"\bAUTONOMY\s+DONE\b", re.IGNORECASE)
+
+#: The same phrase with the markdown and punctuation a model wraps it in: it
+#: is addressed to the gateway, so it is cut out of what the browser shows.
+_DONE_MARKUP = re.compile(r"\s*[*_#]*\bAUTONOMY\s+DONE\b[*_#.!]*", re.IGNORECASE)
 
 #: Events that speak to whoever is watching now rather than to the
 #: conversation, so they are neither numbered nor recorded.
@@ -94,6 +99,11 @@ _LIVE_ONLY = frozenset({"notice", "auto"})
 
 def valid_session_id(session_id: str | None) -> bool:
     return bool(session_id) and _ID_PATTERN.match(session_id) is not None
+
+
+def spoken_answer(answer: str | None) -> str:
+    """The answer as the conversation keeps it, without the stop phrase."""
+    return _DONE_MARKUP.sub("", answer or "").strip()
 
 
 def _now() -> str:
@@ -330,8 +340,12 @@ class LiveSession:
         return True
 
     def cancel(self) -> bool:
-        """Stop the running turn and any continuation.  False when none runs."""
-        self.cancel_continuation()
+        """Stop the running turn and any continuation.  False when none runs.
+
+        Stop means stop: the budget goes with the turn, or the next
+        continuation would start the agent up again a minute later.
+        """
+        self.end_autonomy()
         if not self.busy:
             return False
         assert self.running is not None
@@ -370,12 +384,29 @@ class LiveSession:
             self.auto_task.cancel()
             self.auto_task = None
 
+    def end_autonomy(self) -> None:
+        """Give the budget back once the loop stops taking turns.
+
+        The browser counts the budget down from the deadline, so a loop that
+        has stopped -- the agent said it was done, the turn failed, the user
+        hit stop, the turn cap ran out -- must say so, or the chip keeps
+        promising work that nobody is doing.
+        """
+        running = self.auto_until is not None
+        self.auto_until = None
+        self.cancel_continuation()
+        if running:
+            self.publish({"type": "auto", "until": None})
+
     def _auto_iso(self) -> str | None:
         return self.auto_until.isoformat(timespec="seconds") if self.auto_on else None
 
     def _schedule_continuation(self, delay: float) -> None:
         """Queue the next automatic turn.  The task checks again before it starts."""
-        if not self.auto_on or self.auto_turns >= MAX_AUTO_TURNS:
+        if not self.auto_on:
+            return
+        if self.auto_turns >= MAX_AUTO_TURNS:
+            self.end_autonomy()
             return
         self.cancel_continuation()
         self.auto_task = asyncio.create_task(self._continue_after(delay))
@@ -385,7 +416,10 @@ class LiveSession:
         if delay > 0:
             await asyncio.sleep(delay)
         self.auto_task = None
-        if self.busy or not self.auto_on or self.auto_turns >= MAX_AUTO_TURNS:
+        if self.busy or not self.auto_on:
+            return
+        if self.auto_turns >= MAX_AUTO_TURNS:
+            self.end_autonomy()
             return
         self.auto_turns += 1
         self._begin(AUTO_INSTRUCTION, auto=True)
@@ -402,11 +436,12 @@ class LiveSession:
         unfinished = False
         try:
             answer = await self.agent.chat(content)
-            self._title_from_answer(answer)
+            spoken = spoken_answer(answer)
+            self._title_from_answer(spoken)
             self.publish(
                 {
                     "type": "assistant_message",
-                    "content": answer,
+                    "content": spoken,
                     "inputTokens": getattr(self.agent, "total_input_tokens", 0),
                     "outputTokens": getattr(self.agent, "total_output_tokens", 0),
                 }
@@ -423,6 +458,8 @@ class LiveSession:
             # Never after a cancel or an error: both need the user.
             if unfinished:
                 self._schedule_continuation(self.auto_delay)
+            else:
+                self.end_autonomy()
 
     def save(self) -> None:
         """Write the metadata and the LLM history."""

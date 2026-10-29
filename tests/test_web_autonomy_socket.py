@@ -134,8 +134,13 @@ def test_an_automatic_turn_opens_a_marked_turn_with_no_user_message(agents):
         assert receive_until(ws, "status")["state"] == "idle"
         # The automatic turn that follows, which says it is done.
         assert receive_until(ws, "status")["auto"] is True
-        assert "AUTONOMY DONE" in receive_until(ws, "assistant_message")["content"]
+        # The phrase is for the gateway: the conversation keeps the rest.
+        answer = receive_until(ws, "assistant_message")["content"]
+        assert "AUTONOMY" not in answer
+        assert answer == "The run is still going, nothing new."
         assert receive_until(ws, "status")["state"] == "idle"
+        # Saying it is done hands the budget back.
+        assert receive_until(ws, "auto")["until"] is None
 
         events = client.get(f"/api/sessions/{session_id}/events").json()["events"]
         assert [e["type"] for e in events] == [

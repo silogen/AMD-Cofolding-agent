@@ -222,8 +222,23 @@ def test_the_loop_stops_when_the_agent_says_it_is_done(tmp_path):
         await asyncio.sleep(0.05)
 
         assert agent.asked == ["Design ligands for BRD4"]
-        # The budget is still there; the user may send it off again.
-        assert live.auto_on
+        # Nothing is taking turns any more, so the budget must not look live.
+        assert not live.auto_on
+        assert live.auto_until is None
+
+    asyncio.run(run())
+
+
+def test_the_stop_phrase_is_not_part_of_the_answer(tmp_path):
+    async def run() -> None:
+        agent = FakeAgent(answer="The campaign is finished.\n\n**AUTONOMY DONE**")
+        live = make_session(tmp_path, agent)
+        live.set_autonomy(60)
+        assert live.start_turn("Design ligands for BRD4")
+        await idle(live)
+        await asyncio.sleep(0.05)
+
+        assert published(live, "assistant_message")[0]["content"] == "The campaign is finished."
 
     asyncio.run(run())
 
@@ -241,7 +256,8 @@ def test_consecutive_automatic_turns_are_capped(tmp_path, monkeypatch):
         assert agent.asked[0] == "Design ligands for BRD4"
         assert len(agent.asked) == 4
         assert all(asked.startswith("[AUTO]") for asked in agent.asked[1:])
-        assert live.auto_on
+        # The cap ends the budget too: no turn is coming, so none is promised.
+        assert not live.auto_on
 
     asyncio.run(run())
 
@@ -263,6 +279,8 @@ def test_a_cancelled_turn_never_continues(tmp_path):
         assert agent.cancelled
         assert agent.asked == ["Design ligands for BRD4"]
         assert published(live, "cancelled")
+        # Stop means stop: the budget cannot start it up again a minute later.
+        assert not live.auto_on
 
     asyncio.run(run())
 
@@ -284,6 +302,7 @@ def test_a_failed_turn_never_continues(tmp_path):
 
         assert agent.asked == ["Design ligands for BRD4"]
         assert published(live, "error")[0]["message"] == "Boltz is unreachable"
+        assert not live.auto_on
 
     asyncio.run(run())
 
