@@ -15,6 +15,12 @@ from typing import Any, Optional
 
 import numpy as np
 
+from reinvent4_mcp.jobs.results_csv import (
+    NON_COMPONENT_COLUMNS,
+    read_results_csv,
+    total_score_column,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -125,9 +131,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
         return {"error": f"CSV file not found: {csv_path}"}
 
     try:
-        import pandas as pd
-
-        df = pd.read_csv(path)
+        df = read_results_csv(path)
     except Exception as exc:
         return {"error": f"Failed to read CSV: {exc}"}
 
@@ -141,7 +145,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
     }
 
     smiles_col = "SMILES" if "SMILES" in df.columns else None
-    total_col = "total_score" if "total_score" in df.columns else None
+    total_col = total_score_column(df)
 
     if smiles_col:
         n_unique = df[smiles_col].nunique()
@@ -170,7 +174,7 @@ def read_results(csv_path: str) -> dict[str, Any]:
 
     score_cols = [
         c for c in df.columns
-        if c not in ("SMILES", "SMILES_state", "Step", "step", "batch", "total_score")
+        if c not in NON_COMPONENT_COLUMNS
         and "(raw)" not in c
         and df[c].dtype in ("float64", "float32")
     ]
@@ -221,9 +225,7 @@ def _parse_csv_candidates(
         return {"error": f"CSV file not found: {csv_path}"}
 
     try:
-        import pandas as pd
-
-        df = pd.read_csv(path)
+        df = read_results_csv(path)
     except Exception as exc:
         return {"error": f"Failed to read CSV: {exc}"}
 
@@ -231,7 +233,7 @@ def _parse_csv_candidates(
         return {"candidates": [], "n_total": 0}
 
     smiles_col = "SMILES" if "SMILES" in df.columns else None
-    total_col = "total_score" if "total_score" in df.columns else None
+    total_col = total_score_column(df)
 
     if smiles_col is None:
         return {"error": "CSV has no SMILES column"}
@@ -248,10 +250,9 @@ def _parse_csv_candidates(
     df = df.drop_duplicates(subset=[smiles_col])
     df = df.head(top_n)
 
-    skip_cols = {smiles_col, "SMILES_state", "Step", "step", "batch"}
     score_columns = [
         c for c in df.columns
-        if c not in skip_cols
+        if c not in NON_COMPONENT_COLUMNS
         and df[c].dtype in ("float64", "float32", "int64", "int32")
         and "(raw)" not in c
         and c != total_col

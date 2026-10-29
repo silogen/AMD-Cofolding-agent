@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -959,8 +959,9 @@ class TestJobManagerLifecycle:
         assert "max_steps = 50" in toml_content
 
     def test_max_concurrent_jobs_enforced(self, manager, tmp_path):
-        """Cannot exceed max_concurrent_jobs."""
+        """Beyond max_concurrent_jobs a launch is queued, not refused."""
         with patch.object(manager, "_start_process"):
+            running_ids = []
             for i in range(manager._config.jobs.max_concurrent_jobs):
                 result = manager.create_and_start(
                     ttp_id=f"ttp-{i}",
@@ -969,8 +970,8 @@ class TestJobManagerLifecycle:
                     model="/model/prior.model",
                 )
                 assert "error" not in result
-                # _start_process is mocked, so manually set state to RUNNING
-                manager._jobs[result["job_id"]].state = JobState.RUNNING
+                assert result["state"] == "running"
+                running_ids.append(result["job_id"])
 
             result = manager.create_and_start(
                 ttp_id="ttp-excess",
@@ -978,8 +979,110 @@ class TestJobManagerLifecycle:
                 scorer_config=MINIMAL_SCORER_CONFIG,
                 model="/model/prior.model",
             )
-            assert "error" in result
-            assert "Maximum concurrent jobs" in result["error"]
+
+        assert "error" not in result
+        assert result["state"] == "queued"
+        assert result["queue_position"] == 1
+        assert f"{len(running_ids)} running jobs" in result["note"]
+
+        job_dir = Path(result["working_dir"])
+        assert (job_dir / "config.toml").exists()
+        assert (job_dir / "job_metadata.json").exists()
+
+        for job_id in running_ids:
+            assert manager._jobs[job_id].state == JobState.RUNNING
+
+    def test_queued_job_starts_when_slot_frees(self, manager):
+        """A queued job starts on its own once a running job finishes."""
+        with patch.object(manager, "_start_process") as start_process:
+            running_ids = []
+            for i in range(manager._config.jobs.max_concurrent_jobs):
+                running_ids.append(
+                    manager.create_and_start(
+                        ttp_id=f"ttp-{i}",
+                        ttp_version=1,
+                        scorer_config=MINIMAL_SCORER_CONFIG,
+                        model="/model/prior.model",
+                    )["job_id"]
+                )
+
+            queued_id = manager.create_and_start(
+                ttp_id="ttp-queued",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )["job_id"]
+            assert manager._jobs[queued_id].state == JobState.QUEUED
+
+            finished = manager._jobs[running_ids[0]]
+            finished._process = MagicMock()
+            finished._process.poll.return_value = 0
+            start_process.reset_mock()
+
+            manager._poll_process(finished)
+
+        assert finished.state == JobState.COMPLETED
+        assert manager._jobs[queued_id].state == JobState.RUNNING
+        start_process.assert_called_once_with(manager._jobs[queued_id])
+
+    def test_queued_jobs_start_in_fifo_order(self, manager):
+        """Two queued jobs start oldest first as slots free up."""
+        with patch.object(manager, "_start_process"):
+            running_ids = []
+            for i in range(manager._config.jobs.max_concurrent_jobs):
+                running_ids.append(
+                    manager.create_and_start(
+                        ttp_id=f"ttp-{i}",
+                        ttp_version=1,
+                        scorer_config=MINIMAL_SCORER_CONFIG,
+                        model="/model/prior.model",
+                    )["job_id"]
+                )
+
+            first = manager.create_and_start(
+                ttp_id="ttp-first",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+            second = manager.create_and_start(
+                ttp_id="ttp-second",
+                ttp_version=1,
+                scorer_config=MINIMAL_SCORER_CONFIG,
+                model="/model/prior.model",
+            )
+
+            assert first["queue_position"] == 1
+            assert second["queue_position"] == 2
+            assert manager.get_status(second["job_id"])["queue_position"] == 2
+
+            manager.stop_job(running_ids[0])
+            assert manager._jobs[first["job_id"]].state == JobState.RUNNING
+            assert manager._jobs[second["job_id"]].state == JobState.QUEUED
+
+            manager.stop_job(running_ids[1])
+            assert manager._jobs[second["job_id"]].state == JobState.RUNNING
+
+    def test_launch_never_stops_a_running_job(self, manager):
+        """Launching leaves running jobs alone, however many are queued."""
+        with patch.object(manager, "_start_process"):
+            with patch.object(manager, "stop_job") as stop_job:
+                job_ids = []
+                for i in range(manager._config.jobs.max_concurrent_jobs + 2):
+                    result = manager.create_and_start(
+                        ttp_id=f"ttp-{i}",
+                        ttp_version=1,
+                        scorer_config=MINIMAL_SCORER_CONFIG,
+                        model="/model/prior.model",
+                    )
+                    assert "stopped_previous_jobs" not in result
+                    job_ids.append(result["job_id"])
+
+                stop_job.assert_not_called()
+
+        states = [manager._jobs[j].state for j in job_ids]
+        assert states.count(JobState.RUNNING) == manager._config.jobs.max_concurrent_jobs
+        assert states.count(JobState.QUEUED) == 2
 
     def test_get_status_unknown_job(self, manager):
         result = manager.get_status("nonexistent")
@@ -1552,20 +1655,52 @@ class TestJobManagerTL:
         assert "validation_smiles_file" in toml_content
 
     def test_tl_max_concurrent_enforced(self, manager):
+        """A TL launch past the limit is queued with its files written."""
         with patch.object(manager, "_start_process"):
+            running_ids = []
             for i in range(manager._config.jobs.max_concurrent_jobs):
                 result = manager.create_and_start_tl(
                     model="/model/prior.model",
                     smiles=["CCO"],
                 )
                 assert "error" not in result
-                manager._jobs[result["job_id"]].state = JobState.RUNNING
+                assert result["state"] == "running"
+                running_ids.append(result["job_id"])
 
             result = manager.create_and_start_tl(
                 model="/model/prior.model",
                 smiles=["CCO"],
             )
-            assert "error" in result
+
+        assert "error" not in result
+        assert result["state"] == "queued"
+        assert result["queue_position"] == 1
+
+        job_dir = Path(result["working_dir"])
+        assert (job_dir / "config.toml").exists()
+        assert (job_dir / "train.smi").exists()
+
+        for job_id in running_ids:
+            assert manager._jobs[job_id].state == JobState.RUNNING
+
+    def test_tl_shares_slots_with_optimization(self, manager):
+        """TL and optimization jobs draw on the same concurrency budget."""
+        with patch.object(manager, "_start_process"):
+            for i in range(manager._config.jobs.max_concurrent_jobs):
+                manager.create_and_start(
+                    ttp_id=f"ttp-{i}",
+                    ttp_version=1,
+                    scorer_config=MINIMAL_SCORER_CONFIG,
+                    model="/model/prior.model",
+                )
+
+            result = manager.create_and_start_tl(
+                model="/model/prior.model",
+                smiles=["CCO"],
+            )
+
+        assert result["state"] == "queued"
+        assert result["queue_position"] == 1
 
     def test_tl_job_to_dict(self, manager, tmp_path):
         with patch.object(manager, "_start_process"):

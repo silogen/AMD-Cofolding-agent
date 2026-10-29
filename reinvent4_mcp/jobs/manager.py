@@ -26,6 +26,12 @@ from typing import Any, Optional
 import numpy as np
 
 from reinvent4_mcp.config import ProcessConfig, get_config
+from reinvent4_mcp.jobs.results_csv import (
+    NON_COMPONENT_COLUMNS,
+    read_results_csv,
+    step_column,
+    total_score_column,
+)
 from reinvent4_mcp.jobs.toml_generator import (
     generate_reinvent_toml,
     generate_tl_toml,
@@ -165,19 +171,18 @@ class JobManager:
     ) -> dict[str, Any]:
         """Create a new job, generate the TOML config, and start the subprocess.
 
-        Any currently running jobs are stopped first (with checkpoint save)
-        to avoid resource contention (especially with external scoring
-        services like Boltz2).
+        Running jobs are never disturbed.  When ``jobs.max_concurrent_jobs``
+        slots are already taken the job is fully prepared on disk but left
+        queued, and starts by itself once a running job finishes.
 
-        Returns a summary dict with job_id and working directory.
+        Returns a summary dict with job_id and working directory, plus
+        ``queue_position`` and ``note`` when the job was queued.
         """
 
         try:
             model_path = resolve_model_path(model)
         except ValueError as exc:
             return {"error": str(exc)}
-
-        stopped_jobs = self._stop_running_jobs()
 
         job_id = str(uuid.uuid4())[:8]
         job_dir = self._working_root / f"job_{job_id}"
@@ -244,7 +249,7 @@ class JobManager:
         with self._lock:
             self._jobs[job_id] = job
 
-        self._start_process(job)
+        queue_info = self._start_or_queue(job)
 
         result = {
             "job_id": job_id,
@@ -255,8 +260,8 @@ class JobManager:
             "max_steps": max_steps,
             "resume_from": resume_from,
         }
-        if stopped_jobs:
-            result["stopped_previous_jobs"] = stopped_jobs
+        if queue_info:
+            result.update(queue_info)
         return result
 
     def create_and_start_tl(
@@ -280,8 +285,13 @@ class JobManager:
         Either *smiles* (list of SMILES strings written to a .smi file)
         or *smiles_file* (path to an existing file) must be provided.
 
+        Shares the ``jobs.max_concurrent_jobs`` budget with optimization
+        jobs: if every slot is taken the job is queued instead of started,
+        and no running job is disturbed.
+
         Returns a summary dict with job_id, working directory, and
-        output model path.
+        output model path, plus ``queue_position`` and ``note`` when the
+        job was queued.
         """
 
         if not smiles and not smiles_file:
@@ -293,8 +303,6 @@ class JobManager:
             model_path = resolve_model_path(model)
         except ValueError as exc:
             return {"error": str(exc)}
-
-        stopped_jobs = self._stop_running_jobs()
 
         job_id = str(uuid.uuid4())[:8]
         job_dir = self._working_root / f"job_{job_id}"
@@ -352,7 +360,7 @@ class JobManager:
         with self._lock:
             self._jobs[job_id] = job
 
-        self._start_process(job)
+        queue_info = self._start_or_queue(job)
 
         result = {
             "job_id": job_id,
@@ -365,8 +373,8 @@ class JobManager:
             "output_model_file": str(job_dir / output_model_file),
             "n_training_smiles": len(smiles) if smiles else None,
         }
-        if stopped_jobs:
-            result["stopped_previous_jobs"] = stopped_jobs
+        if queue_info:
+            result.update(queue_info)
         return result
 
     def get_status(self, job_id: str) -> dict[str, Any]:
@@ -384,6 +392,9 @@ class JobManager:
         self._poll_process(job)
 
         result = job.to_dict()
+        if job.state == JobState.QUEUED:
+            with self._lock:
+                result["queue_position"] = self._queue_position(job)
         trajectory = self._parse_trajectory(job)
         if trajectory:
             result["trajectory"] = trajectory
@@ -429,6 +440,8 @@ class JobManager:
         if job._process:
             job.exit_code = job._process.returncode
         self._save_metadata(job)
+        logger.info("Job %s stopped, freeing a slot", job_id)
+        self._promote_next_queued()
 
         result = job.to_dict()
         result["message"] = "Job stopped"
@@ -572,17 +585,24 @@ class JobManager:
     def list_jobs(self) -> list[dict[str, Any]]:
         """Return summary info for all tracked jobs."""
         with self._lock:
-            for job in self._jobs.values():
-                if job.state == JobState.RUNNING:
-                    self._poll_process(job)
-            return [j.to_dict() for j in self._jobs.values()]
+            jobs = list(self._jobs.values())
+        # Polled outside the lock: noticing a finished job starts the next
+        # queued one, which takes the lock itself.
+        for job in jobs:
+            if job.state == JobState.RUNNING:
+                self._poll_process(job)
+        return [j.to_dict() for j in jobs]
 
     # ------------------------------------------------------------------
     # Subprocess management
     # ------------------------------------------------------------------
 
-    def _start_process(self, job: JobInfo) -> None:
-        """Launch the REINVENT4 worker subprocess."""
+    def _start_process(self, job: JobInfo) -> bool:
+        """Launch the REINVENT4 worker subprocess.
+
+        Returns True when the subprocess was spawned.  A False return
+        means the job is FAILED and the slot it was given is free again.
+        """
 
         from reinvent4_mcp.utils import custom_plugins_path, find_reinvent4_root
 
@@ -624,7 +644,7 @@ class JobManager:
             job.error = f"Failed to start process: {exc}"
             self._save_metadata(job)
             logger.exception("Failed to start job %s", job.job_id)
-            return
+            return False
 
         job._process = proc
         job.pid = proc.pid
@@ -640,6 +660,7 @@ class JobManager:
         monitor.start()
 
         logger.info("Started job %s (pid %d) in %s", job.job_id, proc.pid, job.working_dir)
+        return True
 
     def _monitor_process(self, job: JobInfo) -> None:
         """Background thread: wait for the subprocess to finish and update state."""
@@ -675,9 +696,14 @@ class JobManager:
             "Job %s finished: state=%s exit_code=%d",
             job.job_id, job.state.value, exit_code,
         )
+        self._promote_next_queued()
 
     def _poll_process(self, job: JobInfo) -> None:
-        """Check if a running job's subprocess is still alive."""
+        """Check if a running job's subprocess is still alive.
+
+        Must not be called while holding ``self._lock``: a job found to
+        have finished frees its slot and starts the next queued job.
+        """
 
         if job.state != JobState.RUNNING or job._process is None:
             return
@@ -697,6 +723,11 @@ class JobManager:
                 if stderr_output:
                     job.error += f". Last stderr: {stderr_output}"
             self._save_metadata(job)
+            logger.info(
+                "Job %s finished: state=%s exit_code=%d",
+                job.job_id, job.state.value, retcode,
+            )
+            self._promote_next_queued()
 
     # ------------------------------------------------------------------
     # CSV parsing for monitoring
@@ -714,9 +745,7 @@ class JobManager:
             return None
 
         try:
-            import pandas as pd
-
-            df = pd.read_csv(csv_path)
+            df = read_results_csv(csv_path)
         except Exception as exc:
             logger.warning("Failed to parse CSV for job %s: %s", job.job_id, exc)
             return None
@@ -724,13 +753,8 @@ class JobManager:
         if df.empty:
             return {"current_step": 0, "n_molecules_total": 0}
 
-        total_col = "total_score" if "total_score" in df.columns else None
-
-        step_col = None
-        for candidate in ("Step", "step", "batch"):
-            if candidate in df.columns:
-                step_col = candidate
-                break
+        total_col = total_score_column(df)
+        step_col = step_column(df)
 
         if step_col is None:
             df["_step"] = df.index // max(1, job_batch_size(job))
@@ -792,9 +816,7 @@ class JobManager:
             return {"error": f"No results CSV found at {csv_path}"}
 
         try:
-            import pandas as pd
-
-            df = pd.read_csv(csv_path)
+            df = read_results_csv(csv_path)
         except Exception as exc:
             return {"error": f"Failed to read results CSV: {exc}"}
 
@@ -802,7 +824,7 @@ class JobManager:
             return {"candidates": [], "n_total": 0}
 
         smiles_col = "SMILES" if "SMILES" in df.columns else None
-        total_col = "total_score" if "total_score" in df.columns else None
+        total_col = total_score_column(df)
 
         if smiles_col is None:
             return {"error": "CSV has no SMILES column"}
@@ -821,7 +843,7 @@ class JobManager:
 
         score_columns = [
             c for c in df.columns
-            if c not in (smiles_col, "SMILES_state", "Step", "step", "batch")
+            if c not in NON_COMPONENT_COLUMNS
             and df[c].dtype in ("float64", "float32", "int64", "int32")
         ]
 
@@ -910,6 +932,8 @@ class JobManager:
                     exit_code=data.get("exit_code"),
                     output_model_file=data.get("output_model_file"),
                 )
+                # A job that was queued never had a process, so it stays
+                # queued and is picked up when a slot next frees.
                 if job.state == JobState.RUNNING:
                     job.state = JobState.FAILED
                     job.error = "Server restarted while job was running"
@@ -924,40 +948,93 @@ class JobManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _stop_running_jobs(self) -> list[dict[str, str]]:
-        """Stop all currently running jobs before starting a new one.
+    def _running_count(self) -> int:
+        """Count the jobs holding a concurrency slot.
 
-        Returns a list of dicts with job_id and checkpoint_path for each
-        stopped job so the caller can report what was stopped.
+        The caller must hold ``self._lock``.
+        """
+        return sum(1 for j in self._jobs.values() if j.state == JobState.RUNNING)
+
+    def _queued_jobs(self) -> list[JobInfo]:
+        """Return the queued jobs oldest first.
+
+        The caller must hold ``self._lock``.
+        """
+        return sorted(
+            (j for j in self._jobs.values() if j.state == JobState.QUEUED),
+            key=lambda j: j.created_at,
+        )
+
+    def _queue_position(self, job: JobInfo) -> int:
+        """Return the 1-based place of *job* in the queue (1 starts next).
+
+        The caller must hold ``self._lock``.
+        """
+        queued = self._queued_jobs()
+        for position, queued_job in enumerate(queued, start=1):
+            if queued_job.job_id == job.job_id:
+                return position
+        return len(queued)
+
+    def _start_or_queue(self, job: JobInfo) -> Optional[dict[str, Any]]:
+        """Start *job* now if a slot is free, otherwise leave it queued.
+
+        Returns None when the job was started, or a dict with
+        ``queue_position`` and ``note`` when it was queued.  Running jobs
+        are never stopped to make room.
         """
         with self._lock:
-            running = [
-                j for j in self._jobs.values() if j.state == JobState.RUNNING
-            ]
+            n_running = self._running_count()
+            has_slot = n_running < self._config.jobs.max_concurrent_jobs
+            if has_slot:
+                # Claim the slot before releasing the lock so a concurrent
+                # launch cannot hand out the same one.
+                job.state = JobState.RUNNING
+            else:
+                position = self._queue_position(job)
 
-        stopped: list[dict[str, str]] = []
-        for job in running:
-            logger.info(
-                "Auto-stopping job %s before launching new job", job.job_id,
-            )
-            try:
-                result = self.stop_job(job.job_id)
-                entry: dict[str, str] = {"job_id": job.job_id}
-                if "checkpoint_path" in result:
-                    entry["checkpoint_path"] = result["checkpoint_path"]
-                stopped.append(entry)
-            except Exception:
-                logger.error(
-                    "Failed to stop job %s, forcing state to stopped",
-                    job.job_id, exc_info=True,
-                )
-                job.state = JobState.STOPPED
-                job.finished_at = datetime.now(timezone.utc).isoformat()
-                job.error = "Force-stopped: process did not respond to signals"
-                self._save_metadata(job)
-                stopped.append({"job_id": job.job_id})
+        if has_slot:
+            if not self._start_process(job):
+                self._promote_next_queued()
+            return None
 
-        return stopped
+        logger.info(
+            "Queued job %s at position %d (%d running, limit %d)",
+            job.job_id,
+            position,
+            n_running,
+            self._config.jobs.max_concurrent_jobs,
+        )
+        return {
+            "queue_position": position,
+            "note": (
+                f"Queued behind {n_running} running "
+                f"job{'s' if n_running != 1 else ''}; "
+                "it starts when one finishes."
+            ),
+        }
+
+    def _promote_next_queued(self) -> None:
+        """Start queued jobs while concurrency slots are free (FIFO).
+
+        Called from every place that sees a job leave the RUNNING state.
+        The lock is released before spawning so the monitor thread cannot
+        deadlock against ``_start_process``.
+        """
+        while True:
+            with self._lock:
+                if self._running_count() >= self._config.jobs.max_concurrent_jobs:
+                    return
+                queued = self._queued_jobs()
+                if not queued:
+                    return
+                job = queued[0]
+                job.state = JobState.RUNNING
+
+            logger.info("Starting queued job %s: a slot became free", job.job_id)
+            # A failed spawn leaves the job FAILED, which frees the slot it
+            # claimed again, so the next loop hands it to the following job.
+            self._start_process(job)
 
     def _get_job(self, job_id: str) -> JobInfo | dict[str, Any]:
         with self._lock:
@@ -1016,7 +1093,7 @@ def _per_component_stats(df: Any) -> dict[str, dict[str, Any]]:
     """Compute per-component summary statistics from the CSV."""
     stats: dict[str, dict[str, Any]] = {}
 
-    skip_cols = {"SMILES", "SMILES_state", "Step", "step", "batch", "total_score"}
+    skip_cols = NON_COMPONENT_COLUMNS
     for col in df.columns:
         if col in skip_cols or "(raw)" in col:
             continue
@@ -1099,7 +1176,7 @@ def _per_component_trajectory(
     if step_col is None or step_col not in df.columns:
         return None
 
-    skip_cols = {"SMILES", "SMILES_state", "Step", "step", "batch", "total_score"}
+    skip_cols = NON_COMPONENT_COLUMNS
     comp_cols = [
         c for c in df.columns
         if c not in skip_cols and "(raw)" not in c
@@ -1291,7 +1368,7 @@ def _component_health(df: Any) -> dict[str, dict[str, Any]]:
     as 'failing' or 'degraded'.
     """
 
-    skip_cols = {"SMILES", "SMILES_state", "Step", "step", "batch", "total_score"}
+    skip_cols = NON_COMPONENT_COLUMNS
     health: dict[str, dict[str, Any]] = {}
 
     for col in df.columns:
