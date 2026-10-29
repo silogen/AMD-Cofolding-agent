@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { AgentEvent, ClientMessage, ConnectionState, ConversationEvent, Effort, SessionSummary } from "../types/api";
+import type { AgentEvent, AutoEvent, ClientMessage, ConnectionState, ConversationEvent, Effort, SessionSummary } from "../types/api";
 import { applyEvent, EMPTY_TRANSCRIPT, type Transcript } from "../lib/transcript";
 
 /** Reconnect delays in ms. The last value repeats for later attempts. */
@@ -38,7 +38,21 @@ interface SessionState {
   dismissNotice: (id: number) => void;
   send: (text: string, effort?: Effort | null) => boolean;
   cancel: () => void;
+  /** End of the autonomy budget, ISO 8601 UTC; null when the agent is not on its own. */
+  autoUntil: string | null;
+  /** Give the agent *minutes* to work on its own, or 0 to take that back. */
+  setAuto: (minutes: number) => void;
   reconnect: () => void;
+}
+
+/** The budget message for *minutes*; whole minutes, never negative. */
+export function autoMessage(minutes: number): ClientMessage {
+  return { type: "auto", minutes: Math.max(0, Math.round(minutes)) };
+}
+
+/** The deadline an 'auto' event or a session reports, null when there is none. */
+export function autoDeadline(event: AutoEvent | SessionSummary): string | null {
+  return ("until" in event ? event.until : event.auto_until) ?? null;
 }
 
 type Action = { type: "reset" } | { type: "event"; event: ConversationEvent };
@@ -88,6 +102,7 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
   const [agent, setAgent] = useState<AgentInfo | null>(null);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [autoUntil, setAutoUntil] = useState<string | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const attemptRef = useRef(0);
@@ -132,9 +147,12 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
             updated: event.updated,
             turns: event.turns,
             busy: event.busy,
+            auto_until: autoDeadline(event),
             inputTokens: event.inputTokens,
             outputTokens: event.outputTokens,
           };
+          // The budget outlives the socket, so a reconnect picks it up again.
+          setAutoUntil(summary.auto_until ?? null);
           // What is on screen belongs to another conversation: start over.
           // The replay that follows fills it in.
           if (shownRef.current !== summary.id) {
@@ -149,6 +167,9 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
         }
         case "notice":
           pushNotice(event.message);
+          return;
+        case "auto":
+          setAutoUntil(autoDeadline(event));
           return;
         default:
           if (event.type === "error" && typeof event.seq !== "number") {
@@ -282,6 +303,15 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
     sendMessage({ type: "cancel" });
   }, [sendMessage]);
 
+  // No local echo here either: the gateway answers with an 'auto' event, so
+  // every tab watching the conversation shows the same deadline.
+  const setAuto = useCallback(
+    (minutes: number) => {
+      sendMessage(autoMessage(minutes));
+    },
+    [sendMessage],
+  );
+
   const reconnect = useCallback(() => {
     attemptRef.current = 0;
     setConnection("connecting");
@@ -303,6 +333,8 @@ export function useSession(request: SessionRequest, onAttached: (session: Sessio
     dismissNotice,
     send,
     cancel,
+    autoUntil,
+    setAuto,
     reconnect,
   };
 }

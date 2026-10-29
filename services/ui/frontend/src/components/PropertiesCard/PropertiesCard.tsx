@@ -9,7 +9,7 @@ import { endpointLabel, endpointRange, endpointTitle, endpointUnit, formatValue,
 import { radarData } from "../../lib/radar";
 import { ExportButtons } from "../DataTable/ExportButtons";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { SmilesText } from "../MolDepiction/SmilesText";
+import { CopySmiles } from "../MoleculesPanel/CopySmiles";
 import { RadarChart } from "./RadarChart";
 
 const RADAR_MAX = 5;
@@ -121,10 +121,13 @@ export function PropertiesCard({ panel, theme, onOpen, onOpenMolecule, limit }: 
                           className={`size-full ${molecule.ok ? "" : "opacity-60"}`}
                         />
                       </button>
-                      <span className="flex min-w-0 flex-col">
-                        <SmilesText smiles={molecule.smiles} label={molecule.label} className="max-w-28 text-[10px] @xl:max-w-44" />
-                        {!molecule.ok && <FailureReason error={molecule.error} />}
-                      </span>
+                      <CopySmiles smiles={molecule.smiles} />
+                      {(molecule.label || !molecule.ok) && (
+                        <span className="flex min-w-0 flex-col">
+                          {molecule.label && <span className="max-w-28 truncate text-[11px] font-medium @xl:max-w-44">{molecule.label}</span>}
+                          {!molecule.ok && <FailureReason error={molecule.error} />}
+                        </span>
+                      )}
                     </div>
                   ) : molecule.ok ? (
                     <span className="text-faint">—</span>

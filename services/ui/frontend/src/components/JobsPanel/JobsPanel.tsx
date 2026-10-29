@@ -10,7 +10,6 @@ import { loadRDKit, withMol } from "../../lib/rdkit";
 import {
   bestScore,
   canResume,
-  candidateScores,
   conversationJobs,
   convergenceTone,
   errorSummary,
@@ -30,7 +29,6 @@ import {
   reviewPrompt,
   scoringComponents,
   severityTone,
-  shortDate,
   stateTone,
   stepsDone,
   toneColor,
@@ -42,19 +40,18 @@ import {
   type JobSummary,
   type Tone,
 } from "../../lib/jobs";
+import { scopedJob } from "../../lib/jobScope";
 import { loadJobStructures, openRunStructure, runStructurePanel, type JobStructure } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
 import { focusRun, notifyRunsChanged, onRunsChanged, openRun, openWorkbench, useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
-import { MolDepiction } from "../MolDepiction/MolDepiction";
-import { SmilesText } from "../MolDepiction/SmilesText";
 import { ScoreTrend } from "../RunBar/ScoreTrend";
-import { StarButton } from "../Shortlist/StarButton";
 import { Badge } from "./Badge";
 import { ContinueRun } from "./ContinueRun";
+import { TopCandidates } from "./TopCandidates";
 
 interface Props {
-  /** The conversation on screen: only its runs are listed. */
+  /** The conversation on screen: its job is shown unless another is picked. */
   sessionId?: string;
   theme: Theme;
   /** Hand a request to the chat agent, for what the panel cannot do itself. */
@@ -81,9 +78,8 @@ interface Notice {
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /**
- * The REINVENT runs of this conversation (and, apart, the ones it only looked
- * at), and for the selected one its progress, score trajectory, diagnostics,
- * alerts and best molecules. Stop and resume call the tools directly behind a
+ * The Jobs tab's job (see scopedJob): its progress, score trajectory,
+ * diagnostics, alerts and best molecules. Stop and resume call the tools directly behind a
  * confirmation; anything that needs judgement (adjusting the TTP) goes to the
  * agent through onAsk.
  */
@@ -91,17 +87,15 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const [allJobs, setJobs] = useState<JobSummary[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<JobAlert[]>([]);
-  const selectedId = useFocusedRun();
+  const focused = useFocusedRun();
   const runs = useSessionRuns(sessionId);
   const owners = useJobOwners();
   const known = useRunsKnown();
-  const listed = useMemo(() => {
-    if (!allJobs || known === null) return null;
-    // A gateway that does not say who launched what: every job, as before.
-    if (!known) return { own: allJobs, seen: [] };
-    return conversationJobs(allJobs, runs, selectedId, owners, sessionId);
-  }, [allJobs, known, runs, selectedId, owners, sessionId]);
-  const jobs = useMemo(() => (listed ? [...listed.own, ...listed.seen] : null), [listed]);
+  const summary = useMemo(() => {
+    if (!allJobs || known === null) return undefined;
+    // A gateway that does not say who launched what: every job is the conversation's.
+    return scopedJob(allJobs, known ? conversationJobs(allJobs, runs, focused, owners, sessionId).own : allJobs, focused);
+  }, [allJobs, known, runs, focused, owners, sessionId]);
   const [tick, setTick] = useState(0);
   const [status, setStatus] = useState<Loaded<JobStatus | null> | null>(null);
   const [candidates, setCandidates] = useState<Loaded<Candidate[]> | null>(null);
@@ -109,11 +103,10 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  const activeId = selectedId && jobs?.some((j) => j.id === selectedId) ? selectedId : (jobs?.[0]?.id ?? null);
-  const summary = jobs?.find((j) => j.id === activeId) ?? null;
+  const activeId = summary?.id ?? null;
   const current = status && status.id === activeId ? status : null;
-  const job: JobSummary | JobStatus | null = current?.value ?? summary;
-  const live = (jobs ?? []).some((j) => isActive(j.state));
+  const job: JobSummary | JobStatus | null = current?.value ?? summary ?? null;
+  const live = summary ? isActive(summary.state) : false;
   const refresh = () => setTick((t) => t + 1);
 
   useEffect(() => onRunsChanged(() => setTick((t) => t + 1)), []);
@@ -193,8 +186,9 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     return () => window.clearInterval(timer);
   }, [live]);
 
-  function select(id: string) {
-    focusRun(id);
+  const [shownId, setShownId] = useState(activeId);
+  if (shownId !== activeId) {
+    setShownId(activeId);
     setConfirm(null);
     setNotice(null);
   }
@@ -239,7 +233,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     }
   }
 
-  if (jobs === null) {
+  if (summary === undefined) {
     return (
       <Centered>
         {listError ? (
@@ -254,11 +248,10 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     );
   }
 
-  if (!jobs.length || !job) {
+  if (!job) {
     return (
       <Centered>
-        <p className="text-body font-medium">No runs in this conversation</p>
-        <p className="text-muted max-w-sm">REINVENT runs the agent launches here show up with their progress.</p>
+        <p className="text-muted">No job in this conversation yet.</p>
         <ActionButton onClick={() => onAsk("List the stored TTPs and help me start a REINVENT optimization run.")}>
           Ask the agent to start one
         </ActionButton>
@@ -279,56 +272,8 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
     if (panel) openRunStructure(sessionId ?? "new", panel);
   }
 
-  const runButton = (j: JobSummary, seen: boolean) => {
-    const count = uniqueAlerts(alerts.filter((a) => a.jobId === j.id)).length;
-    return (
-      <button
-        key={j.id}
-        type="button"
-        onClick={() => select(j.id)}
-        aria-current={j.id === job.id}
-        className={`mb-0.5 flex w-full cursor-pointer flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left ${j.id === job.id ? "bg-inset" : "hover:bg-sunken"} ${seen ? "opacity-70" : ""}`}
-      >
-        <span className="flex w-full items-center gap-1.5">
-          <b className={`min-w-0 flex-1 truncate ${seen ? "font-medium" : "font-semibold"}`}>{jobTitle(j)}</b>
-          {count > 0 && (
-            <span className="shrink-0 text-[10px] font-semibold" style={{ color: toneColor("bad") }} title={`${count} alert${count === 1 ? "" : "s"}`}>
-              ⚠ {count}
-            </span>
-          )}
-        </span>
-        <span className="text-faint w-full truncate font-mono text-[10px]">
-          {j.id} · {shortDate(j.createdAt)}
-        </span>
-        <Badge tone={stateTone(j.state)}>{j.state}</Badge>
-      </button>
-    );
-  };
-
   return (
     <div className="@container flex h-full min-h-0 text-xs">
-      {jobs.length > 1 && (
-        <aside className="border-subtle w-44 shrink-0 overflow-y-auto border-r p-2 @2xl:w-52">
-          <div className="mb-1 flex items-center px-1">
-            <h3 className="text-faint text-[10px] font-semibold tracking-wider uppercase">Runs</h3>
-            <span className="text-faint ml-1 text-[10px]">{listed?.own.length ?? 0}</span>
-            <button type="button" onClick={refresh} title="Refresh" aria-label="Refresh" className="text-faint hover:text-body ml-auto cursor-pointer p-0.5">
-              <RefreshIcon />
-            </button>
-          </div>
-          {listError && <p className="px-1 pb-1 text-[10px]" style={{ color: "var(--color-accent)" }}>{listError}</p>}
-          {listed?.own.map((j) => runButton(j, false))}
-          {listed && listed.seen.length > 0 && (
-            <>
-              <h3 className="text-faint mt-2 mb-1 px-1 text-[10px]" title="Runs launched elsewhere that this conversation looked at">
-                Seen here
-              </h3>
-              {listed.seen.map((j) => runButton(j, true))}
-            </>
-          )}
-        </aside>
-      )}
-
       <div className="min-w-0 flex-1 overflow-y-auto p-3">
         <header className="flex flex-wrap items-start gap-2">
           <div className="min-w-0 flex-1">
@@ -337,6 +282,9 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
               <Badge tone={stateTone(job.state)}>{job.state}</Badge>
               {diagnostics?.convergence && <Badge tone={convergenceTone(diagnostics.convergence)}>{diagnostics.convergence}</Badge>}
               <ScoreTrend status={s} width={72} className="hidden @md:block" />
+              <button type="button" onClick={refresh} title="Refresh" aria-label="Refresh" className="text-faint hover:text-body cursor-pointer p-0.5">
+                <RefreshIcon />
+              </button>
             </h2>
             <div className="-ml-1.5 mt-1 flex flex-wrap items-center gap-0.5">
               {[
@@ -392,6 +340,7 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
         {confirm === "continue" && canResume(job) && (
           <ContinueRun key={job.id} job={job} running={allJobs?.find((j) => isActive(j.state)) ?? null} onClose={() => setConfirm(null)} onAsk={onAsk} />
         )}
+        {listError && <Note tone="bad">Could not refresh the jobs: {listError}</Note>}
         {busy && <Note tone="info">Working… stopping a run waits for REINVENT to write its checkpoint.</Note>}
         {notice && (
           <Note tone={notice.tone}>
@@ -518,67 +467,15 @@ export function JobsPanel({ sessionId, theme, onAsk, onOpenMolecule }: Props) {
             ) : !top.value.length ? (
               <p className="text-faint">No valid molecules yet.</p>
             ) : (
-              <div className="-mx-3 overflow-x-auto">
-                <table className="w-full text-[11px]">
-                  <thead>
-                    <tr className="text-muted border-subtle border-b text-left">
-                      <th className="px-3 py-1.5 font-medium">Molecule</th>
-                      <th className="px-2 py-1.5 text-right font-medium">Total</th>
-                      {top.value[0].components.map((c) => (
-                        <th key={c.name} className="max-w-24 truncate px-2 py-1.5 text-right font-medium" title={c.name}>
-                          {c.name}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {top.value.map((c) => {
-                      const complex = complexes?.get(c.smiles);
-                      return (
-                        <tr key={c.smiles} className="group border-subtle border-b last:border-b-0">
-                          <td className="px-3 py-1">
-                            <span className="flex items-center gap-2">
-                              <StarButton smiles={c.smiles} source={job.id} values={() => candidateScores(c)} session={sessionId ?? "new"} />
-                              <button
-                                type="button"
-                                onClick={() => onOpenMolecule?.(c.smiles, { run: job.id })}
-                                disabled={!onOpenMolecule}
-                                className="enabled:hover:bg-inset h-12 w-16 shrink-0 rounded enabled:cursor-pointer"
-                                title="Open the 2D drawing"
-                              >
-                                <MolDepiction smiles={c.smiles} theme={theme} width={128} height={96} className="size-full" />
-                              </button>
-                              <span className="flex min-w-0 flex-col items-start">
-                                <SmilesText smiles={c.smiles} className="max-w-28 text-[10px] @xl:max-w-44" />
-                                {complex && (
-                                  <button
-                                    type="button"
-                                    onClick={() => showComplex(complex)}
-                                    title={`Show the Boltz complex${complex.step !== null ? ` from step ${complex.step}` : ""} in the viewer`}
-                                    className="hover:bg-inset -ml-1 cursor-pointer rounded px-1 py-0.5 text-[10px] font-semibold"
-                                    style={{ color: "var(--color-structure)" }}
-                                  >
-                                    3D
-                                  </button>
-                                )}
-                              </span>
-                            </span>
-                          </td>
-                          <td className="px-2 py-1 text-right font-mono font-semibold tabular-nums">{fmt(c.total)}</td>
-                          {top.value[0].components.map((col) => {
-                            const value = c.components.find((x) => x.name === col.name);
-                            return (
-                              <td key={col.name} className="px-2 py-1 text-right font-mono tabular-nums" title={value?.raw != null ? `raw ${value.raw}` : undefined}>
-                                {fmt(value?.transformed, 2)}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <TopCandidates
+                candidates={top.value}
+                complexes={complexes}
+                jobId={job.id}
+                session={sessionId ?? "new"}
+                theme={theme}
+                onOpen={onOpenMolecule && ((smiles) => onOpenMolecule(smiles, { run: job.id }))}
+                onOpenStructure={showComplex}
+              />
             )}
           </Card>
         )}

@@ -160,6 +160,16 @@ export interface NoticeEvent {
   message: string;
 }
 
+/**
+ * The autonomy budget changed. Like a notice it is not recorded, so a
+ * browser that reconnects reads the deadline from the session summary.
+ */
+export interface AutoEvent {
+  type: "auto";
+  /** ISO 8601, UTC; null when the agent no longer works on its own. */
+  until: string | null;
+}
+
 export interface UserMessageEvent extends Recorded {
   type: "user_message";
   content: string;
@@ -199,6 +209,8 @@ export interface AssistantMessageEvent extends Recorded {
 export interface StatusEvent extends Recorded {
   type: "status";
   state: "busy" | "idle";
+  /** Set when the agent opened this turn by itself, under its autonomy budget. */
+  auto?: boolean;
 }
 
 export interface CancelledEvent extends Recorded {
@@ -233,13 +245,19 @@ export type ConversationEvent =
   | MonitorAlertEvent
   | MonitorResponseEvent;
 
-export type AgentEvent = ReadyEvent | SessionEvent | NoticeEvent | ConversationEvent;
+export type AgentEvent = ReadyEvent | SessionEvent | NoticeEvent | AutoEvent | ConversationEvent;
 
 /** How hard the model reasons on a turn; the gateway sets it on the session's backend. */
 export type Effort = "low" | "medium" | "high";
 
-/** What the browser sends. */
-export type ClientMessage = { type: "user_message"; content: string; effort?: Effort } | { type: "cancel" };
+/**
+ * What the browser sends. An *auto* of more than 0 minutes starts or extends
+ * the autonomy budget, 0 ends it; the gateway caps it.
+ */
+export type ClientMessage =
+  | { type: "user_message"; content: string; effort?: Effort }
+  | { type: "cancel" }
+  | { type: "auto"; minutes: number };
 
 // ---------------------------------------------------------------------------
 // models — which model answers, and switching to the other one
@@ -280,6 +298,8 @@ export interface SessionSummary {
   updated: string;
   turns: number;
   busy: boolean;
+  /** End of the autonomy budget, ISO 8601 UTC; null when there is none. */
+  auto_until?: string | null;
   inputTokens?: number;
   outputTokens?: number;
   /** The REINVENT jobs of the conversation; absent when it has none. */
@@ -335,6 +355,8 @@ export interface AgentTurn {
   /** Epoch ms when it ended; unset while running. */
   endedAt?: number;
   blocks: TurnBlock[];
+  /** The agent started this turn by itself, under its autonomy budget. */
+  auto?: boolean;
   /** Set once the turn finishes; drives the "working" indicator. */
   done: boolean;
   tokens?: { input: number; output: number };

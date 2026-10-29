@@ -4,45 +4,24 @@
 import { memo, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import type { StructurePanel } from "../../types/api";
 import type { Theme } from "../../hooks/useTheme";
-import { structureTitle, type Artifacts } from "../../lib/artifacts";
-import { clock } from "../../lib/format";
-import {
-  DOCK_DEFAULT_WIDTH,
-  DOCK_MIN_WIDTH,
-  DOCK_TABS,
-  clampWidth,
-  closeTab,
-  dockRoom,
-  dockTabOf,
-  loadTabs,
-  loadWidth,
-  openTab,
-  saveTabs,
-  saveWidth,
-  type DockTab,
-  type DockView,
-} from "../../lib/dock";
-import { serviceName } from "../../lib/properties";
+import type { Artifacts } from "../../lib/artifacts";
+import { DOCK_DEFAULT_WIDTH, DOCK_MIN_WIDTH, DOCK_TABS, clampWidth, dockRoom, dockTabOf, loadWidth, saveWidth, type DockTab, type DockView } from "../../lib/dock";
 import { sendToViewer } from "../../lib/viewerBus";
 import { onMoleculeRequest, type MoleculeContext } from "../../lib/moleculePage";
 import { StructureWorkspace } from "../StructureWorkspace/StructureWorkspace";
-import { PropertiesCard } from "../PropertiesCard/PropertiesCard";
-import { MolDepiction } from "../MolDepiction/MolDepiction";
 import { MoleculePage } from "../MoleculePage/MoleculePage";
+import { MoleculesPanel } from "../MoleculesPanel/MoleculesPanel";
 import { extractTargetFacts, toolEvents } from "../../lib/ttp";
 import { candidatesOf } from "../../lib/candidates";
-import { CandidatesPanel } from "../CandidatesPanel/CandidatesPanel";
 import { JobsPanel } from "../JobsPanel/JobsPanel";
 import { RunResults } from "../RunResults/RunResults";
 import { RunAnalysis } from "../RunAnalysis/RunAnalysis";
 import { TtpPanel } from "../TtpPanel/TtpPanel";
-import { TargetCard } from "../TargetCard/TargetCard";
+import { TargetPanel } from "../TargetCard/TargetPanel";
 import { AssetsPanel } from "../AssetsPanel/AssetsPanel";
-import { ShortlistPanel } from "../Shortlist/ShortlistPanel";
-import { StarButton } from "../Shortlist/StarButton";
-import { useShortlist } from "../../lib/shortlist";
+import { JobPicker } from "../JobPicker/JobPicker";
 
-/** A tab, or a view inside one: "candidates" and "properties" open in Molecules, "activity" (Analysis) in Jobs. */
+/** A tab, or a view inside one: "candidates" and "properties" open Molecules, "results" and "activity" (Analysis) views of Jobs. */
 export type WorkbenchTab = DockView;
 export type WorkbenchLayout = "sidebar" | "sheet";
 
@@ -60,23 +39,18 @@ interface Props {
   /** Put a prompt in the composer. */
   onAsk: (text: string) => void;
   onClose: () => void;
-  /** Bump to re-open `tab` even when it did not change (e.g. after its dock tab was closed). */
+  /** Bump to show `tab` afresh even when it did not change (e.g. back to a list from a molecule page). */
   openSeq?: number;
 }
 
 const LABEL: Record<DockTab, string> = {
   structure: "Structure",
   molecules: "Molecules",
-  tables: "Tables",
   jobs: "Jobs",
-  results: "Results",
   target: "Target",
   ttp: "TTP",
   assets: "Assets",
 };
-/** The tabs the dock offers; "tables" is gone, though saved tab lists and old links may still name it. */
-const TABS: readonly DockTab[] = DOCK_TABS.filter((id) => id !== "tables" && id !== "results");
-const openable = (ids: readonly DockTab[], id: DockTab) => (TABS.includes(id) ? openTab(ids, id) : [...ids]);
 /** Tabs a molecule page opens over; from any other, it opens over Molecules. */
 const PAGE_TABS: readonly DockTab[] = ["molecules", "jobs"];
 
@@ -88,14 +62,8 @@ interface Page {
 }
 type Show = (smiles: string, context?: MoleculeContext) => void;
 
-const MOLECULE_VIEWS = [
-  { id: "candidates", label: "Candidates" },
-  { id: "molecules", label: "All" },
-  { id: "properties", label: "Properties" },
-  { id: "shortlist", label: "Shortlist" },
-] as const;
 const JOB_VIEWS = [
-  { id: "jobs", label: "Jobs" },
+  { id: "jobs", label: "Summary" },
   { id: "results", label: "Results" },
   // The view id predates the Analysis view; dock.ts and the workbench bus still call it "activity".
   { id: "activity", label: "Analysis" },
@@ -124,75 +92,38 @@ export const Workbench = memo(function Workbench(props: Props) {
     };
   }, [isSheet, onClose]);
 
-  const candidateCount = candidatesOf(artifacts).length;
-  const starred = useShortlist(sessionId ?? "new").length;
-  const counts: Record<WorkbenchTab, number> = {
-    structure: artifacts.structures.length,
-    candidates: candidateCount,
-    molecules: artifacts.molecules.length,
-    properties: artifacts.properties.length,
-    shortlist: starred,
-    jobs: 0,
-    results: 0,
-    ttp: 0,
-    target: 0,
-    assets: 0,
-    tables: 0,
-    activity: 0,
-  };
+  const active = dockTabOf(tab);
 
-  const labelOf = (id: DockTab) => (id === "structure" && props.activeStructure ? structureTitle(props.activeStructure) : LABEL[id]);
-  const current = dockTabOf(tab);
-
-  // Open tabs, editor-style. Synced from the `tab` prop during render (no effect).
-  const [openIds, setOpenIds] = useState<DockTab[]>(() => openable(loadTabs(sessionId, TABS) ?? [], current));
-  /** The view each merged tab showed last, so going back to it lands where the user left. */
-  const [lastView, setLastView] = useState<Partial<Record<DockTab, WorkbenchTab>>>(() => ({ [current]: tab }));
+  /** The view each merged tab showed last, so going back to it lands where the user left. Synced from the `tab` prop during render. */
+  const [lastView, setLastView] = useState<Partial<Record<DockTab, WorkbenchTab>>>(() => ({ [active]: tab }));
   // A molecule picked in the chat arrives as `selectedSmiles` with the Molecules tab.
-  const [page, setPage] = useState<Page | null>(() => (selectedSmiles && current === "molecules" ? { tab: current, smiles: selectedSmiles } : null));
+  const [page, setPage] = useState<Page | null>(() => (selectedSmiles && active === "molecules" ? { tab: active, smiles: selectedSmiles } : null));
   const [seen, setSeen] = useState({ sessionId, tab, openSeq, selectedSmiles });
   if (seen.sessionId !== sessionId) {
     setSeen({ sessionId, tab, openSeq, selectedSmiles });
-    setOpenIds(openable(loadTabs(sessionId, TABS) ?? [], current));
     setPage(null);
   } else if (seen.tab !== tab || seen.openSeq !== openSeq || seen.selectedSmiles !== selectedSmiles) {
     setSeen({ sessionId, tab, openSeq, selectedSmiles });
-    if (selectedSmiles && selectedSmiles !== seen.selectedSmiles) setPage({ tab: current, smiles: selectedSmiles });
+    if (selectedSmiles && selectedSmiles !== seen.selectedSmiles) setPage({ tab: active, smiles: selectedSmiles });
     // "Open candidates" and the like ask for the list.
-    else if (seen.openSeq !== openSeq && page?.tab === current) setPage(null);
-    if (seen.tab !== tab || seen.openSeq !== openSeq) {
-      setOpenIds((ids) => openable(ids, current));
-      setLastView((views) => ({ ...views, [current]: tab }));
-    }
+    else if (seen.openSeq !== openSeq && page?.tab === active) setPage(null);
+    if (seen.tab !== tab) setLastView((views) => ({ ...views, [active]: tab }));
   }
-  useEffect(() => saveTabs(sessionId, openIds), [sessionId, openIds]);
   // Cleared once its page is closed, so picking the same molecule in the chat again opens it again.
   useEffect(() => {
     if (!page && selectedSmiles) onSelectSmiles(null);
   }, [page, selectedSmiles, onSelectSmiles]);
 
-  const viewOf = (id: DockTab): WorkbenchTab => lastView[id] ?? (id === "molecules" && candidateCount > 0 ? "candidates" : id);
-  const active = openIds.includes(current) ? current : null;
-  const close = (id: DockTab) => {
-    const next = closeTab(openIds, id, active);
-    setOpenIds(next.tabs);
-    if (next.active && next.active !== current) onTabChange(viewOf(next.active));
-  };
-  const open = (id: DockTab) => {
-    setOpenIds((ids) => openTab(ids, id));
-    onTabChange(viewOf(id));
-  };
+  const viewOf = (id: DockTab): WorkbenchTab => lastView[id] ?? id;
   const show: Show = (smiles, context) => {
-    const here = active && PAGE_TABS.includes(active) ? active : "molecules";
+    const here = PAGE_TABS.includes(active) ? active : "molecules";
     setPage({ tab: here, smiles, ...(context ? { context } : {}) });
-    if (here !== active) open(here);
+    if (here !== active) onTabChange(viewOf(here));
   };
   useEffect(() => onMoleculeRequest(({ smiles, context }) => show(smiles, context)));
   const shown = page && page.tab === active ? page : null;
 
-  const [menu, setMenu] = useState(false);
   const [width, setWidth] = useState<number | null>(() => loadWidth());
-  const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [aside, setAside] = useState<HTMLElement | null>(null);
   const room = useDockRoom(aside, !isSheet);
@@ -200,11 +131,11 @@ export const Workbench = memo(function Workbench(props: Props) {
   const shell = isSheet
     ? "fixed inset-0 z-50 flex flex-col bg-raised"
     : "relative flex shrink-0 flex-col border-l border-subtle bg-raised";
-  // Whatever the saved width or the expanded state, the chat keeps CHAT_MIN_WIDTH.
+  // Whatever the saved width, the chat keeps CHAT_MIN_WIDTH.
   const style: CSSProperties | undefined = isSheet
     ? undefined
     : {
-        width: expanded ? `${room}px` : width ? `${clampWidth(width, window.innerWidth, room)}px` : `min(${DOCK_DEFAULT_WIDTH}, ${room}px)`,
+        width: width ? `${clampWidth(width, window.innerWidth, room)}px` : `min(${DOCK_DEFAULT_WIDTH}, ${room}px)`,
         minWidth: Math.min(DOCK_MIN_WIDTH, room),
         maxWidth: `${room}px`,
       };
@@ -223,7 +154,6 @@ export const Workbench = memo(function Workbench(props: Props) {
           }}
           onPointerMove={(event) => {
             if (!dragging) return;
-            setExpanded(false);
             setWidth(clampWidth(window.innerWidth - event.clientX, window.innerWidth, room));
           }}
           onPointerUp={(event) => {
@@ -238,103 +168,37 @@ export const Workbench = memo(function Workbench(props: Props) {
       )}
       <div className="border-subtle bg-sunken flex shrink-0 items-stretch gap-1 border-b pr-1">
         <div role="tablist" aria-label="Workbench" className="flex min-w-0 flex-1 overflow-x-auto">
-          {openIds.map((id) => {
+          {DOCK_TABS.map((id) => {
             const selected = id === active;
             return (
-              <div
+              <button
                 key={id}
-                className={`group flex shrink-0 items-center border-b-2 ${
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => onTabChange(viewOf(id))}
+                className={`shrink-0 cursor-pointer border-b-2 px-3.5 py-2 text-xs whitespace-nowrap ${
                   selected ? "bg-raised text-body" : "text-muted hover:text-body border-b-transparent"
                 }`}
                 style={selected ? { borderBottomColor: "var(--color-accent)" } : undefined}
               >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selected}
-                  onClick={() => onTabChange(viewOf(id))}
-                  className="flex max-w-56 cursor-pointer items-center py-2 pr-1 pl-3.5 text-xs whitespace-nowrap"
-                >
-                  <span className="truncate">{labelOf(id)}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => close(id)}
-                  aria-label={`Close ${labelOf(id)}`}
-                  title="Close tab"
-                  className={`text-faint hover:text-body hover:bg-inset mr-1.5 grid size-5 cursor-pointer place-items-center rounded text-sm leading-none touch:opacity-100 ${
-                    selected ? "" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                  }`}
-                >
-                  ×
-                </button>
-              </div>
+                {LABEL[id]}
+              </button>
             );
           })}
         </div>
-        <div className="relative flex shrink-0 items-center gap-0.5">
-          <button
-            type="button"
-            onClick={() => setMenu((value) => !value)}
-            aria-haspopup="menu"
-            aria-expanded={menu}
-            aria-label="Open a panel"
-            title="Open a panel"
-            className="text-muted hover:text-body hover:bg-inset grid size-7 cursor-pointer place-items-center rounded-md text-base touch:size-11"
-          >
-            +
-          </button>
-          {menu && (
-            <>
-              <button type="button" aria-label="Close menu" tabIndex={-1} className="fixed inset-0 z-30 cursor-default" onClick={() => setMenu(false)} />
-              <ul role="menu" className="bg-raised border-subtle shadow-card absolute top-full right-0 z-40 mt-1 w-48 rounded-lg border py-1">
-                {TABS.map((id) => (
-                  <li key={id} role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setMenu(false);
-                        open(id);
-                      }}
-                      className={`hover:bg-sunken flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs ${
-                        openIds.includes(id) ? "text-body" : "text-muted"
-                      }`}
-                    >
-                      <span className="flex-1">{LABEL[id]}</span>
-                      {counts[id] > 0 && <span className="text-faint text-[11px] tabular-nums">{counts[id]}</span>}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          {!isSheet && (
-            <button
-              type="button"
-              onClick={() => setExpanded((value) => !value)}
-              aria-pressed={expanded}
-              aria-label={expanded ? "Restore the workbench width" : "Expand the workbench"}
-              title={expanded ? "Restore" : "Expand"}
-              className="text-muted hover:text-body hover:bg-inset grid size-7 cursor-pointer place-items-center rounded-md text-sm"
-            >
-              {expanded ? "⇥" : "⇤"}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close the workbench"
-            title="Close the workbench"
-            className="text-muted hover:text-body hover:bg-inset grid size-7 cursor-pointer place-items-center rounded-md text-base touch:size-11"
-          >
-            ×
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Hide the workbench"
+          title="Hide the workbench"
+          className="text-muted hover:text-body grid size-8 shrink-0 cursor-pointer place-items-center self-center rounded-lg text-sm touch:size-11"
+        >
+          ›
+        </button>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {active === null && <DockEmpty />}
         {shown && (
           <MoleculePage
             key={shown.smiles}
@@ -350,22 +214,11 @@ export const Workbench = memo(function Workbench(props: Props) {
         {/* Hidden rather than unmounted under a page, so going back finds the list as it was. */}
         <div className={shown ? "hidden" : "contents"}>
           {active === "structure" && <StructureTab {...props} />}
-          {active === "molecules" && (
-            <>
-              <ViewSwitch label="Molecules" views={MOLECULE_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
-              {tab === "candidates" && (
-                <div className="min-h-0 flex-1">
-                  <CandidatesPanel artifacts={artifacts} theme={props.theme} onOpenMolecule={show} onAsk={props.onAsk} />
-                </div>
-              )}
-              {tab === "molecules" && <MoleculesTab {...props} onOpen={show} />}
-              {tab === "properties" && <PropertiesTab {...props} onOpen={show} />}
-              {tab === "shortlist" && <ShortlistPanel artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />}
-            </>
-          )}
+          {active === "molecules" && <MoleculesPanel artifacts={artifacts} theme={props.theme} sessionId={sessionId} onOpenMolecule={show} onAsk={props.onAsk} />}
           {active === "jobs" && (
             <>
-              <ViewSwitch label="Jobs" views={JOB_VIEWS} value={tab} counts={counts} onChange={onTabChange} />
+              <JobPicker sessionId={sessionId} />
+              <ViewSwitch label="Jobs" views={JOB_VIEWS} value={tab} onChange={onTabChange} />
               {tab === "jobs" && (
                 <div className="min-h-0 flex-1">
                   <JobsPanel sessionId={sessionId ?? undefined} theme={props.theme} onAsk={props.onAsk} onOpenMolecule={show} />
@@ -393,12 +246,11 @@ export const Workbench = memo(function Workbench(props: Props) {
 /** The tabs about the campaign rather than its results: the profile, the target and the files. */
 function ContextTab({ tab, artifacts, sessionId, onAsk }: Props) {
   const events = useMemo(() => toolEvents(artifacts.steps), [artifacts.steps]);
-  const facts = useMemo(() => extractTargetFacts(events), [events]);
   const molecules = useMemo(() => candidatesOf(artifacts).map((c) => ({ smiles: c.smiles, label: c.name })), [artifacts]);
   if (tab === "target") {
     return (
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <TargetCard facts={facts} onAsk={onAsk} />
+        <TargetPanel events={events} onAsk={onAsk} />
       </div>
     );
   }
@@ -427,89 +279,16 @@ function StructureTab({ artifacts, activeStructure, onSelectStructure, theme, on
   );
 }
 
-function PropertiesTab({ artifacts, theme, onOpen }: Props & { onOpen: Show }) {
-  if (artifacts.properties.length === 0) {
-    return <Empty>No predictions yet. ADMET and RetroDMTA predictions appear here, molecules by endpoints.</Empty>;
-  }
-  return (
-    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
-      {artifacts.properties.map(({ item, tool, at }, index) => (
-        <section key={index}>
-          <h3 className="text-muted mb-1 flex gap-2 text-[11px] font-medium">
-            <span>{serviceName(item)}</span>
-            <span className="text-faint font-mono">{tool}</span>
-            <span className="text-faint ml-auto">{clock(at)}</span>
-          </h3>
-          <PropertiesCard panel={item} theme={theme} onOpenMolecule={onOpen} />
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function MoleculesTab({ artifacts, theme, sessionId, onOpen }: Props & { onOpen: Show }) {
-  const [query, setQuery] = useState("");
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return artifacts.molecules;
-    return artifacts.molecules.filter(
-      ({ item, tool }) => item.smiles.toLowerCase().includes(needle) || (item.label ?? "").toLowerCase().includes(needle) || tool.includes(needle),
-    );
-  }, [artifacts.molecules, query]);
-
-  if (artifacts.molecules.length === 0) {
-    return <Empty>No molecules yet. Candidates, seeds and compounds the agent looks up are collected here.</Empty>;
-  }
-
-  return (
-    <>
-      <div className="border-subtle shrink-0 border-b px-3 py-2">
-        <input
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Filter by SMILES, name or tool"
-          aria-label="Filter molecules"
-          className="bg-sunken border-subtle w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none focus:border-strong"
-        />
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <ul className="grid grid-cols-2 gap-2 xl:grid-cols-3">
-          {shown.map(({ item, tool }) => (
-            <li key={item.smiles} className="relative">
-              <StarButton smiles={item.smiles} label={item.label} source={tool} session={sessionId ?? "new"} className="absolute top-1 right-1 z-10" />
-              <button
-                type="button"
-                onClick={() => onOpen(item.smiles)}
-                title={item.smiles}
-                className="bg-sunken border-subtle hover:border-strong w-full cursor-pointer overflow-hidden rounded-lg border text-left"
-              >
-                <MolDepiction smiles={item.smiles} theme={theme} width={200} height={140} className="h-28 w-full p-1" />
-                <span className="border-subtle block truncate border-t px-2 py-1 text-[10px]">
-                  <span className="font-semibold">{item.label ?? "Molecule"}</span>
-                  <span className="text-faint"> · {tool}</span>
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </>
-  );
-}
-
 /** The quiet switch between the views a merged tab holds. */
 function ViewSwitch({
   label,
   views,
   value,
-  counts,
   onChange,
 }: {
   label: string;
   views: readonly { id: WorkbenchTab; label: string }[];
   value: WorkbenchTab;
-  counts: Record<WorkbenchTab, number>;
   onChange: (view: WorkbenchTab) => void;
 }) {
   return (
@@ -522,12 +301,9 @@ function ViewSwitch({
             type="button"
             aria-pressed={selected}
             onClick={() => onChange(view.id)}
-            className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1 text-xs touch:min-h-11 ${
-              selected ? "bg-inset text-body" : "text-muted hover:text-body"
-            }`}
+            className={`cursor-pointer rounded-md px-2.5 py-1 text-xs touch:min-h-11 ${selected ? "bg-inset text-body" : "text-muted hover:text-body"}`}
           >
             {view.label}
-            {counts[view.id] > 0 && <span className="text-faint text-[11px] tabular-nums">{counts[view.id]}</span>}
           </button>
         );
       })}
@@ -561,16 +337,6 @@ function useDockRoom(aside: HTMLElement | null, on: boolean): number {
     };
   }, [aside, on]);
   return room;
-}
-
-function DockEmpty() {
-  return (
-    <div className="grid flex-1 place-items-center px-10 text-center">
-      <p className="text-faint max-w-72 text-xs leading-relaxed">
-        Structures, molecules and jobs open here. Click a result in the conversation, or use + to open a panel.
-      </p>
-    </div>
-  );
 }
 
 function Empty({ children }: { children: ReactNode }) {

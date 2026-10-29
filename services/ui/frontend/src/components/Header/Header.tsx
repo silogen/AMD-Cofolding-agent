@@ -13,9 +13,6 @@ interface Props {
   agent: AgentInfo | null;
   gatewayError: string | null;
   title: string;
-  /** The protein this conversation works on, once a tool has named it. */
-  target: string | null;
-  onShowTarget: () => void;
   busy: boolean;
   onReconnect: () => void;
   railOpen: boolean;
@@ -33,8 +30,8 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
 };
 
 /**
- * The head of the chat column: which conversation this is, on which target,
- * and whether the agent can be reached. The product name and the model live
+ * The head of the chat column: which conversation this is and whether the
+ * agent can be reached. The product name and the model live
  * in the conversation rail, so this line stays about the work.
  */
 export function Header({
@@ -44,8 +41,6 @@ export function Header({
   agent,
   gatewayError,
   title,
-  target,
-  onShowTarget,
   busy,
   onReconnect,
   railOpen,
@@ -72,21 +67,7 @@ export function Header({
         <h1 className="truncate text-sm font-semibold" title={title}>
           {title || "New conversation"}
         </h1>
-        <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] whitespace-nowrap">
-          {target ? (
-            <button
-              type="button"
-              onClick={onShowTarget}
-              title="Show the target"
-              className="border-subtle text-muted hover:text-body min-w-0 cursor-pointer truncate rounded-full border px-2"
-            >
-              {target}
-            </button>
-          ) : (
-            <span className="text-faint">No target yet</span>
-          )}
-          {busy && <span className="text-faint shrink-0">working…</span>}
-        </div>
+        {busy && <p className="text-faint mt-0.5 text-[11px]">working…</p>}
       </div>
 
       <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it, vi } from "vitest";
-import { focusedRun, notifyRunsChanged, onRunsChanged, onWorkbenchRequest, openRun, openWorkbench } from "./workbenchBus";
+import { focusRun, focusedRun, notifyRunsChanged, onRunsChanged, onWorkbenchRequest, openRun, openWorkbench } from "./workbenchBus";
 
 describe("workbenchBus", () => {
   it("delivers requests to listeners until they unsubscribe", () => {
@@ -22,6 +22,12 @@ describe("workbenchBus", () => {
     expect(focusedRun()).toBe("abc123");
     expect(listener).toHaveBeenCalledWith("results");
     off();
+  });
+
+  it("clears the focus", () => {
+    openRun("abc123");
+    focusRun(null);
+    expect(focusedRun()).toBeNull();
   });
 
   it("tells listeners the runs changed", () => {

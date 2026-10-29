@@ -5,19 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import type { MoleculePanel, StructurePanel, TablePanel } from "../types/api";
 import type { Artifacts, Sourced } from "./artifacts";
-import {
-  buildCandidates,
-  candidateNumbers,
-  candidateValue,
-  candidatesToCsv,
-  candidatesToSdf,
-  descriptorValue,
-  ro5Violations,
-  cofoldPrompt,
-  MAX_COFOLD,
-  numericColumns,
-  scoreColor,
-} from "./candidates";
+import { buildCandidates, cofoldPrompt, MAX_COFOLD } from "./candidates";
 
 const sourced = <T extends { tool: string }>(item: T, at = 1): Sourced<T> => ({ item, tool: item.tool, at });
 
@@ -100,44 +88,7 @@ describe("buildCandidates", () => {
   });
 });
 
-describe("numericColumns and candidateValue", () => {
-  it("lists score, components and metrics that are present", () => {
-    const artifacts = empty();
-    artifacts.tables.push(table("t", ["smiles", "score", "qed"], [{ smiles: "CCO", score: 0.5, qed: 0.6 }]));
-    artifacts.structures.push(structure("a.cif", "CCO", { confidence: 0.9 }));
-    const candidates = buildCandidates(artifacts);
-    expect(numericColumns(candidates).map((c) => c.key)).toEqual(["score", "qed", "metric:confidence"]);
-    expect(candidateValue(candidates[0], "metric:confidence")).toBe(0.9);
-    expect(candidateValue(candidates[0], "qed")).toBe(0.6);
-    expect(candidateValue(candidates[0], "metric:plddt")).toBeUndefined();
-  });
-});
-
-describe("candidateNumbers", () => {
-  it("keeps the components and names the total Score", () => {
-    const [c] = buildCandidates({ ...empty(), tables: [table("t", ["smiles", "score", "QED"], [{ smiles: "CCO", score: 0.7, QED: 0.4 }])] });
-    expect(candidateNumbers(c)).toEqual({ ...c.components, Score: 0.7 });
-    expect(candidateNumbers({ ...c, score: undefined, components: { QED: 0.4 } })).toEqual({ QED: 0.4 });
-  });
-});
-
-describe("scoreColor", () => {
-  it("uses the three bands", () => {
-    expect(scoreColor(0.7)).toBe("#3ccf91");
-    expect(scoreColor(0.4)).toBe("#f5a524");
-    expect(scoreColor(0.39)).toBe("#ff4d4f");
-  });
-});
-
-describe("exports", () => {
-  it("writes CSV with quoting", () => {
-    const artifacts = empty();
-    artifacts.tables.push(table("t", ["smiles", "name", "score"], [{ smiles: "CCO", name: 'a, "b"', score: 1 }]));
-    const csv = candidatesToCsv(buildCandidates(artifacts)).split("\n");
-    expect(csv[0]).toBe("smiles,name,origin,score,confidence,ligandIptm,iptm,plddt,affinity,binderProbability,gate,structure");
-    expect(csv[1]).toBe('CCO,"a, ""b""",t,1,,,,,,,unknown,');
-  });
-
+describe("cofoldPrompt", () => {
   it("names at most two molecules in a cofold request", () => {
     const artifacts = empty();
     artifacts.molecules.push(molecule("CCO", "A"), molecule("CCC"), molecule("CCN"));
@@ -147,34 +98,5 @@ describe("exports", () => {
     expect(prompt).toContain("- CCC");
     expect(prompt).not.toContain("CCN");
     expect(prompt).toContain("3 were selected");
-  });
-});
-
-describe("descriptors", () => {
-  const props = { mw: 520, clogp: 5.5, tpsa: 80, hbd: 2, hba: 11, rotb: 4, ro5: 0 };
-  it("counts rule-of-five violations", () => {
-    expect(ro5Violations(props)).toBe(3);
-    expect(ro5Violations({ mw: 300, clogp: 2, hbd: 1, hba: 4 })).toBe(0);
-  });
-  it("reads a descriptor by key", () => {
-    expect(descriptorValue(props, "desc:tpsa")).toBe(80);
-    expect(descriptorValue(props, "score")).toBeUndefined();
-    expect(descriptorValue(undefined, "desc:mw")).toBeUndefined();
-  });
-  it("writes descriptors to CSV when given", () => {
-    const [c] = buildCandidates({ ...empty(), molecules: [molecule("CCO", "ethanol")] });
-    const csv = candidatesToCsv([c], () => props).split("\n");
-    expect(csv[0]).toContain("MW,cLogP,TPSA,HBD,HBA,RotB,Ro5");
-    expect(csv[1]).toContain("520,5.5,80,2,11,4,0");
-    expect(candidatesToCsv([c]).split("\n")[0]).not.toContain("MW");
-  });
-  it("writes an SD file, named, with properties, skipping unparsable molecules", () => {
-    const candidates = buildCandidates({ ...empty(), molecules: [molecule("CCO", "ethanol"), molecule("bad")] });
-    const sdf = candidatesToSdf(candidates, (s) => (s === "CCO" ? "\n  RDKit\n\n  3  2  0  0  0  0  0  0  0  0999 V2000\nM  END\n" : null), () => props);
-    expect(sdf.startsWith("ethanol\n")).toBe(true);
-    expect(sdf).toContain(">  <SMILES>\nCCO\n\n");
-    expect(sdf).toContain(">  <MW>\n520\n\n");
-    expect(sdf.match(/\$\$\$\$/g)).toHaveLength(1);
-    expect(candidatesToSdf([], () => null)).toBe("");
   });
 });

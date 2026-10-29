@@ -26,6 +26,7 @@ import json
 import logging
 import random
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -145,6 +146,11 @@ def make_app() -> FastAPI:
             while True:
                 raw = await websocket.receive_text()
                 message = json.loads(raw)
+                if message.get("type") == "auto":
+                    minutes = message.get("minutes") or 0
+                    until = datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else None
+                    await websocket.send_json({"type": "auto", "until": until.isoformat() if until else None})
+                    continue
                 if message.get("type") != "user_message":
                     continue
                 await _reply(websocket, message.get("content", ""), structures)

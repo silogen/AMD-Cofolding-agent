@@ -190,34 +190,62 @@ export function moleculesOf(table: RunTable): Molecules {
     }
     return out;
   };
+  const totalAt = table.columns.findIndex((c) => c.role === "total");
+  const parts = endpointColumns(
+    totalAt >= 0 ? column(totalAt) : null,
+    table.columns.flatMap((c, at) => {
+      if (c.role !== "component") return [];
+      const rawAt = table.columns.findIndex((r) => r.role === "raw" && r.component === c.key);
+      return [{ key: c.key, score: column(at), raw: rawAt >= 0 ? column(rawAt) : null }];
+    }),
+  );
+  const step = new Int32Array(n);
+  rows.forEach((row, i) => (step[i] = row.step ?? 0));
+  const smiles = rows.map((r) => r.smiles);
+  return { n, smiles, step, rows, ...parts, index: new Map(smiles.map((s, i) => [s, i])), lastStep };
+}
+
+/** The total and each component as endpoints, raw values in their units where there are any. */
+function endpointColumns(total: Float64Array | null, components: readonly { key: string; score: Float64Array; raw: Float64Array | null }[]): Pick<Molecules, "endpoints" | "values" | "scores"> {
   const endpoints: Endpoint[] = [];
   const values = new Map<string, Float64Array>();
   const scores = new Map<string, Float64Array>();
-  const totalAt = table.columns.findIndex((c) => c.role === "total");
-  if (totalAt >= 0) {
-    const total = column(totalAt);
+  if (total) {
     endpoints.push(TOTAL_ENDPOINT);
     values.set(TOTAL, total);
     scores.set(TOTAL, total);
   }
-  table.columns.forEach((c, at) => {
-    if (c.role !== "component") return;
-    const score = column(at);
-    const rawAt = table.columns.findIndex((r) => r.role === "raw" && r.component === c.key);
-    let raw = rawAt >= 0 ? column(rawAt) : null;
-    if (raw && !raw.some(Number.isFinite)) raw = null;
+  for (const c of components) {
+    let raw = c.raw && c.raw.some(Number.isFinite) ? c.raw : null;
     const convert = raw ? ENDPOINT_TYPES.find((t) => t.match(normalName(c.key)))?.convert : undefined;
     if (raw && convert) raw = raw.map(convert);
     endpoints.push(describeEndpoint(c.key, raw));
-    values.set(c.key, raw ?? score);
-    scores.set(c.key, score);
-  });
+    values.set(c.key, raw ?? c.score);
+    scores.set(c.key, c.score);
+  }
   // Two components of one type ("Affinity" twice) go by their own names.
   for (const e of endpoints) if (endpoints.some((o) => o !== e && o.label === e.label)) e.label = e.key;
-  const step = new Int32Array(n);
-  rows.forEach((row, i) => (step[i] = row.step ?? 0));
-  const smiles = rows.map((r) => r.smiles);
-  return { n, smiles, step, rows, endpoints, values, scores, index: new Map(smiles.map((s, i) => [s, i])), lastStep };
+  return { endpoints, values, scores };
+}
+
+interface CandidateLike {
+  total: number | null;
+  components: readonly { name: string; transformed: number | null; raw: number | null }[];
+}
+
+/** get_top_candidates' molecules, one per index, as the endpoints a run's CSV gives. */
+export function candidateEndpoints(candidates: readonly CandidateLike[]): Pick<Molecules, "endpoints" | "values" | "scores"> {
+  const column = (pick: (c: CandidateLike) => number | null | undefined) =>
+    Float64Array.from(candidates, (c) => {
+      const v = pick(c);
+      return finite(v) ? v : NaN;
+    });
+  const names = [...new Set(candidates.flatMap((c) => c.components.map((x) => x.name)))];
+  const part = (c: CandidateLike, name: string) => c.components.find((x) => x.name === name);
+  return endpointColumns(
+    candidates.some((c) => finite(c.total)) ? column((c) => c.total) : null,
+    names.map((key) => ({ key, score: column((c) => part(c, key)?.transformed), raw: column((c) => part(c, key)?.raw) })),
+  );
 }
 
 // -- Numbers ---------------------------------------------------------------------

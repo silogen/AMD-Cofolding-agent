@@ -17,10 +17,9 @@ import { collectArtifacts, keepUnchanged, runOf, sameFile, structureTitle } from
 import { candidatesOf } from "./lib/candidates";
 import { availableCommands, VIEW_PREFIX } from "./lib/commands";
 import { onOpenRequest, sendToViewer } from "./lib/viewerBus";
-import { onWorkbenchRequest } from "./lib/workbenchBus";
+import { focusRun, onWorkbenchRequest } from "./lib/workbenchBus";
 import { parseViewerCommand, VIEWER_HELP, type ViewerAction } from "./lib/viewerCommands";
 import { download, sessionEvents } from "./lib/api";
-import { extractTargetFacts, toolEvents, type TargetFacts } from "./lib/ttp";
 import { downloadReport, printReport, sessionToMarkdown, slug } from "./lib/exportSession";
 import { useUserStructures, withUserStructures } from "./lib/userStructures";
 import { setShortlistSession } from "./lib/shortlist";
@@ -33,14 +32,6 @@ function sessionFromHash(): string | null {
 
 const wide = () => window.matchMedia("(min-width: 1024px)").matches;
 const NO_TOOLS: string[] = [];
-
-/** How the header names the target: "BRD4", else the TTP id, else the sequence length. */
-function targetLabel(facts: TargetFacts): string | null {
-  if (facts.gene) return facts.gene;
-  if (facts.name) return facts.name.length > 24 ? `${facts.name.slice(0, 23)}…` : facts.name;
-  if (facts.ttpId) return facts.ttpId;
-  return facts.sequenceLength ? `${facts.sequenceLength} aa protein` : null;
-}
 
 /** A structure file from the shared volume that no step of this conversation produced. */
 function structureAt(path: string): StructurePanel {
@@ -97,7 +88,6 @@ export default function App() {
   const [selectedSmiles, setSelectedSmiles] = useState<string | null>(null);
   const [hints, setHints] = useState<{ id: number; message: string }[]>([]);
   const activeStructure = picked ?? artifacts.structures[0]?.item ?? null;
-  const target = useMemo(() => targetLabel(extractTargetFacts(toolEvents(artifacts.steps))), [artifacts.steps]);
   const molecules = useMemo(() => candidatesOf(artifacts).map((c) => ({ smiles: c.smiles, label: c.name })), [artifacts]);
 
   const hint = useCallback((message: string) => setHints((list) => [...list.slice(-2), { id: Date.now(), message }]), []);
@@ -107,6 +97,8 @@ export default function App() {
     setRequest((previous) => ({ id, nonce: previous.nonce + 1 }));
     setPicked(null);
     setSelectedSmiles(null);
+    // A job picked in one conversation is not the job of the next.
+    focusRun(null);
     if (!wide()) setRailOpen(false);
   }, []);
 
@@ -228,11 +220,9 @@ export default function App() {
           ]
         : []),
       { id: "tab-structure", group: "Workbench", label: "Show the structure", run: () => showWorkbench("structure") },
-      { id: "tab-candidates", group: "Workbench", label: "Show candidates", hint: "Molecules", run: () => showWorkbench("candidates") },
-      { id: "tab-molecules", group: "Workbench", label: "Show all molecules", hint: "Molecules", run: () => showWorkbench("molecules") },
-      { id: "tab-properties", group: "Workbench", label: "Show predicted properties", hint: "Molecules", run: () => showWorkbench("properties") },
+      { id: "tab-molecules", group: "Workbench", label: "Show molecules", run: () => showWorkbench("molecules") },
       { id: "tab-jobs", group: "Workbench", label: "Show REINVENT jobs", hint: "/jobs", run: () => showWorkbench("jobs") },
-      { id: "tab-results", group: "Workbench", label: "Show run results", run: () => showWorkbench("results") },
+      { id: "tab-results", group: "Workbench", label: "Show run results", hint: "Jobs", run: () => showWorkbench("results") },
       { id: "tab-activity", group: "Workbench", label: "Show run analysis", hint: "Jobs", run: () => showWorkbench("activity") },
       { id: "tab-target", group: "Workbench", label: "Show the target", run: () => showWorkbench("target") },
       { id: "tab-ttp", group: "Workbench", label: "Show the therapeutic target profile", run: () => showWorkbench("ttp") },
@@ -338,8 +328,6 @@ export default function App() {
             agent={agent}
             gatewayError={chat.gatewayError}
             title={session?.title ?? ""}
-            target={target}
-            onShowTarget={() => showWorkbench("target")}
             busy={busy}
             onReconnect={chat.reconnect}
             railOpen={railOpen}
@@ -389,6 +377,8 @@ export default function App() {
             model={agent?.model ?? null}
             defaultEffort={agent?.reasoningEffort ?? null}
             molecules={molecules}
+            autoUntil={chat.autoUntil}
+            onAuto={chat.setAuto}
           />
         </main>
 

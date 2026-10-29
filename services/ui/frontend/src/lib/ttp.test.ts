@@ -59,8 +59,10 @@ import {
   rangeFields,
   rememberCreated,
   retypeObjective,
+  sessionTtpIds,
   setRange,
   sortTtps,
+  ttpOptions,
   targetSummary,
   ttpFileName,
   withCofolding,
@@ -682,6 +684,23 @@ describe("browsing stored TTPs", () => {
 
   it("puts the most recently used first, then by name", () => {
     expect(sortTtps(items, { "a-old": "2026-10-01T00:00:00Z", "b-new": "2026-10-27T00:00:00Z" }).map((t) => t.id)).toEqual(["b-new", "a-old", "c-none"]);
+  });
+
+  it("lists the TTPs the conversation named, the latest first", () => {
+    const events: ToolEvent[] = [
+      { type: "tool_call", name: "get_ttp", arguments: { ttp_id: "a-old" } },
+      { type: "tool_call", name: "create_ttp", arguments: { ttp: { ...ttp, id: "c-none" } } },
+      { type: "tool_result", name: "update_ttp", result: JSON.stringify({ ttp: { ...ttp, id: "b-new" } }), isError: true },
+      { type: "tool_call", name: "run_optimization", arguments: { ttp_id: "a-old" } },
+    ];
+    expect(sessionTtpIds(events)).toEqual(["a-old", "c-none"]);
+    expect(sessionTtpIds([])).toEqual([]);
+  });
+
+  it("puts the conversation's profiles above the rest, each flagged", () => {
+    expect(ttpOptions(items, ["c-none", "a-old"]).map(({ ttp: t, mine }) => `${t.id}${mine ? "*" : ""}`)).toEqual(["c-none*", "a-old*", "b-new"]);
+    expect(ttpOptions(items, ["not-stored"]).map(({ ttp: t }) => t.id)).toEqual(items.map((t) => t.id));
+    expect(ttpOptions([], ["a-old"])).toEqual([]);
   });
 
   it("remembers local creations", () => {

@@ -521,7 +521,6 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
   };
 
   const pickedHere = picked && picked.path === active.path ? picked : null;
-  const pickedContacts = pickedHere && profile ? profile.contacts.filter((c) => c.resnum === pickedHere.resnum) : [];
   const pickedShown = pickedHere?.resname && pickedHere.resnum !== null ? nameOf(pickedHere.resname, pickedHere.chain, pickedHere.resnum) : null;
   const pickedInPolymer =
     pickedHere?.resname && fileResidues?.path === active.path
@@ -534,6 +533,9 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
       ? { kind: pickKind(pickedHere.resname, pickedInPolymer), resname: pickedHere.resname, label: pickedShown.label, chain: pickedHere.chain, file: pickedShown.file }
       : null;
   const pickedTitle = pickedResidue ? pickTitle(pickedResidue) : (pickedHere?.label ?? "");
+  // The profile is of the ligand, so all its contacts are the ligand's; residue numbers would match protein residues by chance.
+  const ligandProfiled = pickedResidue?.kind === "ligand" && !!profile && !profile.error;
+  const pickedContacts = ligandProfiled ? profile.contacts : pickedHere && profile ? profile.contacts.filter((c) => c.resnum === pickedHere.resnum) : [];
   const selectedHere = selected && selected.path === active.path && profile ? profile.contacts[selected.index] : null;
 
   return (
@@ -703,18 +705,30 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
             >
               Focus
             </ChipButton>
-            <ChipButton
-              primary
-              onClick={() =>
-                onAsk(
-                  pickedResidue
-                    ? pickQuestion(title, active.path, pickedResidue)
-                    : `In ${structureRef(title, active.path)}, what role does ${pickedTitle}${pickedHere.chain ? ` (chain ${pickedHere.chain})` : ""} play in binding the ligand? Use the interaction profile.`,
-                )
-              }
-            >
-              Ask the agent about {pickedTitle}
-            </ChipButton>
+            {ligandProfiled ? (
+              <ChipButton
+                primary
+                onClick={() => {
+                  setSelected(null);
+                  execute({ kind: "contacts", type: null });
+                }}
+              >
+                Analysis
+              </ChipButton>
+            ) : (
+              <ChipButton
+                primary
+                onClick={() =>
+                  onAsk(
+                    pickedResidue
+                      ? pickQuestion(title, active.path, pickedResidue)
+                      : `In ${structureRef(title, active.path)}, what role does ${pickedTitle}${pickedHere.chain ? ` (chain ${pickedHere.chain})` : ""} play in binding the ligand? Use the interaction profile.`,
+                  )
+                }
+              >
+                Ask the agent about {pickedTitle}
+              </ChipButton>
+            )}
             <button type="button" aria-label="Dismiss" onClick={() => setPicked(null)} className="text-muted hover:text-body cursor-pointer px-1">
               ×
             </button>
@@ -785,7 +799,7 @@ export function StructureWorkspace({ structures, active, onSelect, interactions,
                 query={query}
                 onQuery={setQuery}
                 selected={selectedHere}
-                picked={pickedHere && pickedHere.resnum !== null ? { chain: pickedHere.chain, resnum: pickedHere.resnum } : null}
+                picked={pickedHere && pickedHere.resnum !== null && !ligandProfiled ? { chain: pickedHere.chain, resnum: pickedHere.resnum } : null}
                 flash={flash}
                 onSelect={(contact) => {
                   if (!profile) return;

@@ -24,8 +24,10 @@ import {
   payloadError,
   removeObjective,
   saveDraft,
+  sessionTtpIds,
   sortTtps,
   sourceLabel,
+  ttpOptions,
   targetRange,
   targetSummary,
   ttpCreated,
@@ -120,6 +122,8 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
     return latest;
   }, [created, jobs]);
   const items = useMemo(() => sortTtps(list.state === "ready" ? list.items : [], activity), [list, activity]);
+  const ownIds = useMemo(() => sessionTtpIds(events), [events]);
+  const options = useMemo(() => ttpOptions(filterTtps(items, query), ownIds), [items, query, ownIds]);
 
   const selectedId = ttpId ?? choice ?? fromSession.id ?? stored?.base.id ?? items[0]?.id ?? null;
   const sessionTtp = fromSession.ttp && fromSession.ttp.id === selectedId ? fromSession.ttp : null;
@@ -164,7 +168,11 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
         <div className="min-w-0 flex-1">
           <h2 className="text-xs font-semibold">Therapeutic target profiles</h2>
           <p className="text-faint text-[10px]">
-            {list.state === "ready" ? `${items.length} stored · most recently used first` : list.state === "loading" ? "Loading…" : "TTP store unavailable"}
+            {list.state === "ready"
+              ? `${items.length} stored · ${ownIds.length ? "this chat first" : "most recently used first"}`
+              : list.state === "loading"
+                ? "Loading…"
+                : "TTP store unavailable"}
           </p>
         </div>
         <input
@@ -187,7 +195,7 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
         </button>
       </div>
       <div className="flex min-h-0 flex-1">
-        <TtpList items={filterTtps(items, query)} total={items.length} jobs={jobs} selectedId={selectedId} sessionId={fromSession.id} onSelect={select} />
+        <TtpList options={options} total={items.length} jobs={jobs} selectedId={selectedId} onSelect={select} />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="border-subtle shrink-0 border-b px-3 py-1.5 @xl:hidden">
             <select
@@ -197,9 +205,10 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
               className="bg-sunken border-subtle w-full rounded-md border px-1.5 py-1 text-[11px]"
             >
               {selectedId && !items.some((t) => t.id === selectedId) && <option value={selectedId}>{selectedId}</option>}
-              {filterTtps(items, query).map((t) => (
+              {options.map(({ ttp: t, mine: own }) => (
                 <option key={t.id} value={t.id}>
                   {t.name} · v{t.version}
+                  {own ? " · this chat" : ""}
                 </option>
               ))}
             </select>
@@ -421,25 +430,24 @@ function TtpEditor({ sessionId, events = [], onAsk, ttpId, molecules }: Props) {
 const GHOST = "text-muted hover:text-body hover:bg-inset cursor-pointer rounded-md px-2 py-1 font-medium touch:min-h-11";
 const ACTION = "border-subtle text-body hover:bg-inset cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium touch:min-h-11";
 
+/** The conversation's profiles first, each with a quiet "this chat", then the rest. */
 function TtpList({
-  items,
+  options,
   total,
   jobs,
   selectedId,
-  sessionId,
   onSelect,
 }: {
-  items: TtpSummary[];
+  options: { ttp: TtpSummary; mine: boolean }[];
   total: number;
   jobs: JobSummary[];
   selectedId: string | null;
-  sessionId: string | null;
   onSelect: (id: string) => void;
 }) {
   return (
     <nav aria-label="Stored TTPs" className="border-subtle hidden w-52 shrink-0 flex-col overflow-y-auto border-r py-1 @xl:flex">
-      {items.length === 0 && <p className="text-faint px-3 py-2 text-[11px]">{total ? "No TTP matches." : "No TTPs stored yet."}</p>}
-      {items.map((t) => {
+      {options.length === 0 && <p className="text-faint px-3 py-2 text-[11px]">{total ? "No TTP matches." : "No TTPs stored yet."}</p>}
+      {options.map(({ ttp: t, mine }, index) => {
         const runs = jobs.filter((j) => j.ttpId === t.id);
         const running = runs.some((j) => j.state === "running" || j.state === "queued");
         const selected = t.id === selectedId;
@@ -449,11 +457,12 @@ function TtpList({
             type="button"
             onClick={() => onSelect(t.id)}
             aria-current={selected || undefined}
-            className={`border-l-2 px-3 py-1.5 text-left ${selected ? "bg-sunken" : "hover:bg-sunken border-transparent"}`}
+            className={`border-l-2 px-3 py-1.5 text-left ${selected ? "bg-sunken" : "hover:bg-sunken border-transparent"} ${!mine && index > 0 && options[index - 1].mine ? "border-subtle mt-1 border-t pt-2" : ""}`}
             style={selected ? { borderColor: "var(--color-accent)" } : undefined}
           >
-            <span className="block truncate text-[11px] font-medium" title={t.name}>
-              {t.name}
+            <span className="flex items-center gap-1 text-[11px] font-medium" title={t.name}>
+              {mine && <span aria-hidden="true" className="size-1 shrink-0 rounded-full" style={{ background: "var(--color-accent)" }} />}
+              <span className="truncate">{t.name}</span>
             </span>
             <span className="text-faint flex items-center gap-1 text-[10px]">
               <span className="truncate font-mono">{t.id}</span>
@@ -462,7 +471,7 @@ function TtpList({
             <span className="text-faint flex items-center gap-1 text-[10px]">
               {running && <span className="size-1.5 rounded-full" style={{ background: "var(--color-warn)" }} />}
               {runs.length ? `${runs.length} run${runs.length === 1 ? "" : "s"}${running ? ", running" : ""}` : "not run yet"}
-              {t.id === sessionId && <span style={{ color: "var(--color-structure)" }}>· this chat</span>}
+              {mine && <span style={{ color: "var(--color-structure)" }}>· this chat</span>}
             </span>
           </button>
         );

@@ -5,14 +5,15 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { useJobOwners, useRunsKnown, useSessionRuns } from "../../hooks/useSessions";
 import type { Theme } from "../../hooks/useTheme";
 import { callTool, jobFileUrl } from "../../lib/api";
-import { conversationJobs, errorSummary, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
+import { conversationJobs, errorSummary, isActive, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
+import { scopedJob } from "../../lib/jobScope";
 import { openRunStructure, rowMetrics, rowMolecule, runStructurePanel } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
 import { countMask, goalOf, heading, moleculesOf, selectionMask, spreads, stepStats, topByWeight, TOTAL, type Endpoint, type Goal, type Molecules, type Ranges, type StepStats, type TransformLike } from "../../lib/runAnalysis";
 import { parseRunResults, type RunTable } from "../../lib/runResults";
 import { loadTtp } from "../../lib/scoreWhy";
 import { objectivesOf } from "../../lib/ttp";
-import { focusRun, useFocusedRun } from "../../lib/workbenchBus";
+import { useFocusedRun } from "../../lib/workbenchBus";
 import { SelectionTable } from "./SelectionTable";
 import { endpointColours } from "./plotUtils";
 import { Card, PickMenu } from "./shared";
@@ -70,14 +71,14 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
   const owners = useJobOwners();
   const known = useRunsKnown();
 
-  const runs = useMemo(() => (jobs ?? []).filter((j) => j.type === "optimization"), [jobs]);
-  const own = useMemo(() => (known ? conversationJobs(runs, sessionRuns, focused, owners, sessionId).own : runs), [known, runs, sessionRuns, focused, owners, sessionId]);
-  const started = (j: JobSummary) => j.state !== "failed" && j.state !== "queued";
-  const job = runs.find((j) => j.id === focused) ?? own.find(started) ?? own[0] ?? runs.find(started) ?? runs[0] ?? null;
+  const scoped = useMemo(() => {
+    // Until the list says who launched what, no job: the newest of all is often another conversation's.
+    if (!jobs || known === null) return null;
+    return scopedJob(jobs, known ? conversationJobs(jobs, sessionRuns, focused, owners, sessionId).own : jobs, focused);
+  }, [jobs, known, sessionRuns, focused, owners, sessionId]);
+  const job = scoped?.type === "optimization" ? scoped : null;
   const runId = job?.id ?? null;
   const running = job ? isActive(job.state) : false;
-  const listed = own.length ? own : runs;
-  const options = job && !listed.includes(job) ? [job, ...listed] : listed;
 
   useEffect(() => {
     let cancelled = false;
@@ -246,8 +247,7 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
   if (!job) {
     return (
       <Centered>
-        <p className="text-body font-medium">No REINVENT runs yet</p>
-        <p className="text-muted max-w-sm">A run's trajectory, distributions and chemical space show up here.</p>
+        <p className="text-muted">{scoped ? "Analysis is for optimization runs." : "No job in this conversation yet."}</p>
       </Centered>
     );
   }
@@ -265,18 +265,6 @@ export function RunAnalysis({ sessionId, theme, onOpenMolecule }: Props) {
   return (
     <div className="@container flex h-full min-h-0 flex-col text-[11px]">
       <div className="border-subtle flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-1.5">
-        <select
-          value={job.id}
-          onChange={(event) => focusRun(event.target.value)}
-          aria-label="Run"
-          className="bg-sunken border-subtle max-w-64 min-w-0 cursor-pointer truncate rounded-md border px-1.5 py-1 text-[11px] outline-none"
-        >
-          {options.map((j) => (
-            <option key={j.id} value={j.id}>
-              {jobTitle(j)} · {j.id} · {j.state}
-            </option>
-          ))}
-        </select>
         {molecules && (
           <span className="text-faint tabular-nums">
             {molecules.n.toLocaleString()} molecules · step {molecules.lastStep}

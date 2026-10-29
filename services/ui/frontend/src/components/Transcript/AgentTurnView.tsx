@@ -85,10 +85,15 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
 
   return (
     <article className="flex flex-col gap-3" aria-busy={running}>
-      {titled && (
-        <h3 className="text-body truncate text-sm leading-snug font-semibold" title={title}>
-          {title}
-        </h3>
+      {(titled || turn.auto) && (
+        <div className="flex min-w-0 items-center gap-2">
+          {turn.auto && <AutoTag />}
+          {titled && (
+            <h3 className="text-body truncate text-sm leading-snug font-semibold" title={title}>
+              {title}
+            </h3>
+          )}
+        </div>
       )}
 
       {running && (
@@ -161,6 +166,19 @@ export const AgentTurnView = memo(function AgentTurnView({ turn, theme, openStru
     </article>
   );
 });
+
+/** A turn the agent took on its own, under its autonomy budget. */
+function AutoTag() {
+  return (
+    <span
+      className="text-faint shrink-0 rounded-full border px-1.5 text-[10px] leading-[1.5] font-medium"
+      style={{ borderColor: "var(--color-accent)" }}
+      title="The agent started this turn on its own"
+    >
+      auto
+    </span>
+  );
+}
 
 function uniqueStructures(panels: Panel[]): StructurePanel[] {
   return mergeTurnPanels(panels).filter((panel): panel is StructurePanel => panel.kind === "structure");

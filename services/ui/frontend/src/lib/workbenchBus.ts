@@ -26,8 +26,10 @@ export function onWorkbenchRequest(listener: Listener): () => void {
 }
 
 /*
- * The REINVENT run the workbench is about. Shared by the Jobs and Results
- * tabs and the run bar, so a run picked in one is the run shown in the others.
+ * The REINVENT run picked for the workbench (see scopedJob), null for the
+ * conversation's own. Shared by Summary, Results, Analysis and the run bar, so
+ * a run picked in one is the run shown in the others; the app clears it when
+ * another conversation opens.
  */
 let focused: string | null = null;
 const runListeners = new Set<() => void>();

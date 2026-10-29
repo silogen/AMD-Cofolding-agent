@@ -17,6 +17,7 @@ import { uploadedStructure, uploadFile } from "../../lib/uploads";
 import { addUserStructure } from "../../lib/userStructures";
 import { sendToViewer } from "../../lib/viewerBus";
 import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { AutoButton } from "./AutoButton";
 
 const Sketcher = lazy(() => import("../Sketcher/Sketcher").then((module) => ({ default: module.Sketcher })));
 const TtpBuilder = lazy(() => import("../TtpBuilder/TtpBuilder").then((module) => ({ default: module.TtpBuilder })));
@@ -38,6 +39,10 @@ interface Props {
   defaultEffort: string | null;
   /** The conversation's molecules, offered as seeds in the TTP builder. */
   molecules?: SeedMolecule[];
+  /** End of the agent's autonomy budget, ISO 8601 UTC; null when it has none. */
+  autoUntil?: string | null;
+  /** Give the agent *minutes* on its own, 0 to stop. Without it the button is hidden. */
+  onAuto?: (minutes: number) => void;
 }
 
 export interface ComposerHandle {
@@ -89,7 +94,7 @@ let attachmentId = 0;
  * stopping must not need a page reload.
  */
 export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer(
-  { value, onChange, onSend, onStop, busy, connected, tools, theme, sessionId, model, defaultEffort, molecules },
+  { value, onChange, onSend, onStop, busy, connected, tools, theme, sessionId, model, defaultEffort, molecules, autoUntil, onAuto },
   ref,
 ) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -453,6 +458,7 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
               <circle cx="12" cy="12" r="4" />
               <circle cx="12" cy="12" r="0.6" fill="currentColor" />
             </ToolButton>
+            {onAuto && <AutoButton key={autoUntil ?? "off"} until={autoUntil ?? null} onSet={onAuto} />}
             <input
               ref={fileRef}
               type="file"

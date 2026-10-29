@@ -53,6 +53,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+from reinvent4_agent.web import archive
 from reinvent4_agent.web import artifacts as shared_files
 from reinvent4_agent.web.artifacts import extract_panels, parse_tool_result, resolve_artifact
 from reinvent4_agent.web import cofold_status
@@ -621,6 +622,8 @@ def create_app(config: WebConfig | None = None) -> FastAPI:
         media_type = _ARTIFACT_MEDIA_TYPES.get(path.suffix.lower(), "text/plain")
         return FileResponse(path, media_type=media_type, filename=name)
 
+    archive.register(app, jobs_dir)
+
     @app.get("/api/services/cofold")
     async def cofold_service() -> dict[str, Any]:
         return await cofold_status.cofold_status()
@@ -778,12 +781,17 @@ async def _forward_events(websocket: WebSocket, queue: asyncio.Queue[dict[str, A
 
 
 async def _receive_loop(websocket: WebSocket, live: Any, takes_effort: Any = None) -> None:
-    """Read the browser's messages: a new question, or stop the current turn.
+    """Read the browser's messages: a question, a stop, or an autonomy budget.
 
     Turns are serialised per session: the agent keeps conversation state, so
     two overlapping turns would interleave tool calls into one history.  A
     question that arrives while a turn runs is refused rather than queued,
     and only this browser is told, since it is not part of the conversation.
+
+    ``{"type": "auto", "minutes": N}`` gives the agent N minutes to keep
+    working by itself between questions; 0 takes that back (see
+    ``sessions.py``).  The budget belongs to the session, so the ``auto``
+    event it publishes reaches every tab watching it.
 
     An effort asked for while a model without efforts is serving is dropped:
     that model thinks regardless, and the request carries the chat template
@@ -803,6 +811,13 @@ async def _receive_loop(websocket: WebSocket, live: Any, takes_effort: Any = Non
         if kind == "cancel":
             if not live.cancel():
                 await websocket.send_json({"type": "notice", "message": "Nothing is running."})
+            continue
+        if kind == "auto":
+            minutes = message.get("minutes")
+            if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or minutes < 0:
+                await websocket.send_json({"type": "notice", "message": f"Not a budget in minutes: {minutes!r}"})
+                continue
+            live.set_autonomy(float(minutes))
             continue
         if kind != "user_message":
             await websocket.send_json({"type": "notice", "message": f"Unknown message type: {kind!r}"})

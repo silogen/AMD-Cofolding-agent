@@ -8,7 +8,8 @@ import { sameFile, type Artifacts } from "../../lib/artifacts";
 import { assetUrl } from "../../lib/assets";
 import { fileName } from "../../lib/csv";
 import { useJobOwners, useRunsKnown, useSessionRuns } from "../../hooks/useSessions";
-import { canResume, conversationJobs, isActive, jobTitle, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
+import { canResume, conversationJobs, isActive, parseJobs, resultsFile, toolError, type JobSummary } from "../../lib/jobs";
+import { scopedJob } from "../../lib/jobScope";
 import { openRunStructure, rowMetrics, rowMolecule, runStructurePanel } from "../../lib/jobStructures";
 import type { MoleculeContext } from "../../lib/moleculePage";
 import { loadRDKit, withMol } from "../../lib/rdkit";
@@ -27,10 +28,10 @@ import {
   type RunTable,
   type SortKey,
 } from "../../lib/runResults";
-import { focusRun, useFocusedRun } from "../../lib/workbenchBus";
+import { useFocusedRun } from "../../lib/workbenchBus";
 import { DownloadIcon, ExportButtons, TextButton } from "../DataTable/ExportButtons";
 import { ContinueRun } from "../JobsPanel/ContinueRun";
-import { MolDepiction } from "../MolDepiction/MolDepiction";
+import { MoleculeThumb, StructureButton } from "../MoleculeTable/MoleculeTable";
 import { StarButton } from "../Shortlist/StarButton";
 
 interface Props {
@@ -47,6 +48,7 @@ const OVERSCAN = 6;
 /** A running job's CSV grows by one batch per step; re-read it this often. */
 const REFRESH_MS = 60_000;
 const NUMBER_WIDTH = 84;
+const THUMB_WIDTH = 64 + 24;
 
 const ROLE_LABEL: Record<ColumnRole, string> = {
   total: "Score",
@@ -79,13 +81,15 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   const [jobs, setJobs] = useState<JobSummary[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const focused = useFocusedRun();
-  const runs = useMemo(() => (jobs ?? []).filter((job) => job.type === "optimization"), [jobs]);
   const sessionRuns = useSessionRuns(sessionId);
   const owners = useJobOwners();
   const known = useRunsKnown();
-  const own = useMemo(() => (known ? conversationJobs(runs, sessionRuns, focused, owners, sessionId).own : runs), [known, runs, sessionRuns, focused, owners, sessionId]);
-  const started = (j: JobSummary) => j.state !== "failed" && j.state !== "queued";
-  const job = runs.find((j) => j.id === focused) ?? own.find(started) ?? own[0] ?? runs.find(started) ?? runs[0] ?? null;
+  const scoped = useMemo(() => {
+    // Until the list says who launched what, no job: the newest of all is often another conversation's.
+    if (!jobs || known === null) return null;
+    return scopedJob(jobs, known ? conversationJobs(jobs, sessionRuns, focused, owners, sessionId).own : jobs, focused);
+  }, [jobs, known, sessionRuns, focused, owners, sessionId]);
+  const job = scoped?.type === "optimization" ? scoped : null;
   const runId = job?.id ?? null;
 
   const [tick, setTick] = useState(0);
@@ -182,9 +186,10 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   const visibleKeys = columnsFor && columnsFor.runId === runId ? columnsFor.keys : table ? defaultColumns(table) : new Set<string>();
   const shownColumns = table ? table.columns.map((column, index) => ({ column, index })).filter(({ column }) => visibleKeys.has(column.key)) : [];
   const hasStructures = table ? table.structureColumn >= 0 && table.rows.some((r) => r.structure) : false;
-  // The complex right after the SMILES: a run has a dozen score columns, and the last of them is off screen.
-  const template = ["24px", "64px", "minmax(180px,1fr)", ...(hasStructures ? ["56px"] : []), ...shownColumns.map(() => `${NUMBER_WIDTH}px`)].join(" ");
-  const minWidth = 24 + 64 + 180 + (hasStructures ? 56 : 0) + shownColumns.length * NUMBER_WIDTH + 16;
+  const failures = (table?.failed ?? 0) > 0;
+  // The complex right after the structure: a run has a dozen score columns, and the last of them is off screen.
+  const template = ["24px", `${THUMB_WIDTH}px`, ...(hasStructures ? ["56px"] : []), ...shownColumns.map(() => `${NUMBER_WIDTH}px`), failures ? "minmax(140px,1fr)" : "minmax(0,1fr)"].join(" ");
+  const minWidth = 24 + THUMB_WIDTH + (hasStructures ? 56 : 0) + shownColumns.length * NUMBER_WIDTH + (failures ? 140 : 0) + 16;
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const last = Math.min(rows.length, Math.ceil((scrollTop + viewport) / ROW_HEIGHT) + OVERSCAN);
@@ -242,8 +247,7 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   if (!job) {
     return (
       <Centered>
-        <p className="text-body font-medium">No REINVENT runs yet</p>
-        <p className="text-muted max-w-sm">Every molecule an optimization run generates shows up here, with its scores.</p>
+        <p className="text-muted">{scoped ? "Results are for optimization runs." : "No job in this conversation yet."}</p>
       </Centered>
     );
   }
@@ -251,18 +255,6 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
   return (
     <div className="flex h-full min-h-0 flex-col text-[11px]">
       <div className="border-subtle flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-1.5">
-        <select
-          value={job.id}
-          onChange={(event) => focusRun(event.target.value)}
-          aria-label="Run"
-          className="bg-sunken border-subtle max-w-64 min-w-0 cursor-pointer truncate rounded-md border px-1.5 py-1 text-[11px] outline-none"
-        >
-          {runs.map((j) => (
-            <option key={j.id} value={j.id}>
-              {jobTitle(j)} · {j.id} · {j.state}
-            </option>
-          ))}
-        </select>
         {table && (
           <span className="text-faint tabular-nums">
             {rows.length === table.rows.length ? table.rows.length.toLocaleString() : `${rows.length.toLocaleString()} of ${table.rows.length.toLocaleString()}`} molecules
@@ -303,7 +295,7 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
 
       {continuing === job.id && canResume(job) && (
         <div className="shrink-0 px-3 pb-2">
-          <ContinueRun key={job.id} job={job} seeds={seeds} running={runs.find((j) => isActive(j.state)) ?? null} onClose={() => setContinuing(null)} onAsk={onAsk} />
+          <ContinueRun key={job.id} job={job} seeds={seeds} running={jobs.find((j) => j.type === "optimization" && isActive(j.state)) ?? null} onClose={() => setContinuing(null)} onAsk={onAsk} />
         </div>
       )}
 
@@ -409,7 +401,6 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
                 />
               </span>
               <span />
-              <SortHeader label="SMILES" active={sortKey === "smiles"} desc={sortDesc} onClick={() => toggleSort("smiles", false)} />
               {hasStructures && <span className="px-2">Complex</span>}
               {shownColumns.map(({ column, index }) => (
                 <SortHeader
@@ -422,6 +413,7 @@ export function RunResults({ artifacts, theme, sessionId, onOpenMolecule, onAsk 
                   onClick={() => toggleSort(index, column.numeric)}
                 />
               ))}
+              <span className="px-2">{failures ? "Failure" : ""}</span>
             </div>
             {rows.length === 0 ? (
               <p className="text-faint py-10 text-center">No rows match.</p>
@@ -499,34 +491,13 @@ function Row({
         <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`Select row ${row.id + 1}`} className="accent-[var(--color-accent)]" />
       </span>
       <span className="h-full py-0.5">
-        {row.smiles && <MolDepiction smiles={row.smiles} theme={theme} width={120} height={80} className={`h-full w-full ${row.failure ? "opacity-60" : ""}`} />}
-      </span>
-      <span className="flex min-w-0 items-center gap-1 px-2">
-        <span className="flex min-w-0 flex-1 flex-col justify-center">
-          <span className="truncate font-mono text-[10px]" title={row.smiles}>
-            {row.smiles || "—"}
-          </span>
-          {row.failure && (
-            <span className="truncate text-[10px]" style={{ color: "var(--color-accent)" }}>
-              {row.failure}
-            </span>
-          )}
-        </span>
-        {row.smiles && star}
+        <MoleculeThumb smiles={row.smiles} theme={theme} width={64} height={ROW_HEIGHT - 4} dim={!!row.failure} actions={row.smiles ? star : null} />
       </span>
       {structureColumn && (
         <span className="flex items-center" onClick={(event) => event.stopPropagation()}>
           {row.structure && (
             <>
-              <button
-                type="button"
-                onClick={onOpenStructure}
-                title={`Show ${row.structure} in the viewer`}
-                className="hover:bg-inset cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-semibold"
-                style={{ color: "var(--color-structure)" }}
-              >
-                3D
-              </button>
+              <StructureButton onClick={onOpenStructure} title={`Show ${row.structure} in the viewer`} />
               {url && (
                 <a href={url} download title="Download the structure file" className="text-faint hover:text-body rounded p-1" aria-label="Download the structure file">
                   <DownloadIcon />
@@ -541,6 +512,9 @@ function Row({
           {formatCell(row.cells[index], integer)}
         </span>
       ))}
+      <span className="truncate px-2 text-[10px]" style={{ color: "var(--color-accent)" }} title={row.failure || undefined}>
+        {row.failure}
+      </span>
     </div>
   );
 }
@@ -555,7 +529,7 @@ function SortHeader({ label, title, active, desc, align, onClick }: { label: str
       className={`hover:text-body flex h-full min-w-0 cursor-pointer items-center gap-0.5 px-2 ${align === "right" ? "justify-end text-right" : "text-left"} ${active ? "text-body" : ""}`}
     >
       <span className="line-clamp-2 leading-tight break-words">{label}</span>
-      {active && <span className="shrink-0 text-[9px]">{desc ? "▼" : "▲"}</span>}
+      {active && <span className="shrink-0 text-[8px]">{desc ? "▼" : "▲"}</span>}
     </button>
   );
 }

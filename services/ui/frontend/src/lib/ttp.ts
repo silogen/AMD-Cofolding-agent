@@ -168,7 +168,7 @@ export function payloadError(value: unknown): string | null {
 }
 
 /** The TTP a tool call or result carries, if any. */
-function ttpIn(event: ToolEvent): Ttp | null {
+export function ttpIn(event: ToolEvent): Ttp | null {
   if (event.type === "tool_call") return asTtp(event.arguments.ttp);
   const payload = parseResult(event.result);
   if (event.name === "get_ttp") return asTtp(payload);
@@ -1176,6 +1176,24 @@ export function sortTtps<T extends TtpSummary>(items: T[], activity: Record<stri
   return [...items].sort((a, b) => (activity[b.id] ?? "").localeCompare(activity[a.id] ?? "") || a.name.localeCompare(b.name));
 }
 
+/** Every TTP id the conversation named, the most recently used first. */
+export function sessionTtpIds(events: ToolEvent[]): string[] {
+  const seen: string[] = [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.type === "tool_result" && event.isError) continue;
+    const id = ttpIdIn(event);
+    if (id && !seen.includes(id)) seen.push(id);
+  }
+  return seen;
+}
+
+/** The profile list: the conversation's own first in `mine` order, then the rest as given. */
+export function ttpOptions<T extends TtpSummary>(items: readonly T[], mine: readonly string[]): { ttp: T; mine: boolean }[] {
+  const own = mine.flatMap((id) => items.filter((t) => t.id === id));
+  return [...own.map((ttp) => ({ ttp, mine: true })), ...items.filter((t) => !mine.includes(t.id)).map((ttp) => ({ ttp, mine: false }))];
+}
+
 const CREATED_KEY = "cofold.ttp-created";
 
 /** When this browser created each TTP, by id. */
@@ -1291,6 +1309,24 @@ export interface PocketResidue {
   types: string[];
 }
 
+/** A deposited entry UniProt cross-references, as fetch_target_info ranks them (best first). */
+export interface TargetStructure {
+  pdbId: string;
+  method: string | null;
+  resolution: number | null;
+  /** The UniProt residues it covers, [from, to]. */
+  range: [number, number] | null;
+}
+
+/** The polymer entity actually crystallised in an entry, from the RCSB data API. */
+export interface TargetConstruct extends TargetStructure {
+  title: string | null;
+  chains: string[];
+  length: number | null;
+  /** Bound components as RCSB names them: "JQ1 (…)". */
+  ligands: string[];
+}
+
 /** What the session has established about the protein target. */
 export interface TargetFacts {
   name: string | null;
@@ -1307,6 +1343,10 @@ export interface TargetFacts {
   chains: string[];
   pdbIds: string[];
   pdbCount: number | null;
+  /** The ranked entries behind `pdbIds`, as far as the lookup described them. */
+  structures: TargetStructure[];
+  /** The construct of the top entries: what a cofold should fold, and what it was crystallised with. */
+  constructs: TargetConstruct[];
   msaPath: string | null;
   proteinPdbPath: string | null;
   ttpId: string | null;
@@ -1331,6 +1371,8 @@ export const emptyTargetFacts = (): TargetFacts => ({
   chains: [],
   pdbIds: [],
   pdbCount: null,
+  structures: [],
+  constructs: [],
   msaPath: null,
   proteinPdbPath: null,
   ttpId: null,
@@ -1355,7 +1397,7 @@ function cleanSequence(value: unknown): string | null {
 }
 
 /** A protein sequence anywhere in a call's arguments, a few levels deep. */
-function findSequence(node: unknown, depth = 0): string | null {
+export function findSequence(node: unknown, depth = 0): string | null {
   if (depth > 4) return null;
   if (Array.isArray(node)) {
     for (const item of node) {
@@ -1380,12 +1422,52 @@ function findSequence(node: unknown, depth = 0): string | null {
   return null;
 }
 
-/** Facts from one fetch_target_info result (a UniProt entry). */
+const residueRange = (value: unknown): [number, number] | null => {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const [from, to] = [num(value[0]), num(value[1])];
+  return from !== null && to !== null ? [from, to] : null;
+};
+
+const stringList = (value: unknown): string[] => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);
+
+/** fetch_target_info's `pdb_structures`. */
+function parseStructures(value: unknown): TargetStructure[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).flatMap((s) => {
+    const pdbId = str(s.pdb_id)?.toUpperCase();
+    return pdbId ? [{ pdbId, method: str(s.method), resolution: num(s.resolution), range: residueRange(s.uniprot_range) }] : [];
+  });
+}
+
+/** fetch_target_info's `constructs`, the crystallised entities of the top entries. */
+function parseConstructs(value: unknown): TargetConstruct[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).flatMap((c) => {
+    const pdbId = str(c.pdb_id)?.toUpperCase();
+    if (!pdbId) return [];
+    return [
+      {
+        pdbId,
+        method: str(c.method),
+        resolution: num(c.resolution),
+        range: residueRange(c.uniprot_range),
+        title: str(c.title) ?? str(c.entity),
+        chains: stringList(c.chains),
+        length: num(c.length),
+        ligands: stringList(c.ligands),
+      },
+    ];
+  });
+}
+
+/** Facts from one fetch_target_info result (a UniProt entry with its PDB cross-references). */
 export function mergeUniprot(facts: TargetFacts, payload: unknown, tool = "fetch_target_info"): TargetFacts {
   const entry = parseResult(payload);
   if (!isRecord(entry) || typeof entry.error === "string") return facts;
   const sequence = cleanSequence(entry.sequence);
-  const pdbIds = Array.isArray(entry.pdb_ids) ? entry.pdb_ids.filter((id): id is string => typeof id === "string") : [];
+  const pdbIds = stringList(entry.pdb_ids).map((id) => id.toUpperCase());
+  const structures = parseStructures(entry.pdb_structures);
+  const constructs = parseConstructs(entry.constructs);
   return withSource(
     {
       ...facts,
@@ -1401,13 +1483,62 @@ export function mergeUniprot(facts: TargetFacts, payload: unknown, tool = "fetch
       uniprotSequence: sequence ?? facts.uniprotSequence,
       pdbIds: pdbIds.length ? pdbIds : facts.pdbIds,
       pdbCount: num(entry.pdb_count) ?? facts.pdbCount,
+      structures: structures.length ? structures : facts.structures,
+      constructs: constructs.length ? constructs : facts.constructs,
     },
     tool,
   );
 }
 
+/** What the lookup knows about one entry: "X-ray 1.5 Å · UniProt 44–168 · JQ1". */
+export function structureHint(facts: TargetFacts, pdbId: string): string | null {
+  const id = pdbId.toUpperCase();
+  const entry = facts.structures.find((s) => s.pdbId === id);
+  const construct = facts.constructs.find((c) => c.pdbId === id);
+  const resolution = construct?.resolution ?? entry?.resolution ?? null;
+  const span = construct?.range ?? entry?.range ?? null;
+  const parts = [
+    [construct?.method ?? entry?.method, resolution !== null && `${+resolution.toFixed(2)} Å`].filter(Boolean).join(" "),
+    span ? `UniProt ${span[0]}–${span[1]}` : construct?.length ? `${construct.length} aa` : null,
+    construct?.ligands.map(ligandCode).filter((code) => !ADDITIVES.has(code)).join(", "),
+  ];
+  const hint = parts.filter((part): part is string => Boolean(part)).join(" · ");
+  return hint || null;
+}
+
+const ligandCode = (ligand: string) => ligand.trim().split(/\s/)[0].toUpperCase();
+
+/** Cryoprotectants, buffers and ions RCSB lists alongside the real ligands. */
+const ADDITIVES = new Set([
+  "HOH", "DOD", "GOL", "EDO", "PEG", "PGE", "PG4", "P6G", "1PE", "2PE", "MPD", "DMS", "ACT", "ACY", "FMT", "CIT", "FLC", "TLA", "MLI",
+  "SO4", "PO4", "NO3", "CO3", "SCN", "AZI", "IOD", "CL", "BR", "NA", "K", "MG", "CA", "ZN", "MN", "NI", "CD", "NH4", "IMD", "MES", "TRS", "EPE", "BTB", "BME", "CAC",
+]);
+
+/** The ligands the constructs were crystallised with, each once, additives left out. */
+export function targetLigands(facts: TargetFacts): { code: string; name: string | null; pdbIds: string[] }[] {
+  const found = new Map<string, { code: string; name: string | null; pdbIds: string[] }>();
+  for (const construct of facts.constructs) {
+    for (const ligand of construct.ligands) {
+      const code = ligandCode(ligand);
+      if (!code || ADDITIVES.has(code)) continue;
+      const known = found.get(code);
+      if (known) {
+        if (!known.pdbIds.includes(construct.pdbId)) known.pdbIds.push(construct.pdbId);
+        continue;
+      }
+      found.set(code, { code, name: /\((.*)\)\s*$/.exec(ligand.trim())?.[1]?.trim() || null, pdbIds: [construct.pdbId] });
+    }
+  }
+  return [...found.values()];
+}
+
 function withSource(facts: TargetFacts, tool: string): TargetFacts {
   return facts.sources.includes(tool) ? facts : { ...facts, sources: [...facts.sources, tool] };
+}
+
+/** Facts from a sequence a tool was handed directly. */
+export function mergeSequence(facts: TargetFacts, sequence: string, tool: string): TargetFacts {
+  return withSource({ ...facts, sequence, sequenceLength: sequence.length }, tool);
 }
 
 export function mergeTtpTarget(facts: TargetFacts, ttp: Ttp, tool: string): TargetFacts {
@@ -1431,23 +1562,54 @@ export function mergeTtpTarget(facts: TargetFacts, ttp: Ttp, tool: string): Targ
 
 const residueKey = (c: Pick<Contact, "chain" | "resname" | "resnum">) => `${c.chain ?? ""}:${c.resname}:${c.resnum ?? ""}`;
 
+/** Facts from one interaction profile: the residues its ligand contacted, most contacted first. */
+export function mergeContacts(facts: TargetFacts, contacts: Contact[], tool: string): TargetFacts {
+  if (contacts.length === 0) return facts;
+  const pocket = new Map(facts.pocket.map((r) => [residueKey(r), { ...r, types: [...r.types] }]));
+  const chains = new Set(facts.chains);
+  for (const contact of contacts) {
+    if (contact.chain) chains.add(contact.chain);
+    const known = pocket.get(residueKey(contact));
+    if (known) {
+      known.contacts += 1;
+      if (!known.types.includes(contact.type)) known.types.push(contact.type);
+      continue;
+    }
+    pocket.set(residueKey(contact), {
+      chain: contact.chain,
+      resname: contact.resname,
+      resnum: contact.resnum,
+      label: contact.label || `${contact.resname}${contact.resnum ?? ""}`,
+      contacts: 1,
+      types: [contact.type],
+    });
+  }
+  return withSource(
+    {
+      ...facts,
+      chains: [...chains].sort(),
+      pocket: [...pocket.values()].sort((a, b) => b.contacts - a.contacts || (a.chain ?? "").localeCompare(b.chain ?? "") || (a.resnum ?? 0) - (b.resnum ?? 0)),
+      profiledComplexes: facts.profiledComplexes + 1,
+    },
+    tool,
+  );
+}
+
 /**
  * Everything the session's tool calls say about the target, oldest event
- * first so later lookups win. Pocket residues are the residues ligands
- * contacted in profiled complexes, most contacted first.
+ * first so later lookups win. For a session that worked on more than one
+ * protein these facts run together; extractTargets (lib/targets.ts) keeps
+ * them apart.
  */
 export function extractTargetFacts(events: ToolEvent[]): TargetFacts {
   let facts = emptyTargetFacts();
-  const pocket = new Map<string, PocketResidue>();
-  const chains = new Set<string>();
-
   for (const event of events) {
     if (event.type === "tool_call") {
       const ttp = asTtp(event.arguments.ttp);
       if (ttp) facts = mergeTtpTarget(facts, ttp, event.name);
       else {
         const seq = findSequence(event.arguments);
-        if (seq) facts = withSource({ ...facts, sequence: seq, sequenceLength: seq.length }, event.name);
+        if (seq) facts = mergeSequence(facts, seq, event.name);
         const ttpId = str(event.arguments.ttp_id);
         if (ttpId && !facts.ttpId) facts = { ...facts, ttpId };
       }
@@ -1467,33 +1629,9 @@ export function extractTargetFacts(events: ToolEvent[]): TargetFacts {
     }
 
     for (const panel of event.panels ?? []) {
-      if (panel.kind !== "interactions" || panel.contacts.length === 0) continue;
-      facts = withSource({ ...facts, profiledComplexes: facts.profiledComplexes + 1 }, event.name);
-      for (const contact of panel.contacts) {
-        if (contact.chain) chains.add(contact.chain);
-        const key = residueKey(contact);
-        const known = pocket.get(key);
-        if (known) {
-          known.contacts += 1;
-          if (!known.types.includes(contact.type)) known.types.push(contact.type);
-        } else {
-          pocket.set(key, {
-            chain: contact.chain,
-            resname: contact.resname,
-            resnum: contact.resnum,
-            label: contact.label || `${contact.resname}${contact.resnum ?? ""}`,
-            contacts: 1,
-            types: [contact.type],
-          });
-        }
-      }
+      if (panel.kind === "interactions") facts = mergeContacts(facts, panel.contacts, event.name);
     }
   }
-
-  facts.chains = [...chains].sort();
-  facts.pocket = [...pocket.values()].sort(
-    (a, b) => b.contacts - a.contacts || (a.chain ?? "").localeCompare(b.chain ?? "") || (a.resnum ?? 0) - (b.resnum ?? 0),
-  );
   return facts;
 }
 

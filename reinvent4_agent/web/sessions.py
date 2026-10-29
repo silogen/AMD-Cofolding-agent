@@ -30,7 +30,7 @@ import secrets
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,36 @@ def first_heading(markdown: str) -> str | None:
 
 #: Idle sessions kept in memory.  Older ones are reloaded from disk on demand.
 MAX_LIVE_SESSIONS = 20
+
+#: Longest autonomy budget a browser may ask for, in minutes.
+MAX_AUTONOMY_MINUTES = 480
+
+#: Automatic turns in a row before the loop gives up, whatever the budget
+#: says.  A campaign that needs more than this needs the user.
+MAX_AUTO_TURNS = 50
+
+#: Pause between automatic turns.  A REINVENT campaign runs for hours, so a
+#: continuation that finds nothing new must wait rather than spin.
+AUTO_TURN_DELAY_S = 60.0
+
+#: What a continuation turn asks of the agent.  It is not a user message: it
+#: is never recorded as one, and the turn it opens is marked automatic.
+AUTO_INSTRUCTION = (
+    "[AUTO] You are continuing on your own; nobody is waiting for an answer. "
+    "Check the jobs you started (get_job_alerts, get_optimization_status), read "
+    "and analyse whatever results are ready (get_top_candidates, read_results), "
+    "then decide the next step towards the goal and take it. Keep it short. "
+    "If a run is still going and nothing has changed, say so in one line. "
+    "When the goal is reached, or the only thing left needs the user, end your "
+    "message with AUTONOMY DONE."
+)
+
+#: How an answer says the autonomy loop has nothing left to do.
+_DONE_PATTERN = re.compile(r"\bAUTONOMY\s+DONE\b", re.IGNORECASE)
+
+#: Events that speak to whoever is watching now rather than to the
+#: conversation, so they are neither numbered nor recorded.
+_LIVE_ONLY = frozenset({"notice", "auto"})
 
 
 def valid_session_id(session_id: str | None) -> bool:
@@ -226,6 +256,14 @@ class LiveSession:
     handler: WebSocketEventHandler | None = None
     running: asyncio.Task[None] | None = None
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
+    #: End of the autonomy budget; None when the agent only answers requests.
+    auto_until: datetime | None = None
+    #: The continuation turn waiting out its pause, if one is queued.
+    auto_task: asyncio.Task[None] | None = None
+    #: Automatic turns taken since the last user message.
+    auto_turns: int = 0
+    #: Pause before a continuation; read per session so tests can shorten it.
+    auto_delay: float = field(default_factory=lambda: AUTO_TURN_DELAY_S)
 
     @property
     def id(self) -> str:
@@ -242,11 +280,13 @@ class LiveSession:
     def publish(self, event: dict[str, Any]) -> None:
         """Number, record and fan out one event.
 
-        A notice speaks to whoever is watching now rather than to the
-        conversation, so it is neither numbered nor recorded: replayed on a
-        reconnect it would announce a retry that finished long ago.
+        A notice, and the state of the autonomy budget, speak to whoever is
+        watching now rather than to the conversation, so they are neither
+        numbered nor recorded: replayed on a reconnect they would announce a
+        retry that finished long ago, or a budget that has run out.  A
+        browser that comes back reads the budget from ``summary()``.
         """
-        if event.get("type") == "notice":
+        if event.get("type") in _LIVE_ONLY:
             for queue in list(self.subscribers):
                 queue.put_nowait(event)
             return
@@ -275,6 +315,9 @@ class LiveSession:
         """
         if self.busy:
             return False
+        # The user leads: whatever the agent was about to do on its own is dropped.
+        self.cancel_continuation()
+        self.auto_turns = 0
         backend = getattr(self.agent, "backend", None)
         if effort and hasattr(backend, "reasoning_effort"):
             backend.reasoning_effort = effort
@@ -283,22 +326,80 @@ class LiveSession:
             self.meta["title"] = first_line[:_TITLE_CHARS]
             self.meta["auto_title"] = True
         self.publish({"type": "user_message", "content": content, **({"effort": effort} if effort else {})})
-        self.publish({"type": "status", "state": "busy"})
-        self.meta["turns"] = sum(1 for event in self.events if event.get("type") == "user_message")
-        self.meta["updated"] = _now()
-        self.store.save_meta(self.meta)
-        self.running = asyncio.create_task(self._run_turn(content))
+        self._begin(content)
         return True
 
     def cancel(self) -> bool:
-        """Stop the running turn.  False when there is none."""
+        """Stop the running turn and any continuation.  False when none runs."""
+        self.cancel_continuation()
         if not self.busy:
             return False
         assert self.running is not None
         self.running.cancel()
         return True
 
+    # -- working on its own ------------------------------------------------
+
+    @property
+    def auto_on(self) -> bool:
+        """Whether the autonomy budget still has time left."""
+        return self.auto_until is not None and self.auto_until > datetime.now(timezone.utc)
+
+    def set_autonomy(self, minutes: float) -> datetime | None:
+        """Start or extend the autonomy budget; 0 minutes stops it.
+
+        The deadline is absolute, so a browser that reconnects reads the time
+        left from ``summary()`` instead of counting from its own clock.
+        """
+        if minutes > 0:
+            self.auto_until = datetime.now(timezone.utc) + timedelta(minutes=min(float(minutes), float(MAX_AUTONOMY_MINUTES)))
+            self.auto_turns = 0
+            # Turned on between two turns: pick the campaign up at once rather
+            # than waiting for a message the user does not intend to send.
+            if not self.busy and self.meta.get("turns"):
+                self._schedule_continuation(0.0)
+        else:
+            self.auto_until = None
+            self.cancel_continuation()
+        self.publish({"type": "auto", "until": self._auto_iso()})
+        return self.auto_until
+
+    def cancel_continuation(self) -> None:
+        """Drop a continuation that has not started yet."""
+        if self.auto_task is not None:
+            self.auto_task.cancel()
+            self.auto_task = None
+
+    def _auto_iso(self) -> str | None:
+        return self.auto_until.isoformat(timespec="seconds") if self.auto_on else None
+
+    def _schedule_continuation(self, delay: float) -> None:
+        """Queue the next automatic turn.  The task checks again before it starts."""
+        if not self.auto_on or self.auto_turns >= MAX_AUTO_TURNS:
+            return
+        self.cancel_continuation()
+        self.auto_task = asyncio.create_task(self._continue_after(delay))
+
+    async def _continue_after(self, delay: float) -> None:
+        """Wait out *delay*, then take another turn unless anything changed."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+        self.auto_task = None
+        if self.busy or not self.auto_on or self.auto_turns >= MAX_AUTO_TURNS:
+            return
+        self.auto_turns += 1
+        self._begin(AUTO_INSTRUCTION, auto=True)
+
+    def _begin(self, content: str, auto: bool = False) -> None:
+        """Record the start of a turn and run it."""
+        self.publish({"type": "status", "state": "busy", **({"auto": True} if auto else {})})
+        self.meta["turns"] = sum(1 for event in self.events if event.get("type") == "user_message")
+        self.meta["updated"] = _now()
+        self.store.save_meta(self.meta)
+        self.running = asyncio.create_task(self._run_turn(content))
+
     async def _run_turn(self, content: str) -> None:
+        unfinished = False
         try:
             answer = await self.agent.chat(content)
             self._title_from_answer(answer)
@@ -310,6 +411,7 @@ class LiveSession:
                     "outputTokens": getattr(self.agent, "total_output_tokens", 0),
                 }
             )
+            unfinished = _DONE_PATTERN.search(answer or "") is None
         except asyncio.CancelledError:
             self.publish({"type": "cancelled"})
         except Exception as exc:
@@ -318,6 +420,9 @@ class LiveSession:
         finally:
             self.publish({"type": "status", "state": "idle"})
             self.save()
+            # Never after a cancel or an error: both need the user.
+            if unfinished:
+                self._schedule_continuation(self.auto_delay)
 
     def save(self) -> None:
         """Write the metadata and the LLM history."""
@@ -342,7 +447,7 @@ class LiveSession:
             self.meta["auto_title"] = False
 
     def summary(self) -> dict[str, Any]:
-        return {**self.meta, "busy": self.busy}
+        return {**self.meta, "busy": self.busy, "auto_until": self._auto_iso()}
 
 
 #: Builds an agent whose events go to the given sink.
@@ -429,13 +534,15 @@ class SessionManager:
         if live is not None:
             if live.busy:
                 return False
+            live.cancel_continuation()
             del self._live[session_id]
         self.store.delete(session_id)
         return True
 
     async def close(self) -> None:
-        """Cancel running turns; used at shutdown."""
+        """Cancel running turns and queued continuations; used at shutdown."""
         for live in list(self._live.values()):
+            live.cancel_continuation()
             if live.busy and live.running is not None:
                 live.running.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -443,6 +550,7 @@ class SessionManager:
 
     def _remember(self, live: LiveSession) -> None:
         self._live[live.id] = live
-        idle = [s for s in self._live.values() if not s.busy and not s.subscribers and s is not live]
+        # A session working on its own is not idle, whoever is watching.
+        idle = [s for s in self._live.values() if not s.busy and not s.auto_on and not s.subscribers and s is not live]
         while len(self._live) > MAX_LIVE_SESSIONS and idle:
             del self._live[idle.pop(0).id]

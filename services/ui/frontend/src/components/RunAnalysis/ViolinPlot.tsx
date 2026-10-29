@@ -136,9 +136,9 @@ const Violin = memo(function Violin({ endpoint, values, offsets, width, colour, 
       }
     };
     if (mask) {
-      draw((i) => !mask[i], 0.07, 1.7);
+      draw((i) => !mask[i], 0.035, 1.7);
       draw((i) => mask[i] === 1, 0.9, 3);
-    } else draw(() => true, full.count > 1500 ? 0.14 : full.count > 300 ? 0.22 : 0.4, 1.7);
+    } else draw(() => true, full.count > 1500 ? 0.07 : full.count > 300 ? 0.11 : 0.2, 1.7);
     ctx.globalAlpha = 1;
   }, [full, values, offsets, mask, width, cx, half, plotH, axis, colour, theme]);
 

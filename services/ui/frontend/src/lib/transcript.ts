@@ -35,7 +35,7 @@ export function applyEvent(state: Transcript, event: ConversationEvent): Transcr
 
     case "status":
       if (event.state === "busy") {
-        return { ...next, busy: true, turns: [...next.turns, newAgentTurn(event.seq, at)] };
+        return { ...next, busy: true, turns: [...next.turns, newAgentTurn(event.seq, at, event.auto === true)] };
       }
       return { ...next, busy: false, turns: closeOpenTurn(next.turns, at) };
 
@@ -87,8 +87,8 @@ export function applyEvents(state: Transcript, events: ConversationEvent[]): Tra
   return events.reduce(applyEvent, state);
 }
 
-function newAgentTurn(seq: number, at: number): AgentTurn {
-  return { role: "agent", id: `turn-${seq}`, at, blocks: [], done: false };
+function newAgentTurn(seq: number, at: number, auto = false): AgentTurn {
+  return { role: "agent", id: `turn-${seq}`, at, blocks: [], done: false, ...(auto ? { auto: true } : {}) };
 }
 
 function closeOpenTurn(turns: Turn[], at: number): Turn[] {

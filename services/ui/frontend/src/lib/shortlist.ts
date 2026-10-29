@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 import { useSyncExternalStore } from "react";
-import { toSdf, type Cell, type Sheet } from "./csv";
 
 /**
  * Molecules the user starred, per conversation, kept in the browser. An entry
@@ -182,44 +181,7 @@ export function mergeShortlist(session: string, incoming: readonly ShortlistEntr
   return { added: added.length, skipped: incoming.length - added.length };
 }
 
-// -- Views -------------------------------------------------------------------
-
-/** What else is known about a molecule: a candidate's scores, RDKit descriptors. */
-export type KnownValues = (smiles: string) => Record<string, number | undefined> | undefined;
-
-/** Value names over all entries, the total score first. */
-export function shortlistColumns(entries: readonly ShortlistEntry[], known?: KnownValues): string[] {
-  const names = new Set<string>();
-  for (const e of entries) {
-    for (const [k, v] of Object.entries({ ...e.values, ...known?.(e.smiles) })) if (typeof v === "number") names.add(k);
-  }
-  return [...names].sort((a, b) => (a === "Score" ? -1 : b === "Score" ? 1 : 0));
-}
-
-/** Each entry's values, newer knowledge winning over what was stored when starred. */
-export function shortlistValues(entry: ShortlistEntry, known?: KnownValues): Record<string, number> {
-  const out: Record<string, number> = { ...entry.values };
-  for (const [k, v] of Object.entries(known?.(entry.smiles) ?? {})) if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
-  return out;
-}
-
-export function shortlistSheet(entries: readonly ShortlistEntry[], known?: KnownValues): Sheet {
-  const values = shortlistColumns(entries, known);
-  return {
-    columns: ["smiles", "label", "source", ...values],
-    rows: entries.map((e) => {
-      const v = shortlistValues(e, known);
-      const row: Record<string, Cell> = { smiles: e.smiles, label: e.label ?? null, source: e.source ?? null };
-      for (const name of values) row[name] = v[name] ?? null;
-      return row;
-    }),
-  };
-}
-
-export function shortlistSdf(entries: readonly ShortlistEntry[], molblock: (smiles: string) => string | null, known?: KnownValues): string {
-  const sheet = shortlistSheet(entries, known);
-  return toSdf(entries.map((e, i) => ({ molblock: molblock(e.smiles), title: e.label ?? `shortlist ${i + 1}`, fields: sheet.rows[i] })));
-}
+// -- Prompts -----------------------------------------------------------------
 
 /** A composer prompt for the agent; the user edits and sends it. */
 export function shortlistPrompt(entries: readonly ShortlistEntry[]): string {

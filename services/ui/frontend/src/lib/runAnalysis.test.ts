@@ -6,6 +6,7 @@ import {
   autoScale,
   axisTicks,
   bandwidth,
+  candidateEndpoints,
   colourDomain,
   colourScale,
   describeEndpoint,
@@ -78,6 +79,24 @@ describe("moleculesOf", () => {
     const m = moleculesOf(parseRunResults(""));
     expect(m.n).toBe(0);
     expect(m.lastStep).toBe(0);
+  });
+});
+
+describe("candidateEndpoints", () => {
+  it("describes top candidates as the CSV's endpoints are described", () => {
+    const d = candidateEndpoints([
+      { total: 0.8, components: [{ name: "Boltz affinity", transformed: 0.6, raw: 0.3 }, { name: "Pose quality", transformed: 0.9, raw: null }] },
+      { total: 0.6, components: [{ name: "Boltz affinity", transformed: 0.5, raw: -1.5 }] },
+    ]);
+    expect(d.endpoints.map(heading)).toEqual(["Total", "Affinity (pIC50)", "Pose quality (score)"]);
+    expect(Array.from(d.values.get(TOTAL)!)).toEqual([0.8, 0.6]);
+    expect(Array.from(d.values.get("Boltz affinity")!)).toEqual([5.7, 7.5]);
+    expect(Array.from(d.scores.get("Boltz affinity")!)).toEqual([0.6, 0.5]);
+    expect(Number.isNaN(d.values.get("Pose quality")![1])).toBe(true);
+  });
+
+  it("leaves the total out when no candidate has one", () => {
+    expect(candidateEndpoints([{ total: null, components: [] }]).endpoints).toEqual([]);
   });
 });
 
