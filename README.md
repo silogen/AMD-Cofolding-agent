@@ -176,6 +176,11 @@ cd dd_agentic
 git clone https://github.com/MolecularAI/REINVENT4.git   # native scoring + RL
 git clone https://github.com/jwohlwend/boltz.git boltz2   # cofolding + affinity
 git clone https://github.com/maabuu/posebusters.git       # pose validation
+
+# The versions the images are tested with
+git -C REINVENT4 checkout -q 3cf206e
+git -C boltz2 checkout -q b1ebfc4
+git -C posebusters checkout -q 5fa994f
 ```
 
 The ADMET and RetroDMTA services need trained model weights, distributed as a separate archive rather than in git. Unzip it so that `models/admet/` and `models/retrodmta/` exist — the Dockerfiles bake them into the images at build time:
