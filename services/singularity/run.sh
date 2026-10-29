@@ -195,6 +195,14 @@ for row in "${INSTANCES[@]}"; do
             opts+=(--env "BOLTZ_WORKERS_PER_GPU=${BOLTZ_WORKERS_PER_GPU}")
         fi
     fi
+    # The predictor's /score and /predict are sync FastAPI handlers, so they
+    # run on a threadpool thread, and forking the DataLoader's workers off a
+    # non-main thread deadlocks: the server waits on a futex while its
+    # pt_data_workers poll, and every request hangs until the caller gives up.
+    # Loading in-process costs little on CPU and cannot deadlock.
+    if [ "${name}" = "admet-predictor" ]; then
+        opts+=(--env "PRED_LOADER_WORKERS=${PRED_LOADER_WORKERS:-0}")
+    fi
     # The image installs the profiler package at build time; bind the checkout
     # over it so profiler fixes deploy without a rebuild.
     if [ "${name}" = "interaction-profiler" ]; then
